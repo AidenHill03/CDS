@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcdx.a CMakeFiles/cdx.dir/src/renderer.cpp.o
+/usr/bin/ranlib libcdx.a
