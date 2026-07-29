@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/cdx_test.dir/test/test_renderer.cpp.o -o cdx_test  libcdx.a
