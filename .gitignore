@@ -1,0 +1,36 @@
+# ---- build artifacts ----
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# ---- MATLAB ----
+*.mex*
+*.asv
+*.slxc
+slprj/
+
+# ---- Python (for P2 onward) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+dist/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- outputs ----
+*.mp4
+*.avi
+*.png
+!docs/**/*.png
