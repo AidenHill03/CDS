@@ -5,7 +5,9 @@
 // is the numerics core that the Python bindings and eventual Qt UI sit on.
 //
 // Design notes
-//   * Map is a small value type: family + parameter. Copyable, cheap.
+//   * Map is a small value type: family + parameter. Copyable, cheap -- even
+//     for Family::Custom, which carries a RationalMap via shared_ptr rather
+//     than by value, so copying a Map is always just a refcount bump.
 //   * Renderer holds map + viewport + settings and produces Images. Keeping
 //     it an object (rather than free functions with long argument lists)
 //     gives a natural home for state that later features need to retain --
@@ -20,8 +22,11 @@
 // =============================================================================
 #pragma once
 
+#include "cdx/rational.hpp"
+
 #include <complex>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,8 +35,15 @@ namespace cdx {
 using Cplx = std::complex<double>;
 
 // -----------------------------------------------------------------------------
-// Map families the core implements. Adding a family means adding an enumerator,
-// a case in Map::step, its degree, and its critical point.
+// Map families the core implements. Adding a built-in family means adding an
+// enumerator, a case in Map::step_with, its degree, and its critical point.
+//
+// Custom is different: it carries no fixed formula of its own. A Map with
+// family() == Custom holds a RationalMap (see Map::custom()) and every
+// family-keyed operation defers to that object's eval/deriv/critical_points
+// instead. It exists so a user-edited RationalMap can be rendered through
+// exactly the same Renderer as the built-ins, without the built-ins paying
+// any indirection cost -- see the note on step_with_param below.
 // -----------------------------------------------------------------------------
 enum class Family {
     Quadratic,   // z^2 + a          (Mandelbrot / quadratic Julia)
@@ -39,23 +51,34 @@ enum class Family {
     Quintic,     // z^5 + a
     McMullen2,   // z^2 + a/z^2
     McMullen3,   // z^3 + a/z^3
-    Newton3      // Newton map of z^3 - 1  (parameter unused)
+    Newton3,     // Newton map of z^3 - 1  (parameter unused)
+    Custom       // a general RationalMap; see Map::custom()
 };
 
 std::string to_string(Family f);
 bool        family_from_string(const std::string& s, Family& out);
 
 // -----------------------------------------------------------------------------
-// A concrete map: a family with its parameter bound.
+// A concrete map: a family with its parameter bound, or (for Custom) a
+// RationalMap with its parameter bound.
 // -----------------------------------------------------------------------------
 class Map {
 public:
     Map() = default;
     Map(Family f, Cplx param) : family_(f), param_(param) {}
 
+    // Wraps a RationalMap as a Family::Custom map. `param` is the bound
+    // value of the map's own free parameter `a`, used by step()/degree()
+    // exactly as param_ is for a built-in family; render_parameter varies
+    // it per pixel regardless of what is bound here (see step_with_param).
+    static Map custom(RationalMap m, Cplx param = {0.0, 0.0});
+
     Family family() const { return family_; }
     Cplx   param()  const { return param_; }
     void   set_param(Cplx p) { param_ = p; }
+
+    // The wrapped RationalMap, or nullptr unless family() == Custom.
+    const RationalMap* custom_map() const { return custom_.get(); }
 
     // Degree of the map as a rational map of the sphere.
     int degree() const;
@@ -65,19 +88,40 @@ public:
     void step(double& zr, double& zi) const;
 
     // Same, but with an explicit parameter -- used by parameter-plane
-    // rendering, where the parameter varies per pixel.
+    // rendering, where the parameter varies per pixel. Static and keyed
+    // purely on Family because every built-in family's formula is fully
+    // determined by the enum value; it does NOT handle Custom, which has no
+    // formula outside its bound RationalMap instance. render_parameter uses
+    // the instance method step_with_param below instead, which does.
     static void step_with(Family f, double pr, double pi, double& zr, double& zi);
 
     // The critical point whose orbit determines parameter-plane membership,
     // for the given parameter value. For z^n + a this is always 0; for the
     // McMullen families the critical points satisfy z^(2n) = a and move with
     // the parameter (they are rotations of one another and share escape
-    // behaviour, so one representative suffices).
+    // behaviour, so one representative suffices). Same caveat as step_with:
+    // static, built-in-only. Use critical_point_at for Custom.
     static Cplx critical_point(Family f, Cplx param);
+
+    // Instance counterparts of step_with/critical_point that also handle
+    // Custom, by dispatching to the bound RationalMap's eval/critical_points
+    // instead of the static per-family formula. These are what
+    // Renderer::render_parameter calls; for a built-in family they just
+    // forward to the static functions above; for a Custom map they are the
+    // ONLY way to evaluate it at a parameter other than the one bound to
+    // this instance, since a Custom map's shape lives on the object, not in
+    // the Family enum.
+    //
+    // For Custom, critical_point_at picks the first critical point
+    // RationalMap::critical_points returns (see that method's documented
+    // scope and known limitation), or {0,0} if the map has none.
+    Cplx critical_point_at(Cplx p) const;
+    void step_with_param(Cplx p, double& zr, double& zi) const;
 
 private:
     Family family_ = Family::Quadratic;
     Cplx   param_  = {0.0, 0.0};
+    std::shared_ptr<const RationalMap> custom_;   // non-null iff family_ == Custom
 };
 
 // -----------------------------------------------------------------------------

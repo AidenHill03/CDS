@@ -28,10 +28,14 @@ std::string to_string(Family f) {
         case Family::McMullen2: return "mcmullen2";
         case Family::McMullen3: return "mcmullen3";
         case Family::Newton3:   return "newton3";
+        case Family::Custom:    return "custom";
     }
     return "unknown";
 }
 
+// Custom is deliberately not parseable here: it needs an actual RationalMap
+// payload, which a bare name string cannot carry. Construct it via
+// Map::custom() instead.
 bool family_from_string(const std::string& s, Family& out) {
     if (s == "quadratic" || s == "mandelbrot") { out = Family::Quadratic; return true; }
     if (s == "cubic"     || s == "multibrot3") { out = Family::Cubic;     return true; }
@@ -45,7 +49,16 @@ bool family_from_string(const std::string& s, Family& out) {
 // -----------------------------------------------------------------------------
 // Map
 // -----------------------------------------------------------------------------
+Map Map::custom(RationalMap m, Cplx param) {
+    Map out;
+    out.family_ = Family::Custom;
+    out.param_ = param;
+    out.custom_ = std::make_shared<const RationalMap>(std::move(m));
+    return out;
+}
+
 int Map::degree() const {
+    if (family_ == Family::Custom) return custom_->degree(param_);
     switch (family_) {
         case Family::Quadratic: return 2;
         case Family::Cubic:     return 3;
@@ -53,6 +66,7 @@ int Map::degree() const {
         case Family::McMullen2: return 4;   // z^2 + a/z^2 has degree 2n = 4
         case Family::McMullen3: return 6;   // z^3 + a/z^3 has degree 2n = 6
         case Family::Newton3:   return 3;
+        case Family::Custom:    break;      // handled above
     }
     return 2;
 }
@@ -107,10 +121,23 @@ void Map::step_with(Family f, double pr, double pi, double& zr, double& zi) {
             zi = b - (ni * sr - nr * si) / den;
             return;
         }
+
+        // Unreachable in normal use: Map::step()/step_with_param() intercept
+        // Custom before it ever reaches this static, family-keyed function,
+        // since a Custom map's formula lives on the RationalMap instance,
+        // not in the enum value. No-op rather than corrupt zr/zi.
+        case Family::Custom:
+            return;
     }
 }
 
 void Map::step(double& zr, double& zi) const {
+    if (family_ == Family::Custom) {
+        const Cplx z = custom_->eval(Cplx(zr, zi), param_);
+        zr = z.real();
+        zi = z.imag();
+        return;
+    }
     step_with(family_, param_.real(), param_.imag(), zr, zi);
 }
 
@@ -133,8 +160,31 @@ Cplx Map::critical_point(Family f, Cplx param) {
         }
         case Family::Newton3:
             return {0.0, 0.0};                 // parameter-independent
+
+        // Unreachable in normal use; see the comment on the Custom case in
+        // step_with. Use critical_point_at for a Custom map.
+        case Family::Custom:
+            return {0.0, 0.0};
     }
     return {0.0, 0.0};
+}
+
+Cplx Map::critical_point_at(Cplx p) const {
+    if (family_ == Family::Custom) {
+        const std::vector<Cplx> cps = custom_->critical_points(p);
+        return cps.empty() ? Cplx(0.0, 0.0) : cps.front();
+    }
+    return critical_point(family_, p);
+}
+
+void Map::step_with_param(Cplx p, double& zr, double& zi) const {
+    if (family_ == Family::Custom) {
+        const Cplx z = custom_->eval(Cplx(zr, zi), p);
+        zr = z.real();
+        zi = z.imag();
+        return;
+    }
+    step_with(family_, p.real(), p.imag(), zr, zi);
 }
 
 // -----------------------------------------------------------------------------
@@ -240,19 +290,24 @@ Image Renderer::render_parameter() const {
     const int    res = view_.resolution;
     const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
-    const Family fam = map_.family();
     Image img(res, res);
 
+    // Goes through the instance methods critical_point_at/step_with_param
+    // rather than the static Map::critical_point/step_with used elsewhere in
+    // this file, because the parameter here is the PIXEL, not map_.param():
+    // for a Custom map, evaluating at an arbitrary parameter needs the
+    // bound RationalMap's actual terms, which only the instance has. For a
+    // built-in family these just forward straight to the static functions,
+    // so the fast path is unchanged apart from one cheap, predictable branch.
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx p  = view_.coord(col, row);      // the PIXEL is the parameter
-            const Cplx c0 = Map::critical_point(fam, p);
+            const Cplx c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
-            const double pr = p.real(), pi = p.imag();
             double out = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                Map::step_with(fam, pr, pi, zr, zi);
+                map_.step_with_param(p, zr, zi);
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {

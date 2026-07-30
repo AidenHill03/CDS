@@ -34,6 +34,9 @@ target_link_libraries(cdx_test_rational PRIVATE cdx_core)
 add_executable(cdx_test_roots test/test_roots.cpp)
 target_link_libraries(cdx_test_roots PRIVATE cdx_core)
 
+add_executable(cdx_test_custom test/test_custom.cpp)
+target_link_libraries(cdx_test_custom PRIVATE cdx_core)
+
 # ---- Python module (optional) ----------------------------------------------
 # Enable with:  cmake -B build -DCDX_BUILD_PYTHON=ON
 # Requires:     pip install pybind11
