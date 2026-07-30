@@ -7,18 +7,34 @@
 // the pixel data on the way out -- important because at 2000x2000 an image is
 // 32 MB and copying it would dominate the render time we worked to reduce.
 //
+// Also exposes the sandbox pieces -- RationalMap (with its PolyTerm/PoleTerm
+// term lists live-mutable from Python, not just readable), FamilyLibrary and
+// Expr -- so a custom map can be built, edited, saved and rendered without
+// leaving Python. Map::custom() wraps a RationalMap as a renderable Map,
+// same as the six built-in families.
+//
 // Build:  pip install pybind11 && cmake --build build
 // Use:    import cdx
 // =============================================================================
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/stl_bind.h>
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 
 #include "cdx/renderer.hpp"
+#include "cdx/expr.hpp"
 
 #include <memory>
 #include <stdexcept>
+
+// Opaque containers: without this, pybind11/stl.h would convert
+// poly_terms()/pole_terms() into a fresh Python list of COPIES on every
+// access, silently breaking in-place edits like
+// `rmap.poly_terms()[0].enabled = False`. Must come before PYBIND11_MODULE
+// and before any implicit std::vector<PolyTerm>/<PoleTerm> conversion.
+PYBIND11_MAKE_OPAQUE(std::vector<cdx::PolyTerm>);
+PYBIND11_MAKE_OPAQUE(std::vector<cdx::PoleTerm>);
 
 namespace py = pybind11;
 using namespace cdx;
@@ -69,10 +85,12 @@ PYBIND11_MODULE(cdx, m) {
         .value("Quintic",   Family::Quintic)
         .value("McMullen2", Family::McMullen2)
         .value("McMullen3", Family::McMullen3)
-        .value("Newton3",   Family::Newton3);
+        .value("Newton3",   Family::Newton3)
+        .value("Custom",    Family::Custom);
 
     m.def("family_from_name", &family_from_py, py::arg("name"),
-          "Resolve a family name ('mandelbrot', 'mcmullen3', ...) to a Family.");
+          "Resolve a family name ('mandelbrot', 'mcmullen3', ...) to a Family. "
+          "Custom maps are constructed via Map.custom(), not by name.");
 
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
@@ -83,16 +101,152 @@ PYBIND11_MODULE(cdx, m) {
              }),
              py::arg("family"), py::arg("param"),
              "Construct from a family name and parameter.")
+        .def_static("custom", &Map::custom,
+                    py::arg("rational_map"), py::arg("param") = Cplx{0.0, 0.0},
+                    "Wrap a RationalMap as a renderable Map (Family.Custom).")
         .def_property_readonly("family", &Map::family)
         .def_property("param", &Map::param, &Map::set_param)
         .def_property_readonly("degree", &Map::degree)
+        .def_property_readonly("custom_map",
+            [](const Map& mp) -> py::object {
+                const RationalMap* p = mp.custom_map();
+                return p ? py::cast(*p) : py::none();
+            },
+            "A COPY of the wrapped RationalMap, or None for a built-in family. "
+            "Edit the RationalMap before wrapping it, not after.")
         .def_static("critical_point", &Map::critical_point,
                     py::arg("family"), py::arg("param"),
-                    "Critical point governing parameter-plane membership.")
+                    "Critical point governing parameter-plane membership. "
+                    "Built-in families only; a Custom map's critical points "
+                    "come from its wrapped RationalMap.critical_points(a).")
         .def("__repr__", [](const Map& mp) {
+            if (mp.family() == Family::Custom) {
+                return "<cdx.Map custom '" + mp.custom_map()->name() + "' param=(" +
+                       std::to_string(mp.param().real()) + "," +
+                       std::to_string(mp.param().imag()) + ")>";
+            }
             return "<cdx.Map " + to_string(mp.family()) + " param=(" +
                    std::to_string(mp.param().real()) + "," +
                    std::to_string(mp.param().imag()) + ")>";
+        });
+
+    // ---- RationalMap sandbox ------------------------------------------------
+    py::bind_vector<std::vector<PolyTerm>>(m, "PolyTermList");
+    py::bind_vector<std::vector<PoleTerm>>(m, "PoleTermList");
+
+    py::class_<PolyTerm>(m, "PolyTerm")
+        .def(py::init<>())
+        .def_readwrite("coeff",       &PolyTerm::coeff)
+        .def_readwrite("exponent",    &PolyTerm::exponent)
+        .def_readwrite("param_power", &PolyTerm::param_power)
+        .def_readwrite("enabled",     &PolyTerm::enabled)
+        .def_readwrite("label",       &PolyTerm::label)
+        .def("effective_coeff", &PolyTerm::effective_coeff, py::arg("a"))
+        .def("__repr__", [](const PolyTerm& t) {
+            return "<cdx.PolyTerm exponent=" + std::to_string(t.exponent) +
+                   (t.enabled ? "" : " (disabled)") + ">";
+        });
+
+    py::class_<PoleTerm>(m, "PoleTerm")
+        .def(py::init<>())
+        .def_readwrite("location",           &PoleTerm::location)
+        .def_readwrite("strength",           &PoleTerm::strength)
+        .def_readwrite("order",              &PoleTerm::order)
+        .def_readwrite("param_power",        &PoleTerm::param_power)
+        .def_readwrite("enabled",            &PoleTerm::enabled)
+        .def_readwrite("location_is_param",  &PoleTerm::location_is_param)
+        .def_readwrite("label",              &PoleTerm::label)
+        .def("effective_strength", &PoleTerm::effective_strength, py::arg("a"))
+        .def("effective_location", &PoleTerm::effective_location, py::arg("a"))
+        .def("__repr__", [](const PoleTerm& t) {
+            return "<cdx.PoleTerm order=" + std::to_string(t.order) +
+                   (t.enabled ? "" : " (disabled)") + ">";
+        });
+
+    py::class_<RationalMap>(m, "RationalMap")
+        .def(py::init<>())
+        .def(py::init<std::string>(), py::arg("name"))
+        .def_property("name",  &RationalMap::name,  &RationalMap::set_name)
+        .def_property("notes", &RationalMap::notes, &RationalMap::set_notes)
+        .def("add_poly", &RationalMap::add_poly,
+             py::arg("coeff"), py::arg("exponent"), py::arg("param_power") = 0,
+             py::arg("label") = std::string())
+        .def("add_pole", &RationalMap::add_pole,
+             py::arg("location"), py::arg("strength"), py::arg("order") = 1,
+             py::arg("param_power") = 0, py::arg("label") = std::string())
+        .def("remove_poly", &RationalMap::remove_poly, py::arg("i"))
+        .def("remove_pole", &RationalMap::remove_pole, py::arg("i"))
+        .def("clear", &RationalMap::clear)
+        // reference_internal: keeps the RationalMap alive as long as Python
+        // holds the returned term list, and (via the opaque bindings above)
+        // aliases the actual storage rather than a snapshot copy.
+        .def("poly_terms",
+             static_cast<std::vector<PolyTerm>& (RationalMap::*)()>(&RationalMap::poly_terms),
+             py::return_value_policy::reference_internal)
+        .def("pole_terms",
+             static_cast<std::vector<PoleTerm>& (RationalMap::*)()>(&RationalMap::pole_terms),
+             py::return_value_policy::reference_internal)
+        .def("eval",  &RationalMap::eval,  py::arg("z"), py::arg("a"))
+        .def("deriv", &RationalMap::deriv, py::arg("z"), py::arg("a"))
+        .def("degree", &RationalMap::degree, py::arg("a"))
+        .def("pole_locations", &RationalMap::pole_locations, py::arg("a"))
+        .def("critical_points", &RationalMap::critical_points, py::arg("a"),
+             "Ordinary critical points (zeros of the derivative away from any "
+             "pole); see the C++ doc comment for the documented scope limit "
+             "around poles of order >= 2.")
+        .def("to_formula", &RationalMap::to_formula)
+        .def("serialize", &RationalMap::serialize)
+        .def_static("deserialize", [](const std::string& text) {
+                 RationalMap out;
+                 std::string err;
+                 if (!RationalMap::deserialize(text, out, err))
+                     throw std::invalid_argument(err);
+                 return out;
+             }, py::arg("text"))
+        .def_static("mandelbrot",   &RationalMap::mandelbrot)
+        .def_static("multibrot",    &RationalMap::multibrot, py::arg("n"))
+        .def_static("mcmullen",     &RationalMap::mcmullen, py::arg("n"))
+        .def_static("newton_cubic", &RationalMap::newton_cubic)
+        .def("__repr__", [](const RationalMap& r) {
+            return "<cdx.RationalMap '" + r.name() + "': " + r.to_formula() + ">";
+        });
+
+    py::class_<FamilyLibrary>(m, "FamilyLibrary")
+        .def(py::init<>())
+        .def("add", &FamilyLibrary::add, py::arg("map"))
+        .def("remove", &FamilyLibrary::remove, py::arg("name"))
+        .def("find", [](const FamilyLibrary& lib, const std::string& name) -> py::object {
+                 const RationalMap* p = lib.find(name);
+                 return p ? py::cast(*p) : py::none();
+             }, py::arg("name"))
+        .def("names", &FamilyLibrary::names)
+        .def("__len__", &FamilyLibrary::size)
+        .def("serialize", &FamilyLibrary::serialize)
+        .def_static("deserialize", [](const std::string& text) {
+                 FamilyLibrary out;
+                 std::string err;
+                 if (!FamilyLibrary::deserialize(text, out, err))
+                     throw std::invalid_argument(err);
+                 return out;
+             }, py::arg("text"))
+        .def_static("with_defaults", &FamilyLibrary::with_defaults);
+
+    // ---- Expr ----------------------------------------------------------------
+    py::class_<Expr>(m, "Expr")
+        .def(py::init<>())
+        .def("compile", [](Expr& e, const std::string& src) {
+                 std::string err;
+                 if (!e.compile(src, err)) throw std::invalid_argument(err);
+             }, py::arg("source"),
+             "Compiles a formula in z and a (e.g. 'z^5 + a/z^2 - 0.3'). "
+             "Raises ValueError with the parser's message on failure.")
+        .def_property_readonly("valid", &Expr::valid)
+        .def_property_readonly("source", &Expr::source)
+        .def_property_readonly("stack_depth", &Expr::stack_depth)
+        .def("__call__", [](const Expr& e, Cplx z, Cplx a) { return e(z, a); },
+             py::arg("z"), py::arg("a"))
+        .def("__repr__", [](const Expr& e) {
+            return "<cdx.Expr '" + e.source() + "'>";
         });
 
     // ---- Viewport ----------------------------------------------------------
