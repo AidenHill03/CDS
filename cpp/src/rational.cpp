@@ -3,6 +3,8 @@
 // =============================================================================
 #include "cdx/rational.hpp"
 
+#include "cdx/roots.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -10,6 +12,116 @@
 namespace cdx {
 
 namespace {
+
+// -----------------------------------------------------------------------------
+// Polynomial-algebra helpers for critical_points(). Plain ascending-order
+// coefficient vectors (same convention as cdx::Polynomial), independent of
+// RationalMap's term types so they work equally on R's own terms or on a
+// transformed term list (e.g. the derivative's).
+// -----------------------------------------------------------------------------
+
+std::vector<Cplx> poly_mul(const std::vector<Cplx>& a, const std::vector<Cplx>& b) {
+    if (a.empty() || b.empty()) return {};
+    std::vector<Cplx> out(a.size() + b.size() - 1, Cplx(0.0, 0.0));
+    for (std::size_t i = 0; i < a.size(); ++i)
+        for (std::size_t j = 0; j < b.size(); ++j)
+            out[i + j] += a[i] * b[j];
+    return out;
+}
+
+std::vector<Cplx> poly_add(const std::vector<Cplx>& a, const std::vector<Cplx>& b) {
+    std::vector<Cplx> out(std::max(a.size(), b.size()), Cplx(0.0, 0.0));
+    for (std::size_t i = 0; i < a.size(); ++i) out[i] += a[i];
+    for (std::size_t i = 0; i < b.size(); ++i) out[i] += b[i];
+    return out;
+}
+
+// Multiply by (z - p), growing the degree by one.
+std::vector<Cplx> mul_linear(const std::vector<Cplx>& c, Cplx p) {
+    std::vector<Cplx> out(c.size() + 1, Cplx(0.0, 0.0));
+    for (std::size_t k = 0; k < c.size(); ++k) {
+        out[k + 1] += c[k];
+        out[k]     -= p * c[k];
+    }
+    return out;
+}
+
+std::vector<Cplx> linear_power(Cplx p, int m) {
+    std::vector<Cplx> c = {Cplx(1.0, 0.0)};
+    for (int i = 0; i < m; ++i) c = mul_linear(c, p);
+    return c;
+}
+
+// Multiply by z^k: prepend k zero coefficients.
+std::vector<Cplx> poly_shift(const std::vector<Cplx>& a, int k) {
+    std::vector<Cplx> out(a.size() + static_cast<std::size_t>(k), Cplx(0.0, 0.0));
+    for (std::size_t i = 0; i < a.size(); ++i) out[i + static_cast<std::size_t>(k)] = a[i];
+    return out;
+}
+
+// A term c*z^e (already evaluated at the bound parameter, already filtered
+// for `enabled`) contributing to a polynomial sum.
+struct Monomial {
+    Cplx coeff;
+    int  exponent;   // may be negative
+};
+
+// A pole term s/(z-p)^m (already evaluated, already filtered), contributing
+// to the same sum.
+struct PoleFactor {
+    Cplx location;
+    int  order;
+    Cplx strength;
+};
+
+// Numerator N(z) of SUM(monomials) + SUM(poles), expressed over the common
+// denominator D(z) = z^origin_order * prod_j (z - poles[j].location)^order,
+// where origin_order absorbs any negative monomial exponents. This is a
+// valid (not necessarily reduced) common denominator: if two pole factors
+// share a location, D just carries that factor twice, which is still
+// algebraically correct -- any spurious extra root that introduces at that
+// location gets filtered out by critical_points()'s pole-exclusion pass
+// regardless of the order computed there.
+std::vector<Cplx> clear_denominators(const std::vector<Monomial>& monomials,
+                                     const std::vector<PoleFactor>& poles) {
+    int min_neg = 0;
+    for (const auto& m : monomials)
+        if (m.exponent < min_neg) min_neg = m.exponent;
+    const int origin_order = -min_neg;
+
+    std::vector<Cplx> pole_product = {Cplx(1.0, 0.0)};
+    for (const auto& f : poles)
+        pole_product = poly_mul(pole_product, linear_power(f.location, f.order));
+
+    int max_shifted = origin_order;
+    for (const auto& m : monomials)
+        max_shifted = std::max(max_shifted, m.exponent + origin_order);
+    std::vector<Cplx> shifted_monomials(static_cast<std::size_t>(max_shifted) + 1,
+                                        Cplx(0.0, 0.0));
+    for (const auto& m : monomials) {
+        const int idx = m.exponent + origin_order;   // always >= 0 by construction
+        shifted_monomials[static_cast<std::size_t>(idx)] += m.coeff;
+    }
+    std::vector<Cplx> numerator = poly_mul(shifted_monomials, pole_product);
+
+    for (std::size_t j = 0; j < poles.size(); ++j) {
+        std::vector<Cplx> excl = {Cplx(1.0, 0.0)};
+        for (std::size_t l = 0; l < poles.size(); ++l) {
+            if (l == j) continue;
+            excl = poly_mul(excl, linear_power(poles[l].location, poles[l].order));
+        }
+        excl = poly_shift(excl, origin_order);
+        for (Cplx& v : excl) v *= poles[j].strength;
+        numerator = poly_add(numerator, excl);
+    }
+    return numerator;
+}
+
+// Roots within this fraction of a pole's own magnitude are treated as
+// artifacts of clearing denominators rather than genuine critical points.
+// Matches RenderSettings::tol's default -- both are "how close counts as
+// the same point" thresholds at the same natural scale for this project.
+constexpr double kPoleExclRelTol = 1e-6;
 
 Cplx ipow(Cplx b, int n) {
     if (n == 0) return Cplx(1.0, 0.0);
@@ -157,6 +269,38 @@ std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
     }
     for (const auto& t : poly_) {
         if (t.enabled && t.exponent < 0) { push_unique(Cplx(0.0, 0.0)); break; }
+    }
+    return out;
+}
+
+std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
+    // Transform the term lists into the derivative's: d/dz[c z^e] = c e
+    // z^(e-1); d/dz[s (z-p)^-m] = -m s (z-p)^-(m+1). Same shape deriv() uses.
+    std::vector<Monomial> dpolys;
+    for (const auto& t : poly_) {
+        if (!t.enabled || t.exponent == 0) continue;
+        dpolys.push_back({t.effective_coeff(a) * static_cast<double>(t.exponent),
+                          t.exponent - 1});
+    }
+    std::vector<PoleFactor> dpoles;
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        dpoles.push_back({t.effective_location(a), t.order + 1,
+                          -static_cast<double>(t.order) * t.effective_strength(a)});
+    }
+
+    const std::vector<Cplx> numerator = clear_denominators(dpolys, dpoles);
+    const std::vector<Cplx> candidates = roots(Polynomial{numerator});
+
+    const std::vector<Cplx> poles = pole_locations(a);
+    std::vector<Cplx> out;
+    for (Cplx z : candidates) {
+        bool at_pole = false;
+        for (Cplx p : poles) {
+            const double scale = std::max(1.0, std::abs(p));
+            if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+        }
+        if (!at_pole) out.push_back(z);
     }
     return out;
 }

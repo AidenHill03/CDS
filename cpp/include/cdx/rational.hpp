@@ -114,6 +114,32 @@ public:
     // origin implied by a negative polynomial exponent.
     std::vector<Cplx> pole_locations(Cplx a) const;
 
+    // Critical points: the finite points where deriv(z, a) == 0, found by
+    // clearing denominators and rooting the resulting polynomial (see
+    // cdx/roots.hpp). Built-in families get this in closed form; this is
+    // what makes it available for an arbitrary user-edited map.
+    //
+    // SCOPE. This finds ordinary critical points -- zeros of the derivative
+    // away from any pole -- which is what render_parameter needs to seed a
+    // critical orbit. It does NOT include poles of order >= 2, which are
+    // also critical points in the sphere-first sense (a pole of order m
+    // behaves as an m-to-1 map near it, same as an ordinary critical point
+    // of local degree m), nor infinity itself when the map is critical
+    // there. For most families -- including every built-in one -- the
+    // interesting, non-trivial critical points are the ordinary ones and
+    // the pole/infinity ones are parameter-independent and dynamically
+    // trivial (e.g. the McMullen families' pole at the origin always maps
+    // straight to the superattracting fixed point at infinity). That is not
+    // universal, though: a hand-built Newton-map-style RationalMap has it
+    // backwards, with the informative critical point AT a pole and the
+    // ordinary zeros landing on trivial superattracting fixed points. This
+    // function will not discover that pole-critical-point; a caller relying
+    // on it for a map of that shape needs to know that.
+    //
+    // Roots are returned with multiplicity (see cdx::roots) and with no
+    // particular ordering guarantee.
+    std::vector<Cplx> critical_points(Cplx a) const;
+
     // Human-readable formula, e.g. "z^3 + a/z^3".
     std::string to_formula() const;
 

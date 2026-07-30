@@ -163,6 +163,85 @@ int main() {
               "a negative polynomial exponent implies a pole at the origin");
     }
 
+    // ---- critical_points: matches closed forms for the built-in shapes -------
+    std::printf("\ncritical_points:\n");
+    {
+        RationalMap m = RationalMap::mandelbrot();
+        auto cp = m.critical_points({0.3, -0.7});
+        check(cp.size() == 1 && close(cp[0], Cplx(0, 0), 1e-9),
+              "mandelbrot: single critical point at 0 (deriv = 2z)");
+    }
+    for (int n : {3, 5}) {
+        RationalMap m = RationalMap::multibrot(n);
+        auto cp = m.critical_points({0.3, -0.7});
+        // deriv = n*z^(n-1): a root at 0 of multiplicity n-1. Multiple-root
+        // convergence is looser than the simple-root case above (same
+        // caveat as test_roots.cpp's triple-root case).
+        bool all_near_zero = true;
+        for (Cplx z : cp) if (std::abs(z) > 1e-4) all_near_zero = false;
+        char buf[80];
+        std::snprintf(buf, sizeof buf,
+                      "multibrot(%d): %d critical points, all at 0 (multiplicity %d)",
+                      n, n - 1, n - 1);
+        check(cp.size() == static_cast<std::size_t>(n - 1) && all_near_zero, buf);
+    }
+    {
+        RationalMap m = RationalMap::mcmullen(2);
+        const Cplx a{2.0, 1.0};
+        auto cp = m.critical_points(a);
+        check(cp.size() == 4, "mcmullen(2): 4 critical points (z^4 = a)");
+        bool fourth_powers_match = true;
+        for (Cplx z : cp)
+            if (std::abs(z * z * z * z - a) > 1e-6) fourth_powers_match = false;
+        check(fourth_powers_match, "mcmullen(2): every critical point's 4th power recovers a");
+        // the pole at the origin must NOT show up as a spurious critical point
+        bool none_at_pole = true;
+        for (Cplx z : cp) if (std::abs(z) < 1e-6) none_at_pole = false;
+        check(none_at_pole, "mcmullen(2): the pole at the origin is excluded");
+    }
+    {
+        // R(z) = 2/z, built from two redundant order-1 pole terms at the same
+        // location so clear_denominators() has to use an unreduced common
+        // denominator (z-0)^1 * (z-0)^1 rather than the minimal one. Its
+        // derivative -2/z^2 has no finite zero at all -- the only algebraic
+        // candidates clear_denominators() can produce coincide exactly with
+        // the pole itself, which is exactly what the pole-exclusion filter
+        // exists to catch.
+        RationalMap m("mobius");
+        m.add_pole({0, 0}, {1, 0}, 1);
+        m.add_pole({0, 0}, {1, 0}, 1);
+        auto cp = m.critical_points({0, 0});
+        check(cp.empty(),
+              "R(z)=2/z: spurious roots from an unreduced denominator are filtered as poles");
+    }
+    {
+        // KNOWN LIMITATION (documented on RationalMap::critical_points):
+        // newton_cubic's derivative is (2/3)(1 - z^-3), whose ordinary zeros
+        // are z^3=1 -- the three roots Newton's method converges to, which
+        // are themselves superattracting FIXED points and therefore
+        // dynamically trivial to iterate. The genuinely informative critical
+        // point for this map is the pole at the origin (Map::critical_point
+        // returns {0,0} for the built-in Newton3 for exactly this reason),
+        // which this function does not discover. This test pins down that
+        // gap so a future extension (poles of order >= 2 as sphere critical
+        // points) has a concrete regression to fix.
+        RationalMap m = RationalMap::newton_cubic();
+        auto cp = m.critical_points({0, 0});
+        const std::vector<Cplx> cube_roots_of_unity = {
+            {1.0, 0.0}, {-0.5, 0.8660254037844386}, {-0.5, -0.8660254037844386}};
+        check(cp.size() == 3, "newton_cubic: finds the 3 ordinary critical points");
+        bool matches_cube_roots = cp.size() == 3;
+        for (std::size_t i = 0; matches_cube_roots && i < cp.size(); ++i) {
+            bool found = false;
+            for (Cplx e : cube_roots_of_unity)
+                if (close(cp[i], e, 1e-6)) found = true;
+            if (!found) matches_cube_roots = false;
+        }
+        check(matches_cube_roots,
+              "newton_cubic: they are the trivial fixed points (cube roots of unity), "
+              "NOT the dynamically-informative pole at the origin");
+    }
+
     // ---- enabled/disabled terms ----------------------------------------------
     std::printf("\nenabled/disabled terms:\n");
     {
