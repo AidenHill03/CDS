@@ -15,15 +15,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 # ---- core library -----------------------------------------------------------
-add_library(cdx_core STATIC src/renderer.cpp)
+add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp)
 target_include_directories(cdx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 find_package(Threads REQUIRED)
 target_link_libraries(cdx_core PUBLIC Threads::Threads)
 
-# ---- C++ test ---------------------------------------------------------------
+# ---- C++ tests ----------------------------------------------------------------
 add_executable(cdx_test test/test_renderer.cpp)
 target_link_libraries(cdx_test PRIVATE cdx_core)
+
+add_executable(cdx_test_expr test/test_expr.cpp)
+target_link_libraries(cdx_test_expr PRIVATE cdx_core)
+
+add_executable(cdx_test_rational test/test_rational.cpp)
+target_link_libraries(cdx_test_rational PRIVATE cdx_core)
 
 # ---- Python module (optional) ----------------------------------------------
 # Enable with:  cmake -B build -DCDX_BUILD_PYTHON=ON
