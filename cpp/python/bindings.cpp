@@ -191,9 +191,16 @@ PYBIND11_MODULE(cdx, m) {
         .def("degree", &RationalMap::degree, py::arg("a"))
         .def("pole_locations", &RationalMap::pole_locations, py::arg("a"))
         .def("critical_points", &RationalMap::critical_points, py::arg("a"),
-             "Ordinary critical points (zeros of the derivative away from any "
-             "pole); see the C++ doc comment for the documented scope limit "
-             "around poles of order >= 2.")
+             "All critical points on the Riemann sphere, WITH multiplicity: "
+             "ordinary derivative zeros, each pole (multiplicity order-1), "
+             "and infinity (multiplicity |p-q|-1 when |p-q| >= 2). Total "
+             "count is 2*degree(a)-2 (Riemann-Hurwitz). Infinity is "
+             "complex(float('inf'), 0).")
+        .def("distinct_critical_points", &RationalMap::distinct_critical_points,
+             py::arg("a"), py::arg("rel_tol") = 1e-4,
+             "critical_points(a), deduplicated to one representative per "
+             "critical point -- what you want when seeding one orbit per "
+             "critical point rather than iterating multiplicity times.")
         .def("to_formula", &RationalMap::to_formula)
         .def("serialize", &RationalMap::serialize)
         .def_static("deserialize", [](const std::string& text) {

@@ -35,6 +35,15 @@ struct Polynomial {
     std::vector<Cplx> coeffs;
 };
 
+// Highest index k with |coeffs[k]| non-negligible relative to the
+// polynomial's own scale, or -1 if every coefficient is (identically or
+// relatively) zero. Exposed -- not just an internal step of roots() --
+// because callers building their own polynomials (e.g. RationalMap,
+// determining the true degree of a numerator or denominator it just
+// constructed) need the exact same "is this coefficient real or
+// cancellation noise" judgment call that roots() makes internally.
+int effective_degree(const Polynomial& p);
+
 // Finds all roots of `p` via the Aberth-Ehrlich method.
 //
 // Returns exactly effective_degree(p) roots, WITH MULTIPLICITY: a genuine

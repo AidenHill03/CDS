@@ -114,31 +114,61 @@ public:
     // origin implied by a negative polynomial exponent.
     std::vector<Cplx> pole_locations(Cplx a) const;
 
-    // Critical points: the finite points where deriv(z, a) == 0, found by
-    // clearing denominators and rooting the resulting polynomial (see
-    // cdx/roots.hpp). Built-in families get this in closed form; this is
-    // what makes it available for an arbitrary user-edited map.
+    // Critical points on the RIEMANN SPHERE -- the complete set, from all
+    // three sources a rational map can be critical at:
+    //   * ordinary points: zeros of the derivative away from any pole,
+    //     found by clearing denominators and rooting the resulting
+    //     polynomial (see cdx/roots.hpp);
+    //   * each pole of true local order m, which is itself critical (an
+    //     m-to-1 map near it, same shape as an ordinary critical point of
+    //     local degree m), contributing multiplicity m-1;
+    //   * infinity, when the map is critical there, contributing
+    //     multiplicity |p-q|-1, where p and q are the numerator and
+    //     denominator degrees after clearing denominators, whenever
+    //     |p-q| >= 2 (and only then -- |p-q| <= 1 means infinity maps
+    //     through with local degree 1, not critical).
+    // The point at infinity is represented as Cplx(inf, 0), matching
+    // Cycle's convention (renderer.hpp) -- this project is sphere-first
+    // throughout, and a map critical at infinity (which is most of the
+    // built-in polynomial families: z^n + a is critical there for any
+    // n >= 2) is not a special case to work around.
     //
-    // SCOPE. This finds ordinary critical points -- zeros of the derivative
-    // away from any pole -- which is what render_parameter needs to seed a
-    // critical orbit. It does NOT include poles of order >= 2, which are
-    // also critical points in the sphere-first sense (a pole of order m
-    // behaves as an m-to-1 map near it, same as an ordinary critical point
-    // of local degree m), nor infinity itself when the map is critical
-    // there. For most families -- including every built-in one -- the
-    // interesting, non-trivial critical points are the ordinary ones and
-    // the pole/infinity ones are parameter-independent and dynamically
-    // trivial (e.g. the McMullen families' pole at the origin always maps
-    // straight to the superattracting fixed point at infinity). That is not
-    // universal, though: a hand-built Newton-map-style RationalMap has it
-    // backwards, with the informative critical point AT a pole and the
-    // ordinary zeros landing on trivial superattracting fixed points. This
-    // function will not discover that pole-critical-point; a caller relying
-    // on it for a map of that shape needs to know that.
+    // For a degree-d map this is the complete set: the total count with
+    // multiplicity is exactly 2d-2 (Riemann-Hurwitz). That invariant is
+    // what the test suite checks, for every built-in family and for
+    // randomly generated sandbox maps, precisely because it catches any
+    // missing source for any map shape -- which is how the pole and
+    // infinity sources above came to be added: an earlier version of this
+    // function found only the ordinary points and silently undercounted.
     //
-    // Roots are returned with multiplicity (see cdx::roots) and with no
-    // particular ordering guarantee.
+    // MULTIPLICITY. Returned with multiplicity, like cdx::roots(): a
+    // multiplicity-k critical point appears k times (numerically close but
+    // not necessarily identical estimates for the ordinary/derivative-root
+    // case, since those come from Aberth-Ehrlich iteration; the exact same
+    // value repeated for the pole/infinity cases, since those multiplicities
+    // are known exactly rather than found numerically). Multiplicity is
+    // real information for some purposes and noise for others -- e.g.
+    // seeding one critical orbit per critical point for attractor
+    // discovery, where iterating the same point twice just rediscovers the
+    // same attractor a second time. Use distinct_critical_points() below
+    // for that case; this function does not discard the information.
+    //
+    // No particular ordering guarantee.
     std::vector<Cplx> critical_points(Cplx a) const;
+
+    // The same critical points, deduplicated: points within rel_tol of
+    // each other (relative to their own magnitude; Cplx(inf,*) matches only
+    // other infinite points, never a finite one) collapse to a single
+    // representative. What a consumer seeding one orbit per critical point
+    // wants -- see the multiplicity note on critical_points() above.
+    //
+    // rel_tol defaults looser than this codebase's usual "same point"
+    // threshold (RenderSettings::tol's 1e-6) because Aberth-Ehrlich's
+    // convergence on a genuine multiple root degrades from cubic to linear,
+    // so two estimates of a legitimately repeated root can end up further
+    // apart than that -- see cdx::roots()'s documentation of the same
+    // effect.
+    std::vector<Cplx> distinct_critical_points(Cplx a, double rel_tol = 1e-4) const;
 
     // Human-readable formula, e.g. "z^3 + a/z^3".
     std::string to_formula() const;

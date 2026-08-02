@@ -31,21 +31,6 @@ constexpr int kMaxIterations = 100;
 // as renderer.cpp's kTinyDen guards on near-zero denominators.
 constexpr double kTinyDen = 1e-300;
 
-// Highest index k with |coeffs[k]| non-negligible relative to the
-// polynomial's own scale, or -1 if every coefficient is (identically or
-// relatively) zero.
-int effective_degree(const std::vector<Cplx>& c) {
-    double maxabs = 0.0;
-    for (const Cplx& v : c) maxabs = std::max(maxabs, std::abs(v));
-    if (maxabs == 0.0) return -1;
-
-    const double tol = kTrimRelTol * maxabs;
-    for (int k = static_cast<int>(c.size()) - 1; k >= 0; --k) {
-        if (std::abs(c[k]) >= tol) return k;
-    }
-    return -1;
-}
-
 // Evaluates p(z) and p'(z) together via Horner's method / synthetic
 // division, one pass over ascending-order coefficients c[0..n].
 std::pair<Cplx, Cplx> eval_with_deriv(const std::vector<Cplx>& c, Cplx z) {
@@ -62,10 +47,24 @@ std::pair<Cplx, Cplx> eval_with_deriv(const std::vector<Cplx>& c, Cplx z) {
 }  // namespace
 
 // -----------------------------------------------------------------------------
+int effective_degree(const Polynomial& p) {
+    const std::vector<Cplx>& c = p.coeffs;
+    double maxabs = 0.0;
+    for (const Cplx& v : c) maxabs = std::max(maxabs, std::abs(v));
+    if (maxabs == 0.0) return -1;
+
+    const double tol = kTrimRelTol * maxabs;
+    for (int k = static_cast<int>(c.size()) - 1; k >= 0; --k) {
+        if (std::abs(c[k]) >= tol) return k;
+    }
+    return -1;
+}
+
+// -----------------------------------------------------------------------------
 std::vector<Cplx> roots(const Polynomial& poly, bool* converged) {
     if (converged) *converged = true;
 
-    const int deg = effective_degree(poly.coeffs);
+    const int deg = effective_degree(poly);
     if (deg <= 0) return {};   // identically zero, or a nonzero constant
 
     // Trim to the effective degree and normalize to monic form. This does

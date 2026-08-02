@@ -7,8 +7,10 @@
 // =============================================================================
 #include "cdx/rational.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -164,82 +166,221 @@ int main() {
     }
 
     // ---- critical_points: matches closed forms for the built-in shapes -------
+    // Total count includes ALL THREE sources -- ordinary derivative zeros,
+    // poles (multiplicity order-1), and infinity (multiplicity |p-q|-1 when
+    // |p-q| >= 2) -- so every case below is cross-checked against
+    // Riemann-Hurwitz (total == 2*degree-2) as well as its specific shape.
     std::printf("\ncritical_points:\n");
     {
         RationalMap m = RationalMap::mandelbrot();
-        auto cp = m.critical_points({0.3, -0.7});
-        check(cp.size() == 1 && close(cp[0], Cplx(0, 0), 1e-9),
-              "mandelbrot: single critical point at 0 (deriv = 2z)");
+        const Cplx a{0.3, -0.7};
+        auto cp = m.critical_points(a);
+        // deriv = 2z: ordinary critical point at 0. No poles. |p-q| = |2-0|
+        // = 2, so infinity is critical too (multiplicity 1).
+        check(cp.size() == 2, "mandelbrot: 2 critical points (0 and infinity)");
+        check(static_cast<int>(cp.size()) == 2 * m.degree(a) - 2,
+              "mandelbrot: total multiplicity == 2d-2");
+        int n_zero = 0, n_inf = 0;
+        for (Cplx z : cp) {
+            if (std::isinf(z.real())) ++n_inf;
+            else if (close(z, Cplx(0, 0), 1e-9)) ++n_zero;
+        }
+        check(n_zero == 1 && n_inf == 1, "mandelbrot: one at 0, one at infinity");
     }
     for (int n : {3, 5}) {
         RationalMap m = RationalMap::multibrot(n);
-        auto cp = m.critical_points({0.3, -0.7});
-        // deriv = n*z^(n-1): a root at 0 of multiplicity n-1. Multiple-root
-        // convergence is looser than the simple-root case above (same
-        // caveat as test_roots.cpp's triple-root case).
-        bool all_near_zero = true;
-        for (Cplx z : cp) if (std::abs(z) > 1e-4) all_near_zero = false;
-        char buf[80];
+        const Cplx a{0.3, -0.7};
+        auto cp = m.critical_points(a);
+        // deriv = n*z^(n-1): a root at 0 of multiplicity n-1 (multiple-root
+        // convergence is looser than a simple root, same caveat as
+        // test_roots.cpp's triple-root case). |p-q| = n, so infinity
+        // contributes another n-1.
+        int n_zero = 0, n_inf = 0;
+        for (Cplx z : cp) {
+            if (std::isinf(z.real())) ++n_inf;
+            else if (std::abs(z) < 1e-4) ++n_zero;
+        }
+        char buf[100];
         std::snprintf(buf, sizeof buf,
-                      "multibrot(%d): %d critical points, all at 0 (multiplicity %d)",
-                      n, n - 1, n - 1);
-        check(cp.size() == static_cast<std::size_t>(n - 1) && all_near_zero, buf);
+                      "multibrot(%d): %d at 0, %d at infinity (both multiplicity %d)",
+                      n, n - 1, n - 1, n - 1);
+        check(n_zero == n - 1 && n_inf == n - 1, buf);
+        std::snprintf(buf, sizeof buf, "multibrot(%d): total multiplicity == 2d-2", n);
+        check(static_cast<int>(cp.size()) == 2 * m.degree(a) - 2, buf);
     }
     {
         RationalMap m = RationalMap::mcmullen(2);
         const Cplx a{2.0, 1.0};
         auto cp = m.critical_points(a);
-        check(cp.size() == 4, "mcmullen(2): 4 critical points (z^4 = a)");
-        bool fourth_powers_match = true;
-        for (Cplx z : cp)
-            if (std::abs(z * z * z * z - a) > 1e-6) fourth_powers_match = false;
-        check(fourth_powers_match, "mcmullen(2): every critical point's 4th power recovers a");
-        // the pole at the origin must NOT show up as a spurious critical point
-        bool none_at_pole = true;
-        for (Cplx z : cp) if (std::abs(z) < 1e-6) none_at_pole = false;
-        check(none_at_pole, "mcmullen(2): the pole at the origin is excluded");
+        // Ordinary: z^4 = a (4 points). Pole at 0 has true order 2 (from
+        // add_pole's order=n=2), contributing multiplicity 1. |p-q| =
+        // |4-2| = 2, so infinity contributes multiplicity 1 too. Total 6.
+        check(static_cast<int>(cp.size()) == 2 * m.degree(a) - 2,
+              "mcmullen(2): total multiplicity == 2d-2 (6)");
+        int n_fourth_power = 0, n_zero = 0, n_inf = 0;
+        for (Cplx z : cp) {
+            if (std::isinf(z.real())) ++n_inf;
+            else if (std::abs(z) < 1e-6) ++n_zero;
+            else if (std::abs(z * z * z * z - a) < 1e-6) ++n_fourth_power;
+        }
+        check(n_fourth_power == 4, "mcmullen(2): 4 ordinary points with z^4 == a");
+        check(n_zero == 1, "mcmullen(2): the pole at the origin now IS included (multiplicity 1)");
+        check(n_inf == 1, "mcmullen(2): infinity is critical too (multiplicity 1)");
+    }
+    {
+        RationalMap m = RationalMap::mcmullen(3);
+        const Cplx a{2.0, 1.0};
+        auto cp = m.critical_points(a);
+        // Ordinary: z^6 = a (6). Pole at 0 order 3 -> multiplicity 2.
+        // |p-q| = |6-3| = 3 -> infinity multiplicity 2. Total 10.
+        check(static_cast<int>(cp.size()) == 2 * m.degree(a) - 2,
+              "mcmullen(3): total multiplicity == 2d-2 (10)");
+        int n_zero = 0, n_inf = 0;
+        for (Cplx z : cp) {
+            if (std::isinf(z.real())) ++n_inf;
+            else if (std::abs(z) < 1e-6) ++n_zero;
+        }
+        check(n_zero == 2, "mcmullen(3): pole at the origin has multiplicity 2");
+        check(n_inf == 2, "mcmullen(3): infinity has multiplicity 2");
     }
     {
         // R(z) = 2/z, built from two redundant order-1 pole terms at the same
         // location so clear_denominators() has to use an unreduced common
-        // denominator (z-0)^1 * (z-0)^1 rather than the minimal one. Its
-        // derivative -2/z^2 has no finite zero at all -- the only algebraic
-        // candidates clear_denominators() can produce coincide exactly with
-        // the pole itself, which is exactly what the pole-exclusion filter
-        // exists to catch.
+        // denominator (z-0)^1 * (z-0)^1 rather than the minimal one.
+        // Ordinary: derivative -2/z^2 has no finite zero. Pole: TRUE local
+        // order at 0 is 1 (a simple pole, despite being built from two
+        // order-1 terms -- vanishing_order() finds the actual combined
+        // behaviour of 2z/z^2 = 2/z, not the sum 1+1), so multiplicity 0.
+        // Infinity: this map's degree() is 2 (it does not reduce the
+        // redundant terms away), but critical_points()'s |p-q| is computed
+        // from the SAME unreduced construction on both sides, so the
+        // redundancy cancels out of the difference regardless: |1-2| = 1,
+        // not critical. So the fully correct answer is still zero critical
+        // points -- this is NOT checked against 2*degree()-2, since
+        // degree() itself doesn't reduce the redundancy (would claim d=2,
+        // 2d-2=2, which is simply the wrong degree for this construction).
         RationalMap m("mobius");
         m.add_pole({0, 0}, {1, 0}, 1);
         m.add_pole({0, 0}, {1, 0}, 1);
         auto cp = m.critical_points({0, 0});
         check(cp.empty(),
-              "R(z)=2/z: spurious roots from an unreduced denominator are filtered as poles");
+              "R(z)=2/z: correctly zero critical points despite the redundant construction");
     }
     {
-        // KNOWN LIMITATION (documented on RationalMap::critical_points):
-        // newton_cubic's derivative is (2/3)(1 - z^-3), whose ordinary zeros
-        // are z^3=1 -- the three roots Newton's method converges to, which
-        // are themselves superattracting FIXED points and therefore
-        // dynamically trivial to iterate. The genuinely informative critical
-        // point for this map is the pole at the origin (Map::critical_point
-        // returns {0,0} for the built-in Newton3 for exactly this reason),
-        // which this function does not discover. This test pins down that
-        // gap so a future extension (poles of order >= 2 as sphere critical
-        // points) has a concrete regression to fix.
         RationalMap m = RationalMap::newton_cubic();
-        auto cp = m.critical_points({0, 0});
+        const Cplx a{0, 0};
+        auto cp = m.critical_points(a);
+        // Ordinary: z^3=1, the three roots Newton's method converges to
+        // (superattracting fixed points). Pole at 0: true order 2 (from the
+        // z^-2 term), multiplicity 1 -- this is the dynamically informative
+        // one (Map::critical_point returns {0,0} for the built-in Newton3
+        // for exactly this reason). |p-q| = |3-2| = 1, so infinity is NOT
+        // critical here, matching the CLAUDE.md-adjacent fact that this is
+        // the case a naive "always count infinity" rule would get wrong.
+        check(static_cast<int>(cp.size()) == 2 * m.degree(a) - 2,
+              "newton_cubic: total multiplicity == 2d-2 (4)");
         const std::vector<Cplx> cube_roots_of_unity = {
             {1.0, 0.0}, {-0.5, 0.8660254037844386}, {-0.5, -0.8660254037844386}};
-        check(cp.size() == 3, "newton_cubic: finds the 3 ordinary critical points");
-        bool matches_cube_roots = cp.size() == 3;
-        for (std::size_t i = 0; matches_cube_roots && i < cp.size(); ++i) {
-            bool found = false;
+        int n_cube_root = 0, n_zero = 0, n_inf = 0;
+        for (Cplx z : cp) {
+            if (std::isinf(z.real())) { ++n_inf; continue; }
+            if (std::abs(z) < 1e-6) { ++n_zero; continue; }
             for (Cplx e : cube_roots_of_unity)
-                if (close(cp[i], e, 1e-6)) found = true;
-            if (!found) matches_cube_roots = false;
+                if (close(z, e, 1e-6)) ++n_cube_root;
         }
-        check(matches_cube_roots,
-              "newton_cubic: they are the trivial fixed points (cube roots of unity), "
-              "NOT the dynamically-informative pole at the origin");
+        check(n_cube_root == 3, "newton_cubic: the 3 trivial fixed points are still found");
+        check(n_zero == 1, "newton_cubic: the pole at the origin is now included");
+        check(n_inf == 0, "newton_cubic: infinity is correctly NOT critical (|p-q|=1)");
+    }
+
+    // ---- critical_points: Riemann-Hurwitz on randomly generated sandbox maps --
+    std::printf("\ncritical_points: Riemann-Hurwitz invariant on random sandbox maps:\n");
+    {
+        std::mt19937 rng(20260802);   // fixed seed: deterministic test
+        std::uniform_real_distribution<double> mag_dist(0.3, 2.0);
+        std::uniform_real_distribution<double> angle_dist(0.0, 6.28318530718);
+        std::uniform_int_distribution<int> poly_count_dist(1, 3);
+        std::uniform_int_distribution<int> pole_count_dist(1, 3);
+        std::uniform_int_distribution<int> exponent_dist(1, 5);
+        std::uniform_int_distribution<int> order_dist(1, 3);
+        auto random_cplx = [&]() {
+            const double r = mag_dist(rng), t = angle_dist(rng);
+            return Cplx(r * std::cos(t), r * std::sin(t));
+        };
+
+        bool all_ok = true;
+        for (int trial = 0; trial < 20; ++trial) {
+            // Positive, distinct exponents and mutually-distant, distinct
+            // pole locations only: overlapping locations make degree()
+            // itself under-report (see the Mobius case above), which would
+            // make this invariant check meaningless rather than wrong.
+            RationalMap m("random" + std::to_string(trial));
+            std::vector<int> used_exponents;
+            for (int i = 0, n = poly_count_dist(rng); i < n; ++i) {
+                int e;
+                do { e = exponent_dist(rng); }
+                while (std::find(used_exponents.begin(), used_exponents.end(), e) !=
+                       used_exponents.end());
+                used_exponents.push_back(e);
+                m.add_poly(random_cplx(), e);
+            }
+            std::vector<Cplx> used_locations;
+            for (int i = 0, n = pole_count_dist(rng); i < n; ++i) {
+                Cplx loc;
+                bool far_enough;
+                do {
+                    const double r = 1.0 + mag_dist(rng), t = angle_dist(rng);
+                    loc = Cplx(r * std::cos(t), r * std::sin(t));
+                    far_enough = true;
+                    for (Cplx u : used_locations)
+                        if (std::abs(loc - u) < 0.5) far_enough = false;
+                } while (!far_enough);
+                used_locations.push_back(loc);
+                m.add_pole(loc, random_cplx(), order_dist(rng));
+            }
+
+            const Cplx a{0.0, 0.0};   // random maps never reference `a` (param_power == 0)
+            const int d = m.degree(a);
+            const auto cp = m.critical_points(a);
+            if (static_cast<int>(cp.size()) != 2 * d - 2) {
+                all_ok = false;
+                std::printf("  MISMATCH %s: formula=%s degree=%d found=%zu expected=%d\n",
+                            m.name().c_str(), m.to_formula().c_str(), d, cp.size(), 2 * d - 2);
+            }
+        }
+        check(all_ok, "20 random sandbox maps all satisfy total multiplicity == 2d-2");
+    }
+
+    // ---- distinct_critical_points: clusters multiplicity to one point each ---
+    std::printf("\ndistinct_critical_points:\n");
+    {
+        RationalMap m = RationalMap::multibrot(3);
+        const Cplx a{0.3, -0.7};
+        const auto cp = m.critical_points(a);
+        const auto dcp = m.distinct_critical_points(a);
+        check(cp.size() == 4, "multibrot(3): critical_points has multiplicity (4 total)");
+        check(dcp.size() == 2,
+              "multibrot(3): distinct_critical_points collapses to 2 (0 and infinity)");
+        int n_zero = 0, n_inf = 0;
+        for (Cplx z : dcp) {
+            if (std::isinf(z.real())) ++n_inf;
+            else if (std::abs(z) < 1e-4) ++n_zero;
+        }
+        check(n_zero == 1 && n_inf == 1, "multibrot(3): exactly one representative each");
+    }
+    {
+        // No multiplicity to collapse: distinct == critical_points here.
+        RationalMap m = RationalMap::mandelbrot();
+        const Cplx a{0.3, -0.7};
+        check(m.critical_points(a).size() == m.distinct_critical_points(a).size(),
+              "mandelbrot: nothing to collapse when every critical point is already simple");
+    }
+    {
+        // Explicit tolerance override still behaves sanely.
+        RationalMap m = RationalMap::multibrot(5);
+        const Cplx a{0.3, -0.7};
+        const auto dcp = m.distinct_critical_points(a, 1e-3);
+        check(dcp.size() == 2, "multibrot(5): distinct points with an explicit tolerance");
     }
 
     // ---- enabled/disabled terms ----------------------------------------------

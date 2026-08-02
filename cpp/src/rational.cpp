@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <sstream>
 
 namespace cdx {
@@ -74,16 +75,23 @@ struct PoleFactor {
     Cplx strength;
 };
 
-// Numerator N(z) of SUM(monomials) + SUM(poles), expressed over the common
-// denominator D(z) = z^origin_order * prod_j (z - poles[j].location)^order,
-// where origin_order absorbs any negative monomial exponents. This is a
-// valid (not necessarily reduced) common denominator: if two pole factors
-// share a location, D just carries that factor twice, which is still
-// algebraically correct -- any spurious extra root that introduces at that
-// location gets filtered out by critical_points()'s pole-exclusion pass
-// regardless of the order computed there.
-std::vector<Cplx> clear_denominators(const std::vector<Monomial>& monomials,
-                                     const std::vector<PoleFactor>& poles) {
+struct ClearedFraction {
+    std::vector<Cplx> numerator;
+    std::vector<Cplx> denominator;
+};
+
+// N(z)/D(z) of SUM(monomials) + SUM(poles), where D(z) = z^origin_order *
+// prod_j (z - poles[j].location)^order and origin_order absorbs any
+// negative monomial exponents. This is a valid (not necessarily reduced)
+// common denominator: if two pole factors share a location, D just carries
+// that factor twice, which is still algebraically correct -- any spurious
+// extra root that introduces at that location gets filtered out by
+// critical_points()'s pole-exclusion pass regardless of the order computed
+// there, and any redundant common factor affects N and D equally, so it
+// cancels out of degree DIFFERENCES (which is all critical_points() needs
+// D for) even without actually reducing the fraction.
+ClearedFraction clear_denominators(const std::vector<Monomial>& monomials,
+                                   const std::vector<PoleFactor>& poles) {
     int min_neg = 0;
     for (const auto& m : monomials)
         if (m.exponent < min_neg) min_neg = m.exponent;
@@ -114,7 +122,56 @@ std::vector<Cplx> clear_denominators(const std::vector<Monomial>& monomials,
         for (Cplx& v : excl) v *= poles[j].strength;
         numerator = poly_add(numerator, excl);
     }
-    return numerator;
+
+    std::vector<Cplx> denominator = poly_shift(pole_product, origin_order);
+    return {numerator, denominator};
+}
+
+// Divides c(z) by (z - p): returns the quotient (degree one less than c)
+// and the remainder c(p). Ascending-order synthetic division.
+struct Division {
+    std::vector<Cplx> quotient;
+    Cplx remainder;
+};
+
+Division divide_by_linear(const std::vector<Cplx>& c, Cplx p) {
+    const int n = static_cast<int>(c.size()) - 1;
+    if (n < 0) return {{}, Cplx(0.0, 0.0)};
+    if (n == 0) return {{}, c[0]};
+
+    std::vector<Cplx> q(static_cast<std::size_t>(n), Cplx(0.0, 0.0));
+    q[static_cast<std::size_t>(n - 1)] = c[static_cast<std::size_t>(n)];
+    for (int k = n - 1; k >= 1; --k) {
+        q[static_cast<std::size_t>(k - 1)] =
+            c[static_cast<std::size_t>(k)] + p * q[static_cast<std::size_t>(k)];
+    }
+    const Cplx r = c[0] + p * q[0];
+    return {q, r};
+}
+
+// Multiplicity of p as a root of c: repeated synthetic division by (z - p)
+// until the remainder is no longer negligible relative to the (deflating)
+// polynomial's own scale. Used to find the TRUE local order of a pole --
+// summing each contributing term's nominal order would overcount when
+// multiple terms share a location (their dominant orders do not simply
+// add), and would not notice a numerator that happens to also vanish there
+// (a removable singularity, or -- concretely -- a McMullen-style pole whose
+// strength is exactly zero for the parameter in play).
+constexpr double kVanishingRelTol = 1e-9;
+
+int vanishing_order(std::vector<Cplx> c, Cplx p) {
+    int order = 0;
+    while (c.size() > 1) {
+        double maxabs = 0.0;
+        for (const Cplx& v : c) maxabs = std::max(maxabs, std::abs(v));
+        if (maxabs == 0.0) break;   // identically zero: nothing further to extract
+
+        const Division d = divide_by_linear(c, p);
+        if (std::abs(d.remainder) > kVanishingRelTol * maxabs) break;
+        ++order;
+        c = d.quotient;
+    }
+    return order;
 }
 
 // Roots within this fraction of a pole's own magnitude are treated as
@@ -274,33 +331,97 @@ std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
 }
 
 std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
-    // Transform the term lists into the derivative's: d/dz[c z^e] = c e
-    // z^(e-1); d/dz[s (z-p)^-m] = -m s (z-p)^-(m+1). Same shape deriv() uses.
-    std::vector<Monomial> dpolys;
-    for (const auto& t : poly_) {
-        if (!t.enabled || t.exponent == 0) continue;
-        dpolys.push_back({t.effective_coeff(a) * static_cast<double>(t.exponent),
-                          t.exponent - 1});
-    }
-    std::vector<PoleFactor> dpoles;
-    for (const auto& t : pole_) {
-        if (!t.enabled) continue;
-        dpoles.push_back({t.effective_location(a), t.order + 1,
-                          -static_cast<double>(t.order) * t.effective_strength(a)});
-    }
-
-    const std::vector<Cplx> numerator = clear_denominators(dpolys, dpoles);
-    const std::vector<Cplx> candidates = roots(Polynomial{numerator});
-
     const std::vector<Cplx> poles = pole_locations(a);
     std::vector<Cplx> out;
-    for (Cplx z : candidates) {
-        bool at_pole = false;
-        for (Cplx p : poles) {
-            const double scale = std::max(1.0, std::abs(p));
-            if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+
+    // ---- ordinary critical points: zeros of the derivative, away from any pole ----
+    // Transform the term lists into the derivative's: d/dz[c z^e] = c e
+    // z^(e-1); d/dz[s (z-p)^-m] = -m s (z-p)^-(m+1). Same shape deriv() uses.
+    {
+        std::vector<Monomial> dpolys;
+        for (const auto& t : poly_) {
+            if (!t.enabled || t.exponent == 0) continue;
+            dpolys.push_back({t.effective_coeff(a) * static_cast<double>(t.exponent),
+                              t.exponent - 1});
         }
-        if (!at_pole) out.push_back(z);
+        std::vector<PoleFactor> dpoles;
+        for (const auto& t : pole_) {
+            if (!t.enabled) continue;
+            dpoles.push_back({t.effective_location(a), t.order + 1,
+                              -static_cast<double>(t.order) * t.effective_strength(a)});
+        }
+        const ClearedFraction dfrac = clear_denominators(dpolys, dpoles);
+        const std::vector<Cplx> candidates = roots(Polynomial{dfrac.numerator});
+
+        for (Cplx z : candidates) {
+            bool at_pole = false;
+            for (Cplx p : poles) {
+                const double scale = std::max(1.0, std::abs(p));
+                if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+            }
+            if (!at_pole) out.push_back(z);
+        }
+    }
+
+    // R's own numerator/denominator (not the derivative's) drive both
+    // remaining sources: a pole is a critical point in its own right, and
+    // whether infinity is critical depends on their degrees.
+    std::vector<Monomial> monomials;
+    for (const auto& t : poly_) {
+        if (!t.enabled) continue;
+        monomials.push_back({t.effective_coeff(a), t.exponent});
+    }
+    std::vector<PoleFactor> pole_factors;
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        pole_factors.push_back({t.effective_location(a), t.order, t.effective_strength(a)});
+    }
+    const ClearedFraction frac = clear_denominators(monomials, pole_factors);
+
+    // ---- each pole of TRUE local order m contributes multiplicity m-1 --------
+    // TRUE order, not the nominal order(s) of whichever term(s) happen to be
+    // at that location: found from the actual constructed N(z)/D(z), so it
+    // is correct even when multiple terms share a location (their orders do
+    // not simply add) or when a pole's strength happens to vanish at this
+    // particular `a` (no pole there at all, for this parameter value).
+    for (Cplx p : poles) {
+        const int d_order = vanishing_order(frac.denominator, p);
+        const int n_order = vanishing_order(frac.numerator, p);
+        const int true_order = d_order - n_order;
+        for (int k = 1; k < true_order; ++k) out.push_back(p);
+    }
+
+    // ---- infinity contributes multiplicity |p-q|-1 when |p-q| >= 2 -----------
+    // p, q = numerator/denominator degree after clearing denominators; a
+    // shared spurious factor (as clear_denominators can introduce) affects
+    // both equally, so the DIFFERENCE is correct even without reducing.
+    const int p_deg = effective_degree(Polynomial{frac.numerator});
+    const int q_deg = effective_degree(Polynomial{frac.denominator});
+    if (p_deg >= 0 && q_deg >= 0) {
+        const int diff = std::abs(p_deg - q_deg);
+        if (diff >= 2) {
+            const Cplx infinity(std::numeric_limits<double>::infinity(), 0.0);
+            for (int k = 1; k < diff; ++k) out.push_back(infinity);
+        }
+    }
+
+    return out;
+}
+
+std::vector<Cplx> RationalMap::distinct_critical_points(Cplx a, double rel_tol) const {
+    const std::vector<Cplx> all = critical_points(a);
+    std::vector<Cplx> out;
+    for (Cplx z : all) {
+        const bool z_inf = std::isinf(z.real()) || std::isinf(z.imag());
+        bool found = false;
+        for (Cplx existing : out) {
+            const bool existing_inf = std::isinf(existing.real()) || std::isinf(existing.imag());
+            if (z_inf != existing_inf) continue;   // one finite, one infinite: distinct
+            if (z_inf) { found = true; break; }     // both infinite: the same point
+            const double scale = std::max(1.0, std::max(std::abs(z), std::abs(existing)));
+            if (std::abs(z - existing) < rel_tol * scale) { found = true; break; }
+        }
+        if (!found) out.push_back(z);
     }
     return out;
 }
