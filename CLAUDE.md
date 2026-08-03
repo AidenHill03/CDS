@@ -84,3 +84,5 @@ first-class editable objects, plus a serializable family library.
 Open: wiring `RationalMap` into `Renderer`; a complex polynomial root-finder
 (Durand–Kerner or Aberth) so custom maps get critical points and therefore
 parameter-plane rendering; dynamical data extraction.
+
+See ARCHITECTURE.md for layering rules
