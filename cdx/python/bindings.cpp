@@ -26,6 +26,7 @@
 #include "cdx/expr.hpp"
 #include "cdx/analysis.hpp"
 
+#include <atomic>
 #include <memory>
 #include <stdexcept>
 
@@ -62,6 +63,29 @@ py::array_t<double> image_to_numpy(Image&& img) {
          static_cast<py::ssize_t>(sizeof(double))},
         ptr, owner);
 }
+
+// Python-side handle for a render's cancellation flag. Renderer's render_*
+// methods take a raw const std::atomic<bool>*, which Python cannot hold
+// directly; this wraps one so a Python caller can create it, hand it to a
+// render call, and set it from anywhere (another thread, typically) while
+// that call is running. shared_ptr-held (see the py::class_ registration
+// below) rather than the pybind11 default unique_ptr: a token is meant to
+// be passed around and outlive the exact scope that created it -- held by
+// the render call via a raw pointer into this object for the call's
+// duration, and potentially also still referenced from Python (e.g. to
+// call .cancel() from the GUI thread while a worker thread's render call is
+// using it) -- so its lifetime needs real reference counting, not a single
+// owner.
+class CancelToken {
+public:
+    void cancel() { flag_.store(true, std::memory_order_relaxed); }
+    void reset()  { flag_.store(false, std::memory_order_relaxed); }
+    bool is_cancelled() const { return flag_.load(std::memory_order_relaxed); }
+    const std::atomic<bool>* ptr() const { return &flag_; }
+
+private:
+    std::atomic<bool> flag_{false};
+};
 
 // The reverse of image_to_numpy, for analysis functions (wada_diagnostic,
 // extract_boundary_points) that take an Image: every render_* method hands
@@ -359,6 +383,20 @@ PYBIND11_MODULE(cdx, m) {
           py::arg("z"), py::arg("w"),
           "Chordal (spherical) distance; infinity is an ordinary point.");
 
+    // ---- CancelToken ---------------------------------------------------------
+    py::class_<CancelToken, std::shared_ptr<CancelToken>>(m, "CancelToken")
+        .def(py::init<>())
+        .def("cancel", &CancelToken::cancel,
+             "Requests that any render currently using this token stop at "
+             "its next per-column check. Safe to call from any thread.")
+        .def("reset", &CancelToken::reset,
+             "Clears a previous cancel() so the token can be reused.")
+        .def_property_readonly("is_cancelled", &CancelToken::is_cancelled)
+        .def("__repr__", [](const CancelToken& t) {
+            return std::string("<cdx.CancelToken cancelled=") +
+                   (t.is_cancelled() ? "True>" : "False>");
+        });
+
     // ---- Renderer ----------------------------------------------------------
     py::class_<Renderer>(m, "Renderer")
         .def(py::init<>())
@@ -392,45 +430,56 @@ PYBIND11_MODULE(cdx, m) {
              "Smallest half-width the double grid still resolves.")
 
         .def("render_julia",
-             [](const Renderer& r) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
                  py::gil_scoped_release release;   // let other threads run
-                 Image img = r.render_julia();
+                 Image img = r.render_julia(cp);
                  py::gil_scoped_acquire acquire;
                  return image_to_numpy(std::move(img));
              },
-             "Escape-time Julia set; 0 means the orbit never escaped.")
+             py::arg("cancel") = nullptr,
+             "Escape-time Julia set; 0 means the orbit never escaped. "
+             "Pass a CancelToken to make this interruptible from another "
+             "thread; on cancellation the (partial) result should be "
+             "discarded, not displayed.")
 
         .def("render_parameter",
-             [](const Renderer& r) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
                  py::gil_scoped_release release;
-                 Image img = r.render_parameter();
+                 Image img = r.render_parameter(cp);
                  py::gil_scoped_acquire acquire;
                  return image_to_numpy(std::move(img));
              },
+             py::arg("cancel") = nullptr,
              "Parameter plane (Mandelbrot / multibrot / McMullenbrot).")
 
         .def("render_basin",
-             [](const Renderer& r, const std::vector<Cycle>& cycles) {
+             [](const Renderer& r, const std::vector<Cycle>& cycles,
+                std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
                  py::gil_scoped_release release;
-                 Image img = r.render_basin(cycles);
+                 Image img = r.render_basin(cycles, cp);
                  py::gil_scoped_acquire acquire;
                  return image_to_numpy(std::move(img));
              },
-             py::arg("cycles"),
+             py::arg("cycles"), py::arg("cancel") = nullptr,
              "Basin classification (chordal metric); 0 means unresolved.")
 
         .def("render_greens",
-             [](const Renderer& r) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
                  bool normalized = false;
                  py::array_t<double> arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_greens(&normalized);
+                     Image img = r.render_greens(&normalized, cp);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
                  }
                  return py::make_tuple(arr, normalized);
              },
+             py::arg("cancel") = nullptr,
              "Green's function. Returns (array, normalized); normalized is "
              "False when degree^max_iter overflowed and the values are "
              "comparable only within this image.");
