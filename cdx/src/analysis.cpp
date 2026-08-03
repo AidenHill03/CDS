@@ -325,4 +325,42 @@ std::vector<Cplx> extract_boundary_points(const Image& labels, const Viewport& v
     return out;
 }
 
+// =============================================================================
+// 4. dynamical_facts
+// =============================================================================
+DynamicalFacts dynamical_facts(const RationalMap& map, Cplx a, const FindAttractorsOptions& opts) {
+    DynamicalFacts facts;
+    facts.degree = map.degree(a);
+    facts.critical_points = map.critical_points(a);
+    facts.pole_locations = map.pole_locations(a);
+    facts.pole_orders = map.pole_orders(a);
+    facts.fixed_points = map.fixed_points(a);
+
+    for (const auto& cyc : find_attractors(map, a, opts)) {
+        DynamicalFacts::AttractingCycle ac;
+        ac.points = cyc.points;
+        ac.period = static_cast<int>(cyc.points.size());
+
+        // find_attractors only ever returns an infinity-containing cycle as
+        // the sole point of a period-1 {Inf} cycle (an orbit passing
+        // through infinity MID-cycle is detected and skipped there, not
+        // returned) -- so the only Inf case to handle is this one, and its
+        // multiplier is already computed correctly by fixed_points() via
+        // the w=1/z chart. Reuse it instead of re-deriving it.
+        if (ac.points.size() == 1 && !is_finite_cplx(ac.points[0])) {
+            for (const auto& fp : facts.fixed_points) {
+                if (!is_finite_cplx(fp.point)) { ac.multiplier = fp.multiplier; break; }
+            }
+        } else {
+            Cplx multiplier(1.0, 0.0);
+            for (Cplx z : ac.points) multiplier *= map.deriv(z, a);
+            ac.multiplier = multiplier;
+        }
+
+        facts.attracting_cycles.push_back(ac);
+    }
+
+    return facts;
+}
+
 }  // namespace cdx

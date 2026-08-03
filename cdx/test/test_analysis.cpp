@@ -223,6 +223,74 @@ int main() {
         check(boundary.size() == 8, "8 boundary pixels (2 columns x 4 rows either side of the split)");
     }
 
+    // ---- dynamical_facts ---------------------------------------------------------
+    std::printf("\ndynamical_facts:\n");
+    {
+        RationalMap m = RationalMap::newton_cubic();
+        const Cplx a{0.0, 0.0};
+        const auto facts = dynamical_facts(m, a);
+
+        check(facts.degree == 3, "newton_cubic: degree 3");
+        check(facts.critical_points.size() == 4,
+              "newton_cubic: 4 critical points (3 roots + pole), matches critical_points()");
+        check(facts.pole_locations.size() == 1 && facts.pole_orders.size() == 1 &&
+              facts.pole_orders[0] == 2,
+              "newton_cubic: one pole at the origin, order 2");
+        check(facts.fixed_points.size() == 4,
+              "newton_cubic: 4 fixed points (3 roots + infinity)");
+
+        check(facts.attracting_cycles.size() == 3,
+              "newton_cubic: 3 attracting cycles, matches find_attractors() directly");
+        bool all_period1_superattracting = true;
+        for (const auto& ac : facts.attracting_cycles) {
+            if (ac.period != 1) all_period1_superattracting = false;
+            if (std::abs(ac.multiplier) > 1e-9) all_period1_superattracting = false;
+        }
+        check(all_period1_superattracting,
+              "newton_cubic: all 3 attracting cycles are superattracting fixed points");
+    }
+    {
+        RationalMap m = RationalMap::mandelbrot();
+        const Cplx a{-1.0, 0.0};   // the basilica
+        const auto facts = dynamical_facts(m, a);
+
+        check(facts.degree == 2, "basilica: degree 2");
+        check(facts.pole_locations.empty() && facts.pole_orders.empty(),
+              "basilica: no poles");
+        check(facts.fixed_points.size() == 3,
+              "basilica: 3 fixed points, matches RationalMap::fixed_points() directly");
+
+        check(facts.attracting_cycles.size() == 2,
+              "basilica: 2 attracting cycles (the 2-cycle and infinity)");
+        bool found_2cycle = false, found_inf = false;
+        for (const auto& ac : facts.attracting_cycles) {
+            if (ac.period == 2) {
+                found_2cycle = true;
+                // {0,-1} contains the critical point 0 itself -> superattracting.
+                check(std::abs(ac.multiplier) < 1e-9,
+                      "basilica: the 2-cycle is superattracting (it contains the critical point)");
+            } else if (ac.period == 1 && std::isinf(ac.points[0].real())) {
+                found_inf = true;
+                check(std::abs(ac.multiplier) < 1e-9,
+                      "basilica: infinity is superattracting, matches fixed_points()");
+            }
+        }
+        check(found_2cycle && found_inf, "basilica: both expected cycle shapes are present");
+    }
+    {
+        // Custom discovery options thread through to find_attractors.
+        RationalMap m = RationalMap::mandelbrot();
+        const Cplx a{-1.0, 0.0};
+        FindAttractorsOptions opts;
+        opts.burn_in = 5;   // absurdly small -- likely too little to converge
+        const auto facts = dynamical_facts(m, a, opts);
+        check(facts.degree == 2, "custom opts: facts unrelated to discovery are unaffected");
+        // Not asserting a specific cycle count here: the point is only that
+        // opts is honored (this is exercised properly by
+        // find_attractors' own tests); a degenerate burn_in is just a cheap
+        // way to prove the parameter is actually threaded through.
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

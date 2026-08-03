@@ -6,10 +6,16 @@
 //   1. find_attractors     -- discovers attracting cycles via critical orbits
 //   2. wada_diagnostic      -- Wada-boundary signatures on a basin image
 //   3. hausdorff_distance   -- Julia-set-vs-target distance, both metrics
+//   4. dynamical_facts      -- bundles the above with RationalMap's own
+//                              algebraic facts into one data-extraction call
 //
-// (A fourth component, verify_conditions -- per-region numerical checks of
-// the paper's conditions (2.4)/(2.5) -- has no MATLAB source to port from
-// and is designed fresh; see the project discussion before it lands here.)
+// verify_conditions -- per-region numerical checks of the Fisher-Hill-
+// Lazebnik-Thompson paper's conditions (2.4)/(2.5) -- was attempted here and
+// removed. It needs a target region, a Runge preprocessing map, and the
+// model map, none of which the engine has any notion of; it belongs in
+// modules/approximation/ instead. See ARCHITECTURE.md's "Deferred: the
+// approximation module" section for the construction and the two specific
+// mistakes worth not repeating.
 //
 // All of this operates through the SAME sphere-first primitives as the rest
 // of this codebase (chordal_distance, Cycle, Image) -- infinity is an
@@ -121,5 +127,35 @@ HausdorffResult hausdorff_distance(const std::vector<Cplx>& julia_points,
 // discretized Julia set a Renderer::render_basin() image implies. This is
 // how julia_points is obtained in practice for hausdorff_distance above.
 std::vector<Cplx> extract_boundary_points(const Image& labels, const Viewport& view);
+
+// -----------------------------------------------------------------------------
+// 4. dynamical_facts -- everything app/session's data-extraction call needs,
+// in one report: RationalMap's own algebraic facts (degree, critical points,
+// pole locations and orders, fixed points) plus find_attractors' dynamical
+// ones (the attracting cycles, each with its period and multiplier).
+//
+// This is a pure function of (map, parameter, discovery options) -> data --
+// the same seam every analysis in this file has (see ARCHITECTURE.md's "The
+// seam"), just bundling several existing ones instead of computing something
+// new. It exists because a sandbox session wants ALL of this together for
+// one map, not because any single piece of it is a new capability.
+// -----------------------------------------------------------------------------
+struct DynamicalFacts {
+    struct AttractingCycle {
+        std::vector<Cplx> points;
+        int  period = 0;
+        Cplx multiplier;   // product of deriv() around the cycle; see .cpp for the Inf case
+    };
+
+    int                        degree = 0;
+    std::vector<Cplx>          critical_points;    // with multiplicity, see RationalMap::critical_points
+    std::vector<AttractingCycle> attracting_cycles;
+    std::vector<Cplx>          pole_locations;
+    std::vector<int>           pole_orders;        // parallel to pole_locations
+    std::vector<FixedPoint>    fixed_points;        // ALL fixed points, not just attracting ones
+};
+
+DynamicalFacts dynamical_facts(const RationalMap& map, Cplx a,
+                               const FindAttractorsOptions& opts = {});
 
 }  // namespace cdx
