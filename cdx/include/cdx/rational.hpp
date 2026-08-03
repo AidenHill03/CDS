@@ -70,6 +70,16 @@ struct PoleTerm {
 };
 
 // -----------------------------------------------------------------------------
+// A fixed point R(point) == point, with its multiplier deriv(point, a) --
+// |multiplier| < 1 attracting, > 1 repelling, == 1 neutral, == 0
+// superattracting (always true when point is also a critical point).
+// -----------------------------------------------------------------------------
+struct FixedPoint {
+    Cplx point;
+    Cplx multiplier;
+};
+
+// -----------------------------------------------------------------------------
 // The map itself: a named collection of terms.
 // -----------------------------------------------------------------------------
 class RationalMap {
@@ -113,6 +123,15 @@ public:
     // Locations of the finite poles (deduplicated), including any pole at the
     // origin implied by a negative polynomial exponent.
     std::vector<Cplx> pole_locations(Cplx a) const;
+
+    // TRUE local order at each of pole_locations(a)'s entries, same index
+    // for index (pole_orders(a)[k] is the order of pole_locations(a)[k]).
+    // Not the nominal order of whichever term(s) happen to sit at that
+    // location -- found from R's actual numerator/denominator, so it is
+    // correct even when multiple terms share a location (orders do not
+    // simply add) or a pole's strength happens to vanish at this particular
+    // `a` (order 0 is possible: no real pole there for this parameter).
+    std::vector<int> pole_orders(Cplx a) const;
 
     // Critical points on the RIEMANN SPHERE -- the complete set, from all
     // three sources a rational map can be critical at:
@@ -169,6 +188,21 @@ public:
     // apart than that -- see cdx::roots()'s documentation of the same
     // effect.
     std::vector<Cplx> distinct_critical_points(Cplx a, double rel_tol = 1e-4) const;
+
+    // All fixed points R(z) == z, found algebraically (root the polynomial
+    // N(z) - z*D(z) after clearing denominators; NOT limited to attracting
+    // ones -- for that, and for genuine higher-period cycles, see
+    // cdx::find_attractors). Includes infinity, with its multiplier via the
+    // w=1/z chart, whenever R(infinity) == infinity (i.e. the numerator
+    // degree exceeds the denominator degree after clearing denominators):
+    // multiplier 0 when the numerator/denominator degree gap is >= 2
+    // (infinity is then also a critical point, so this matches
+    // critical_points()'s infinity rule), or the reciprocal leading-
+    // coefficient ratio when the gap is exactly 1 (an ordinary, non-critical
+    // fixed point at infinity -- e.g. Newton's method's escape direction).
+    //
+    // No particular ordering guarantee.
+    std::vector<FixedPoint> fixed_points(Cplx a) const;
 
     // Human-readable formula, e.g. "z^3 + a/z^3".
     std::string to_formula() const;

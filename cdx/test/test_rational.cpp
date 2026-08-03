@@ -383,6 +383,128 @@ int main() {
         check(dcp.size() == 2, "multibrot(5): distinct points with an explicit tolerance");
     }
 
+    // ---- pole_orders: true local order, not naive per-term sums --------------
+    std::printf("\npole_orders:\n");
+    {
+        RationalMap m = RationalMap::mcmullen(2);
+        const auto locs = m.pole_locations({0.3, -0.7});
+        const auto orders = m.pole_orders({0.3, -0.7});
+        check(locs.size() == 1 && orders.size() == 1 && orders[0] == 2,
+              "mcmullen(2): the pole at the origin has order 2 (matches add_pole's order=n)");
+    }
+    {
+        RationalMap m = RationalMap::newton_cubic();
+        const auto orders = m.pole_orders({0, 0});
+        check(orders.size() == 1 && orders[0] == 2,
+              "newton_cubic: the pole at the origin (from z^-2) has order 2");
+    }
+    {
+        // R(z) = 2/z from two redundant order-1 pole terms: true order is 1
+        // (a simple pole), not the naive sum 1+1=2.
+        RationalMap m("mobius");
+        m.add_pole({0, 0}, {1, 0}, 1);
+        m.add_pole({0, 0}, {1, 0}, 1);
+        const auto orders = m.pole_orders({0, 0});
+        check(orders.size() == 1 && orders[0] == 1,
+              "R(z)=2/z: true order is 1, not the naive per-term sum of 2");
+    }
+    {
+        RationalMap m = RationalMap::mandelbrot();
+        check(m.pole_orders({0.3, -0.7}).empty(), "mandelbrot: no poles, so no orders");
+    }
+
+    // ---- fixed_points ----------------------------------------------------------
+    std::printf("\nfixed_points:\n");
+    {
+        // The basilica: z^2-1 = z  =>  z^2-z-1=0, the golden ratio and its
+        // conjugate, both REPELLING (|multiplier|>1) -- cross-checks
+        // test_analysis.cpp's find_attractors result of zero attracting
+        // fixed points for this exact map/parameter. Plus infinity,
+        // superattracting (multiplier 0, matches critical_points()'s own
+        // infinity rule for this map).
+        RationalMap m = RationalMap::mandelbrot();
+        const Cplx a{-1.0, 0.0};
+        const auto fps = m.fixed_points(a);
+        check(fps.size() == 3, "basilica: 3 fixed points (golden ratio pair + infinity)");
+
+        const double golden = (1.0 + std::sqrt(5.0)) / 2.0;
+        int n_golden_pair = 0, n_inf = 0, n_finite_attracting = 0;
+        for (const auto& fp : fps) {
+            if (std::isinf(fp.point.real())) {
+                ++n_inf;
+                check(close(fp.multiplier, Cplx(0, 0), 1e-9),
+                      "basilica: infinity is superattracting (multiplier 0)");
+            } else {
+                if (close(fp.point, Cplx(golden, 0), 1e-6) ||
+                    close(fp.point, Cplx(1.0 - golden, 0), 1e-6))
+                    ++n_golden_pair;
+                if (std::abs(fp.multiplier) < 1.0) ++n_finite_attracting;
+            }
+        }
+        check(n_golden_pair == 2, "basilica: the two finite fixed points are the golden ratio pair");
+        check(n_inf == 1, "basilica: infinity is among the fixed points");
+        // Infinity itself IS attracting here (superattracting, even) -- the
+        // "zero attracting fixed points" fact from find_attractors/CLAUDE.md
+        // is specifically about the FINITE plane (the classical,
+        // pre-sphere-first framing this project explicitly rejects
+        // everywhere else); on the sphere, infinity being an attracting
+        // fixed point is unremarkable and expected.
+        check(n_finite_attracting == 0,
+              "basilica: ZERO finite attracting fixed points (matches find_attractors exactly)");
+    }
+    {
+        // Newton's method: fixed points of N are exactly the roots of
+        // z^3-1, each superattracting (multiplier 0, the whole point of
+        // Newton's method) -- plus infinity, this time an ORDINARY
+        // (non-critical) fixed point with multiplier 3/2 (repelling),
+        // matching the p-q==1 formula and the earlier hand-derivation that
+        // motivated find_attractors' pole-seed perturbation fix.
+        RationalMap m = RationalMap::newton_cubic();
+        const Cplx a{0.0, 0.0};
+        const auto fps = m.fixed_points(a);
+        check(fps.size() == 4, "newton_cubic: 4 fixed points (3 roots + infinity)");
+
+        const std::vector<Cplx> cube_roots = {
+            {1.0, 0.0}, {-0.5, 0.8660254037844386}, {-0.5, -0.8660254037844386}};
+        int n_roots_superattracting = 0, n_inf_repelling = 0;
+        for (const auto& fp : fps) {
+            if (std::isinf(fp.point.real())) {
+                if (close(fp.multiplier, Cplx(1.5, 0.0), 1e-6)) ++n_inf_repelling;
+            } else {
+                for (Cplx r : cube_roots)
+                    if (close(fp.point, r, 1e-6) && close(fp.multiplier, Cplx(0, 0), 1e-9))
+                        ++n_roots_superattracting;
+            }
+        }
+        check(n_roots_superattracting == 3,
+              "newton_cubic: all 3 roots are superattracting fixed points (multiplier 0)");
+        check(n_inf_repelling == 1,
+              "newton_cubic: infinity is an ordinary fixed point with multiplier 3/2 (repelling)");
+    }
+    {
+        RationalMap m("mobius");
+        m.add_pole({0, 0}, {1, 0}, 1);
+        m.add_pole({0, 0}, {1, 0}, 1);
+        const auto fps = m.fixed_points({0, 0});
+        // R(z)=2/z: R(z)=z => z^2=2 => z=+-sqrt(2), each with multiplier -1
+        // (R is an involution, R(R(z))=z, so this is the standard neutral
+        // multiplier of an involution's fixed points). p_deg=1 < q_deg=2,
+        // so infinity is NOT a fixed point here -- R(z)->0 as z->infinity,
+        // not infinity; 0 and infinity actually form their own 2-cycle
+        // (R(0)=infinity, R(infinity)=0), which is exactly why they are
+        // NOT in this fixed-points list.
+        check(fps.size() == 2, "R(z)=2/z: exactly 2 fixed points (+-sqrt(2)), not infinity");
+        bool at_pole = false, any_inf = false;
+        for (const auto& fp : fps) {
+            if (std::isinf(fp.point.real())) any_inf = true;
+            else if (std::abs(fp.point) < 1e-6) at_pole = true;
+            else check(close(fp.multiplier, Cplx(-1, 0), 1e-6),
+                       "R(z)=2/z: each fixed point has multiplier -1 (involution)");
+        }
+        check(!at_pole, "R(z)=2/z: the pole at the origin is correctly excluded, not a fixed point");
+        check(!any_inf, "R(z)=2/z: infinity is correctly excluded (R sends infinity to 0, not itself)");
+    }
+
     // ---- enabled/disabled terms ----------------------------------------------
     std::printf("\nenabled/disabled terms:\n");
     {

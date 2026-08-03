@@ -37,6 +37,11 @@ std::vector<Cplx> poly_add(const std::vector<Cplx>& a, const std::vector<Cplx>& 
     return out;
 }
 
+std::vector<Cplx> poly_negate(std::vector<Cplx> a) {
+    for (Cplx& v : a) v = -v;
+    return a;
+}
+
 // Multiply by (z - p), growing the degree by one.
 std::vector<Cplx> mul_linear(const std::vector<Cplx>& c, Cplx p) {
     std::vector<Cplx> out(c.size() + 1, Cplx(0.0, 0.0));
@@ -125,6 +130,24 @@ ClearedFraction clear_denominators(const std::vector<Monomial>& monomials,
 
     std::vector<Cplx> denominator = poly_shift(pole_product, origin_order);
     return {numerator, denominator};
+}
+
+// R's own numerator/denominator (not the derivative's, not any other
+// transform): the extraction critical_points(), fixed_points() and
+// pole_orders() all need as their starting point.
+ClearedFraction own_fraction(const std::vector<PolyTerm>& poly, const std::vector<PoleTerm>& pole,
+                             Cplx a) {
+    std::vector<Monomial> monomials;
+    for (const auto& t : poly) {
+        if (!t.enabled) continue;
+        monomials.push_back({t.effective_coeff(a), t.exponent});
+    }
+    std::vector<PoleFactor> pole_factors;
+    for (const auto& t : pole) {
+        if (!t.enabled) continue;
+        pole_factors.push_back({t.effective_location(a), t.order, t.effective_strength(a)});
+    }
+    return clear_denominators(monomials, pole_factors);
 }
 
 // Divides c(z) by (z - p): returns the quotient (degree one less than c)
@@ -330,6 +353,17 @@ std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
     return out;
 }
 
+std::vector<int> RationalMap::pole_orders(Cplx a) const {
+    const ClearedFraction frac = own_fraction(poly_, pole_, a);
+    std::vector<int> out;
+    for (Cplx p : pole_locations(a)) {
+        const int d_order = vanishing_order(frac.denominator, p);
+        const int n_order = vanishing_order(frac.numerator, p);
+        out.push_back(std::max(0, d_order - n_order));
+    }
+    return out;
+}
+
 std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
     const std::vector<Cplx> poles = pole_locations(a);
     std::vector<Cplx> out;
@@ -366,17 +400,7 @@ std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
     // R's own numerator/denominator (not the derivative's) drive both
     // remaining sources: a pole is a critical point in its own right, and
     // whether infinity is critical depends on their degrees.
-    std::vector<Monomial> monomials;
-    for (const auto& t : poly_) {
-        if (!t.enabled) continue;
-        monomials.push_back({t.effective_coeff(a), t.exponent});
-    }
-    std::vector<PoleFactor> pole_factors;
-    for (const auto& t : pole_) {
-        if (!t.enabled) continue;
-        pole_factors.push_back({t.effective_location(a), t.order, t.effective_strength(a)});
-    }
-    const ClearedFraction frac = clear_denominators(monomials, pole_factors);
+    const ClearedFraction frac = own_fraction(poly_, pole_, a);
 
     // ---- each pole of TRUE local order m contributes multiplicity m-1 --------
     // TRUE order, not the nominal order(s) of whichever term(s) happen to be
@@ -423,6 +447,52 @@ std::vector<Cplx> RationalMap::distinct_critical_points(Cplx a, double rel_tol) 
         }
         if (!found) out.push_back(z);
     }
+    return out;
+}
+
+std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
+    const ClearedFraction frac = own_fraction(poly_, pole_, a);
+
+    // R(z) == z  <=>  N(z) - z*D(z) == 0
+    const std::vector<Cplx> fixed_poly =
+        poly_add(frac.numerator, poly_negate(poly_shift(frac.denominator, 1)));
+    const std::vector<Cplx> candidates = roots(Polynomial{fixed_poly});
+
+    // Same reasoning as critical_points()'s pole exclusion: an unreduced
+    // denominator (redundant same-location terms) can make a genuine pole
+    // look, algebraically, like it solves N(z)-zD(z)=0 too. A true pole is
+    // never actually a fixed point (R is not defined there), so filter it
+    // out the same way.
+    const std::vector<Cplx> poles = pole_locations(a);
+    std::vector<FixedPoint> out;
+    for (Cplx z : candidates) {
+        bool at_pole = false;
+        for (Cplx p : poles) {
+            const double scale = std::max(1.0, std::abs(p));
+            if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+        }
+        if (!at_pole) out.push_back({z, deriv(z, a)});
+    }
+
+    // Infinity is fixed iff R(infinity) == infinity, i.e. the numerator
+    // degree p exceeds the denominator degree q after clearing
+    // denominators. Its multiplier comes from the w=1/z chart: writing
+    // R(z) ~ (N_lead/D_lead) z^(p-q) for large z, R~(w) = 1/R(1/w) ~
+    // (D_lead/N_lead) w^(p-q), so R~'(0) is 0 when p-q >= 2 (matching
+    // critical_points()'s infinity rule -- consistent, since a fixed point
+    // with multiplier 0 is by definition also critical) and D_lead/N_lead
+    // when p-q == 1 (an ordinary, non-critical fixed point at infinity).
+    const int p_deg = effective_degree(Polynomial{frac.numerator});
+    const int q_deg = effective_degree(Polynomial{frac.denominator});
+    if (p_deg > q_deg) {
+        const int diff = p_deg - q_deg;
+        const Cplx multiplier = diff >= 2
+            ? Cplx(0.0, 0.0)
+            : frac.denominator[static_cast<std::size_t>(q_deg)] /
+              frac.numerator[static_cast<std::size_t>(p_deg)];
+        out.push_back({Cplx(std::numeric_limits<double>::infinity(), 0.0), multiplier});
+    }
+
     return out;
 }
 
