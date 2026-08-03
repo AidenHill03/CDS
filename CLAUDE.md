@@ -68,7 +68,7 @@ rendering.
 ## Build
 
 ```bash
-cd cpp && cmake -B build -DCDX_BUILD_PYTHON=ON && cmake --build build
+cd cdx && cmake -B build -DCDX_BUILD_PYTHON=ON && cmake --build build
 ./build/cdx_test                     # C++ tests
 PYTHONPATH=build python python/demo.py
 ```
