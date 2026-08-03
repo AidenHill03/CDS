@@ -21,6 +21,40 @@ import cdx
 RENDER_MODES = ("julia", "parameter", "basin", "greens")
 
 
+def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
+               settings: cdx.RenderSettings, mode: str):
+    """Renders `rational_map` at `param` over `viewport`/`settings`, in the
+    given mode. A free function rather than a Session method, and taking
+    every value explicitly rather than reading them off a Session, so a
+    background render thread (see app/sandbox.py) can call it on a snapshot
+    of session state without touching the Session object itself -- Session
+    is owned and mutated by the GUI thread, and has no thread-safety of its
+    own to rely on.
+
+    Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
+    convention; plot with origin='lower').
+    """
+    if mode not in RENDER_MODES:
+        raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
+    renderer = cdx.Renderer(map=cdx.Map.custom(rational_map, param), viewport=viewport,
+                            settings=settings)
+    if mode == "julia":
+        return renderer.render_julia()
+    if mode == "parameter":
+        return renderer.render_parameter()
+    if mode == "basin":
+        # Recomputed on every call rather than cached: find_attractors is a
+        # real cost for a root-finding-heavy custom map, but there is no
+        # cache-invalidation machinery here to get wrong, and nothing so far
+        # has needed one. Revisit if profiling says so.
+        cycles = cdx.find_attractors(rational_map, param)
+        return renderer.render_basin(cycles)
+    if mode == "greens":
+        array, _normalized = renderer.render_greens()
+        return array
+    raise AssertionError(f"unreachable: mode={mode!r}")
+
+
 class Session:
     """Sandbox session: current map + parameter + viewport + render mode,
     term editing, a family library, and dynamical-facts extraction.
@@ -42,29 +76,11 @@ class Session:
 
     def render(self):
         """Renders the current map/parameter/viewport in the current mode.
-        Returns a NumPy array (row 0 at the bottom -- see cdx's own
-        orientation convention; plot with origin='lower').
+        See render_map() above for the return shape; this is just that
+        function applied to the session's own current state.
         """
-        renderer = cdx.Renderer(
-            map=cdx.Map.custom(self.map, self.param),
-            viewport=self.viewport,
-            settings=self.render_settings,
-        )
-        if self.render_mode == "julia":
-            return renderer.render_julia()
-        if self.render_mode == "parameter":
-            return renderer.render_parameter()
-        if self.render_mode == "basin":
-            # Recomputed on every call rather than cached: find_attractors
-            # is a real cost for a root-finding-heavy custom map, but there
-            # is no cache-invalidation machinery here to get wrong, and
-            # nothing so far has needed one. Revisit if profiling says so.
-            cycles = cdx.find_attractors(self.map, self.param)
-            return renderer.render_basin(cycles)
-        if self.render_mode == "greens":
-            array, _normalized = renderer.render_greens()
-            return array
-        raise AssertionError(f"unreachable: render_mode={self.render_mode!r}")
+        return render_map(self.map, self.param, self.viewport, self.render_settings,
+                          self.render_mode)
 
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/

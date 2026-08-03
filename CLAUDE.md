@@ -53,6 +53,17 @@ rendering.
 - **Zoom has a real double-precision floor** (~1e-14 relative). This is
   arithmetic, not state that can be cleared. Beating it needs extended
   precision or perturbation theory.
+- **A superseded background render is still running**, not cancelled --
+  `cdx`'s render calls have no interrupt mechanism, so discarding a stale
+  result does not stop the thread computing it. In `app/sandbox.py` this
+  means anything that tears down Qt objects (closing the window) must drain
+  the thread pool first, or a late-arriving signal fires into already-
+  destroyed objects and crashes.
+- **PySide6's plugin path is not always on Qt's default search path** (seen
+  with the anaconda-installed wheel on macOS: `Could not find the Qt
+  platform plugin "cocoa"/"offscreen" in ""`). Fix by pointing
+  `QT_QPA_PLATFORM_PLUGIN_PATH` at
+  `<PySide6 install dir>/Qt/plugins/platforms` explicitly.
 
 ## Conventions
 
@@ -71,6 +82,12 @@ rendering.
 cd cdx && cmake -B build -DCDX_BUILD_PYTHON=ON && cmake --build build
 ./build/cdx_test                     # C++ tests
 PYTHONPATH=build python python/demo.py
+```
+
+Interactive sandbox (from the repository root, requires PySide6):
+
+```bash
+PYTHONPATH=cdx/build python -m app.sandbox
 ```
 
 ## Current state
