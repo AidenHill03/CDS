@@ -1,0 +1,125 @@
+// =============================================================================
+// cdx/analysis.hpp -- numerical analysis layer: attractor discovery and
+// diagnostics, ported from the MATLAB prototype (matlab-reference/).
+//
+// Components, each building on the previous:
+//   1. find_attractors     -- discovers attracting cycles via critical orbits
+//   2. wada_diagnostic      -- Wada-boundary signatures on a basin image
+//   3. hausdorff_distance   -- Julia-set-vs-target distance, both metrics
+//
+// (A fourth component, verify_conditions -- per-region numerical checks of
+// the paper's conditions (2.4)/(2.5) -- has no MATLAB source to port from
+// and is designed fresh; see the project discussion before it lands here.)
+//
+// All of this operates through the SAME sphere-first primitives as the rest
+// of this codebase (chordal_distance, Cycle, Image) -- infinity is an
+// ordinary point here too, not a special case to work around.
+// =============================================================================
+#pragma once
+
+#include "cdx/rational.hpp"
+#include "cdx/renderer.hpp"
+
+#include <cstddef>
+#include <vector>
+
+namespace cdx {
+
+// -----------------------------------------------------------------------------
+// 1. Attracting-cycle discovery.
+//
+// By Fatou's theorem, every attracting cycle of a rational map attracts at
+// least one critical point, so iterating every critical orbit past its
+// transient and detecting the cycle it lands on finds EVERY attracting
+// cycle -- no symbolic solving, no assuming the period in advance, and no
+// "attracting fixed points only" blind spot (a fixed point is just the
+// period-1 case; z^2-1's basilica has a period-2 attracting cycle and ZERO
+// attracting fixed points, which a fixed-point-only search would miss
+// entirely). Ports matlab-reference/FindAttractors.m.
+//
+// DEPENDS ON RationalMap::distinct_critical_points BEING COMPLETE --
+// including poles and infinity, not just ordinary derivative zeros -- or
+// this silently misses cycles whose only attracting critical point is a
+// pole (e.g. a Newton-map-style RationalMap, where the informative critical
+// point sits at a pole and the "obvious" ones are trivial superattracting
+// fixed points) or infinity itself.
+// -----------------------------------------------------------------------------
+struct FindAttractorsOptions {
+    int    burn_in          = 500;   // iterations discarded as transient
+    int    max_period       = 64;    // largest cycle period detected
+    double tol               = 1e-9; // chordal tolerance for cycle closure and dedup
+    double inf_cutoff        = 1e12; // |z| beyond which a value counts as infinity
+    bool   verify_multiplier = true; // reject candidates with |multiplier| >= 1
+};
+
+std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
+                                   const FindAttractorsOptions& opts = {});
+
+// -----------------------------------------------------------------------------
+// 2. Wada-boundary diagnostic on a basin label image (Renderer::render_basin's
+// output: 0 = unresolved, k = basin k). Ports matlab-reference/WadaDiagnostic.m.
+//
+// wada_fraction is the fraction of boundary pixels (>= 2 distinct basins
+// within the neighbourhood radius) whose neighbourhood contains ALL
+// n_basins labels -- the numerical signature of a genuine Wada boundary,
+// where every boundary point borders every basin.
+//
+// RESOLUTION DEPENDENCE. The true Wada property is an infinite-resolution
+// statement (every boundary point has all d basins in EVERY neighbourhood);
+// at any finite pixel resolution a small neighbourhood typically shows only
+// the locally-dominant basins even for a genuinely Wada map, because a
+// third basin's presence can be at a finer scale than the neighbourhood.
+// radius_fraction is deliberately a FRACTION of the image's resolution, not
+// a fixed pixel count: a fixed pixel radius covers a physically SMALLER
+// region as resolution rises, which makes wada_fraction artificially FALL
+// with resolution even when the map itself is unchanged. Read wada_fraction
+// as a TREND across resolutions, not an absolute value at one setting -- it
+// should rise toward 1 as resolution increases for a genuine Wada
+// configuration, and plateau below 1 for a non-Wada one (e.g. two basins
+// sharing a plain arc away from the others).
+// -----------------------------------------------------------------------------
+struct WadaStats {
+    int    n_basins            = 0;
+    double unresolved_fraction = 0.0;
+    double boundary_fraction   = 0.0;
+    double wada_fraction       = 0.0;   // NaN if fewer than 2 basins, or no boundary pixels
+    int    radius_px           = 0;     // the actual pixel radius used, after resolution-scaling
+};
+
+WadaStats wada_diagnostic(const Image& labels, double radius_fraction = 0.004);
+
+// -----------------------------------------------------------------------------
+// 3. Hausdorff distance between two point sets, in both the chordal
+// (sphere-aware) and Euclidean metrics, with the two DIRECTED distances
+// exposed separately. Ports matlab-reference/HausdorffBasin.m.
+//
+// Symmetric Hausdorff = max(sup_{a in A} inf_{b in B} d(a,b),
+//                            sup_{b in B} inf_{a in A} d(a,b)).
+// The two directed pieces diagnose different failures: large
+// julia_to_target means the computed set has spurious structure far from
+// the target; large target_to_julia means part of the target has no nearby
+// match in the computed set (a missed piece of boundary).
+//
+// Inputs larger than max_points are subsampled (evenly, not randomly) to
+// keep the O(n*m) distance computation tractable at high resolution.
+// -----------------------------------------------------------------------------
+struct HausdorffResult {
+    double chordal                   = 0.0;
+    double euclidean                 = 0.0;
+    double chordal_julia_to_target   = 0.0;
+    double chordal_target_to_julia   = 0.0;
+    double euclidean_julia_to_target = 0.0;
+    double euclidean_target_to_julia = 0.0;
+};
+
+HausdorffResult hausdorff_distance(const std::vector<Cplx>& julia_points,
+                                   const std::vector<Cplx>& target_points,
+                                   std::size_t max_points = 4000);
+
+// Extracts a basin-label image's boundary pixels (adjacent to a different
+// nonzero label) as complex points in the view's coordinate plane -- the
+// discretized Julia set a Renderer::render_basin() image implies. This is
+// how julia_points is obtained in practice for hausdorff_distance above.
+std::vector<Cplx> extract_boundary_points(const Image& labels, const Viewport& view);
+
+}  // namespace cdx
