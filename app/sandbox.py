@@ -18,8 +18,8 @@ from __future__ import annotations
 import sys
 
 import numpy as np
-from PySide6.QtCore import (QObject, QPoint, QRect, QRunnable, QSize, Qt, QThreadPool,
-                            QTimer, Signal, Slot)
+from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
+                            QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QToolBar, QWidget
 
@@ -164,6 +164,31 @@ class ImageView(QWidget):
     different pixel-to-plane scales, which would silently break both the
     "axes must match Viewport exactly" requirement and the cursor-anchored
     zoom math below (which assumes one uniform scale).
+
+    INSTANT FEEDBACK. session.viewport updates immediately on every wheel
+    or pan event, but the real re-render is debounced (see SandboxWindow).
+    In between, the widget shows an OPTIMISTIC placeholder: the last
+    PAINTED pixmap, transformed by _preview_scale/_preview_translation, an
+    affine map (uniform scale + translation, no rotation) accumulated since
+    that pixmap was painted. Each wheel event composes a "scale by f about
+    the cursor pixel" step; each pan move event composes a pure translation
+    by the on-screen pixel delta since the last move event. Composition
+    (not recomputing from scratch against the original pixmap each time)
+    is what makes five wheel notches before the debounce fires show f^5,
+    not f. set_image() resets the accumulator to identity -- a freshly
+    painted pixmap has nothing left to approximate.
+
+    The zoom step is the EXACT inverse of the viewport's cursor-anchored
+    zoom (center' = w - (w-center)/f, scale' = scale/f), not an
+    approximation: pixel_to_complex is affine in viewport.center, so for
+    any point p_old on the OLD pixmap and the corresponding screen position
+    p_screen showing the same complex value under the NEW viewport,
+    p_screen = cursor_pixel + f*(p_old - cursor_pixel) -- a pure "scale by
+    f about cursor_pixel" -- follows directly by substituting the zoom
+    formula into pixel_to_complex and solving. If this and the real
+    viewport update ever disagree, the image visibly jumps the instant the
+    real render lands; test_sandbox.py checks the two match exactly, not
+    just approximately.
     """
 
     viewport_changed = Signal()
@@ -175,13 +200,15 @@ class ImageView(QWidget):
         self.setMinimumSize(200, 200)
 
         self._pixmap: QPixmap | None = None
+        self._preview_scale = 1.0
+        self._preview_translation = QPointF(0.0, 0.0)
 
         self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
 
         self._panning = False
         self._pan_anchor_complex: complex | None = None
-        self._pan_pixel_offset: QPoint | None = None
+        self._last_pan_pixel: QPoint | None = None
 
     # ---- display geometry ----------------------------------------------------
     def _display_rect(self) -> QRect:
@@ -204,19 +231,35 @@ class ImageView(QWidget):
         im = vp.center.imag + vp.scale - rel_y * 2.0 * vp.scale
         return complex(re, im)
 
+    # ---- instant-feedback transform: composed since the last painted render ----
+    def _compose_zoom(self, anchor: QPointF, factor: float) -> None:
+        # k_new = f*k_old; t_new = A + f*(t_old - A). See the class
+        # docstring for the derivation; test_sandbox.py checks this
+        # composed transform matches a direct recomputation, multi-step.
+        self._preview_translation = anchor + factor * (self._preview_translation - anchor)
+        self._preview_scale *= factor
+
+    def _compose_pan(self, delta: QPointF) -> None:
+        self._preview_translation = self._preview_translation + delta
+
+    def _transformed_rect(self, rect: QRect) -> QRectF:
+        k = self._preview_scale
+        t = self._preview_translation
+        return QRectF(k * rect.left() + t.x(), k * rect.top() + t.y(),
+                      k * rect.width(), k * rect.height())
+
     # ---- painting --------------------------------------------------------------
     def set_image(self, array: np.ndarray) -> None:
         self._pixmap = QPixmap.fromImage(array_to_qimage(array))
+        self._preview_scale = 1.0
+        self._preview_translation = QPointF(0.0, 0.0)
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        rect = self._display_rect()
         if self._pixmap is not None:
-            target = rect
-            if self._panning and self._pan_pixel_offset is not None:
-                target = rect.translated(self._pan_pixel_offset)
-            painter.drawPixmap(target, self._pixmap)
+            painter.drawPixmap(self._transformed_rect(self._display_rect()), self._pixmap,
+                               QRectF(self._pixmap.rect()))
         if self._rubber_band_rect is not None:
             pen = QPen(QColor(255, 255, 255))
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -239,6 +282,9 @@ class ImageView(QWidget):
         new_scale = vp.scale / factor
         self.session.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
 
+        self._compose_zoom(QPointF(cursor_pos), factor)
+        self.update()
+
         self.viewport_changed.emit()
         event.accept()
 
@@ -251,7 +297,7 @@ class ImageView(QWidget):
         if is_pan:
             self._panning = True
             self._pan_anchor_complex = self._pixel_to_complex(pos)
-            self._pan_pixel_offset = QPoint(0, 0)
+            self._last_pan_pixel = pos
         elif event.button() == Qt.MouseButton.LeftButton:
             self._rubber_band_origin = pos
             self._rubber_band_rect = QRect(pos, QSize())
@@ -267,36 +313,26 @@ class ImageView(QWidget):
             # test suite for the derivation this formula comes from.
             new_center = vp.center + (self._pan_anchor_complex - current_point)
             self.session.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
-            # Cheap immediate visual feedback: translate the CURRENT pixmap
-            # by the on-screen pixel delta while dragging, rather than
-            # waiting out the render debounce (unlike scroll zoom, an
-            # un-animated pan reads as broken, not just slightly laggy).
-            origin_pixel = self._complex_to_pixel_hint(self._pan_anchor_complex, vp)
-            self._pan_pixel_offset = pos - origin_pixel
-            self.viewport_changed.emit()
+
+            # Instant feedback: the raw on-screen pixel delta since the last
+            # move event is EXACTLY the translation needed (a pure center
+            # shift in the complex plane is exactly a pure pixel
+            # translation on screen; no scale change during a pan, so no
+            # anchor point is needed the way zoom's step needs one).
+            self._compose_pan(QPointF(pos) - QPointF(self._last_pan_pixel))
+            self._last_pan_pixel = pos
             self.update()
+
+            self.viewport_changed.emit()
         elif self._rubber_band_origin is not None:
             self._rubber_band_rect = QRect(self._rubber_band_origin, pos).normalized()
             self.update()
-
-    def _complex_to_pixel_hint(self, w: complex, vp: cdx.Viewport) -> QPoint:
-        """Approximate inverse of _pixel_to_complex, using the viewport
-        BEFORE this drag's update -- used only to compute the on-screen
-        pixel offset for the optimistic pan preview, not for anything that
-        needs to be exact.
-        """
-        rect = self._display_rect()
-        rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
-        rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
-        return QPoint(rect.left() + round(rel_x * rect.width()),
-                      rect.top() + round(rel_y * rect.height()))
 
     def mouseReleaseEvent(self, event) -> None:
         if self._panning:
             self._panning = False
             self._pan_anchor_complex = None
-            self._pan_pixel_offset = None
-            self.update()
+            self._last_pan_pixel = None
             self.viewport_changed.emit()
         elif self._rubber_band_origin is not None:
             rect = self._rubber_band_rect

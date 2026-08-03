@@ -19,12 +19,13 @@ from __future__ import annotations
 import threading
 import time
 
-from PySide6.QtCore import QPoint
+import numpy as np
+from PySide6.QtCore import QPoint, QPointF
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.sandbox import ImageView, RenderTask, SandboxWindow
+from app.sandbox import ZOOM_FACTOR_PER_NOTCH, ImageView, RenderTask, SandboxWindow
 from app.session import Session
 
 failures = 0
@@ -120,6 +121,97 @@ def main() -> None:
     anchor_after = view3._pixel_to_complex(drag_to_pixel)
     check(close(anchor_complex, anchor_after, 1e-9),
           "after panning, the point anchored at drag-start is back under the cursor")
+
+    # ---- instant zoom/pan feedback: the placeholder transform ---------------------
+    print("\ninstant feedback transform:")
+
+    # Cross-check against the REAL viewport update, independently -- not
+    # just that _compose_zoom is self-consistent, but that the pixel-space
+    # placeholder transform it produces EXACTLY matches what the real
+    # (complex-plane) cursor-anchored viewport update implies for an
+    # arbitrary probe pixel, computed via a completely separate path
+    # (pixel_to_complex under the OLD viewport, then the inverse mapping
+    # under the NEW one, worked out by hand here rather than reusing any
+    # ImageView method that isn't already independently verified above).
+    # If these two disagree even slightly, the image visibly jumps the
+    # instant the real render replaces the placeholder.
+    session5 = Session()
+    session5.viewport = cdx.Viewport(complex(0.3, -0.2), 2.0, 500)
+    view5 = ImageView(session5)
+    view5.resize(500, 500)
+
+    probe_pixel = QPoint(340, 90)   # arbitrary; deliberately not the zoom cursor
+    cursor = QPoint(210, 260)
+    factor = ZOOM_FACTOR_PER_NOTCH ** 4
+
+    probe_complex = view5._pixel_to_complex(probe_pixel)   # under the OLD viewport
+    w = view5._pixel_to_complex(cursor)
+    vp5 = session5.viewport
+    new_center = w - (w - vp5.center) / factor
+    new_scale = vp5.scale / factor
+    rect5 = view5._display_rect()
+    # Where the OLD viewport's probe_complex value falls under the NEW
+    # viewport -- the inverse of _pixel_to_complex, hand-derived here.
+    rel_x = (probe_complex.real - (new_center.real - new_scale)) / (2.0 * new_scale)
+    rel_y = (new_center.imag + new_scale - probe_complex.imag) / (2.0 * new_scale)
+    expected_pixel = QPointF(rect5.left() + rel_x * rect5.width(),
+                             rect5.top() + rel_y * rect5.height())
+
+    view5._compose_zoom(QPointF(cursor), factor)
+    k5, t5 = view5._preview_scale, view5._preview_translation
+    predicted_pixel = QPointF(k5 * probe_pixel.x() + t5.x(), k5 * probe_pixel.y() + t5.y())
+
+    check(abs(predicted_pixel.x() - expected_pixel.x()) < 1e-6 and
+          abs(predicted_pixel.y() - expected_pixel.y()) < 1e-6,
+          "the placeholder zoom transform exactly matches the real viewport update, "
+          "cross-checked independently, not just internally consistent")
+
+    # Composition: five steps (zoom, pan, zoom, pan, zoom -- deliberately
+    # mixed and at different anchors/directions) applied via _compose_zoom/
+    # _compose_pan must match applying the SAME steps one at a time by
+    # direct substitution to an arbitrary test point, not just the first
+    # step alone -- this is what "five wheel notches before the debounce
+    # fires needs f^5, not f" actually requires.
+    steps = [
+        ("zoom", QPointF(120, 80), ZOOM_FACTOR_PER_NOTCH ** 3),
+        ("pan", QPointF(-30, 15)),
+        ("zoom", QPointF(200, 150), ZOOM_FACTOR_PER_NOTCH ** -2),
+        ("pan", QPointF(10, -5)),
+        ("zoom", QPointF(60, 200), ZOOM_FACTOR_PER_NOTCH ** 5),
+    ]
+    test_point = QPointF(37, 91)
+    expected_point = QPointF(test_point)
+    for kind, *args in steps:
+        if kind == "zoom":
+            anchor, f = args
+            expected_point = QPointF(anchor.x() + f * (expected_point.x() - anchor.x()),
+                                     anchor.y() + f * (expected_point.y() - anchor.y()))
+        else:
+            (delta,) = args
+            expected_point = expected_point + delta
+
+    view6 = ImageView(Session())
+    view6.resize(400, 400)
+    for kind, *args in steps:
+        if kind == "zoom":
+            anchor, f = args
+            view6._compose_zoom(anchor, f)
+        else:
+            (delta,) = args
+            view6._compose_pan(delta)
+    k6, t6 = view6._preview_scale, view6._preview_translation
+    actual_point = QPointF(k6 * test_point.x() + t6.x(), k6 * test_point.y() + t6.y())
+
+    check(abs(actual_point.x() - expected_point.x()) < 1e-6 and
+          abs(actual_point.y() - expected_point.y()) < 1e-6,
+          "composing 5 mixed zoom/pan steps matches direct sequential substitution")
+
+    # set_image resets the accumulator: a freshly painted pixmap has
+    # nothing left to approximate.
+    view6.set_image(np.zeros((10, 10)))
+    check(view6._preview_scale == 1.0 and
+          view6._preview_translation.x() == 0.0 and view6._preview_translation.y() == 0.0,
+          "set_image resets the placeholder transform to identity")
 
     # ---- window: initial render, threading, progressive display ------------------
     print("\nwindow: initial render happens and does not block:")
@@ -276,7 +368,6 @@ def main() -> None:
     current_id = window._request_id
     check(current_id != stale_id, "a new request gets a new id")
 
-    import numpy as np
     window.image_view._pixmap = None
     window._on_full_ready(stale_id, np.zeros((10, 10)))
     check(window.image_view._pixmap is None,
