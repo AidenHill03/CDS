@@ -22,7 +22,8 @@ RENDER_MODES = ("julia", "parameter", "basin", "greens")
 
 
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
-               settings: cdx.RenderSettings, mode: str):
+               settings: cdx.RenderSettings, mode: str,
+               cancel: cdx.CancelToken | None = None):
     """Renders `rational_map` at `param` over `viewport`/`settings`, in the
     given mode. A free function rather than a Session method, and taking
     every value explicitly rather than reading them off a Session, so a
@@ -30,6 +31,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     of session state without touching the Session object itself -- Session
     is owned and mutated by the GUI thread, and has no thread-safety of its
     own to rely on.
+
+    `cancel`, if given, is checked by the underlying render loop once per
+    column (see cdx.Renderer's docs) and makes this interruptible from
+    another thread; on cancellation the returned array is partial and
+    should be discarded, not displayed. NOTE: find_attractors (used for
+    "basin" mode, to discover the cycles being classified against) does not
+    itself check `cancel` -- it has no per-column notion to check at, being
+    an iterate-every-critical-orbit computation rather than a per-pixel one.
+    A slow find_attractors call (a root-finding-heavy custom map) is not
+    interruptible by this yet.
 
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
     convention; plot with origin='lower').
@@ -39,18 +50,18 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     renderer = cdx.Renderer(map=cdx.Map.custom(rational_map, param), viewport=viewport,
                             settings=settings)
     if mode == "julia":
-        return renderer.render_julia()
+        return renderer.render_julia(cancel)
     if mode == "parameter":
-        return renderer.render_parameter()
+        return renderer.render_parameter(cancel)
     if mode == "basin":
         # Recomputed on every call rather than cached: find_attractors is a
         # real cost for a root-finding-heavy custom map, but there is no
         # cache-invalidation machinery here to get wrong, and nothing so far
         # has needed one. Revisit if profiling says so.
         cycles = cdx.find_attractors(rational_map, param)
-        return renderer.render_basin(cycles)
+        return renderer.render_basin(cycles, cancel)
     if mode == "greens":
-        array, _normalized = renderer.render_greens()
+        array, _normalized = renderer.render_greens(cancel=cancel)
         return array
     raise AssertionError(f"unreachable: mode={mode!r}")
 

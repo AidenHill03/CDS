@@ -16,6 +16,7 @@ plugin search path):
 
 from __future__ import annotations
 
+import threading
 import time
 
 from PySide6.QtCore import QPoint
@@ -23,7 +24,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.sandbox import ImageView, SandboxWindow
+from app.sandbox import ImageView, RenderTask, SandboxWindow
 from app.session import Session
 
 failures = 0
@@ -161,6 +162,86 @@ def main() -> None:
 
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=20000)
     check(ok, "the slow render eventually completes and is displayed")
+
+    # ---- cancellation ------------------------------------------------------------
+    print("\ncancellation:")
+
+    # RenderTask.run()'s own cancellation handling, in isolation: called
+    # synchronously here (not through the thread pool), with a background
+    # thread cancelling shortly after it starts, so this measures ONLY
+    # run()'s response to cancellation -- not conflated with QThreadPool
+    # scheduling or _pending_tasks' sweep-on-next-start cleanup timing
+    # (tested separately below), the way going through
+    # SandboxWindow._start_render() would.
+    slow_map = cdx.RationalMap.mandelbrot()
+    slow_param = complex(-0.7269, 0.1889)
+    slow_viewport = cdx.Viewport(complex(0.05, 0.05), 1.4, 1000)
+    slow_settings = cdx.RenderSettings(250, 2.0, 1e-6, 1)   # single-threaded, slow but bounded
+
+    t0 = time.perf_counter()
+    RenderTask(1, slow_map, slow_param, slow_viewport, slow_settings,
+              "julia", cdx.CancelToken()).run()
+    uncancelled_time = time.perf_counter() - t0
+
+    cancel_token = cdx.CancelToken()
+    def cancel_soon():
+        time.sleep(0.02)
+        cancel_token.cancel()
+    canceller = threading.Thread(target=cancel_soon)
+    canceller.start()
+    t0 = time.perf_counter()
+    RenderTask(2, slow_map, slow_param, slow_viewport, slow_settings,
+              "julia", cancel_token).run()
+    cancelled_time = time.perf_counter() - t0
+    canceller.join()
+
+    check(cancelled_time < uncancelled_time * 0.5,
+          f"a cancelled RenderTask.run() returns well under the uncancelled time "
+          f"({cancelled_time:.3f}s vs {uncancelled_time:.3f}s)")
+
+    # Now the same scenario through the real dispatch path: starting a new
+    # render immediately cancels the superseded one's token.
+    window.session.viewport = slow_viewport
+    window._start_render()
+    stale_task = window._pending_tasks[window._request_id]
+    window._start_render()   # supersedes the task started above
+    check(stale_task.cancel.is_cancelled,
+          "starting a new render immediately cancels the superseded one's token")
+
+    # Rapid-fire many supersessions (simulating a fast scroll burst, each
+    # notch calling _start_render once the debounce settles) --
+    # _pending_tasks must not accumulate one stale entry per call.
+    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 80)
+    for _ in range(15):
+        window._start_render()
+    ok = wait_for(lambda: len(window._pending_tasks) <= 1, timeout_ms=10000)
+    check(ok, "15 rapid supersessions leave at most the current task pending, not 15 stale ones")
+
+    # closeEvent cancels and returns immediately rather than draining the
+    # pool -- verified on a second window (the shared `window` above gets
+    # closed at the very end of this script) so the rest of the test suite
+    # can keep using it afterward.
+    w2 = SandboxWindow()
+    w2.session.map = cdx.RationalMap.mandelbrot()
+    w2.session.param = complex(-0.7269, 0.1889)
+    w2.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
+    w2.session.render_settings = cdx.RenderSettings(400, 2.0, 1e-6, 1)
+    w2._start_render()
+    pending_before_close = list(w2._pending_tasks.values())
+
+    t0 = time.perf_counter()
+    w2.close()
+    close_time = time.perf_counter() - t0
+    check(close_time < 0.2,
+          f"closeEvent returns immediately ({close_time * 1000:.1f} ms), not after draining the pool")
+    check(all(t.cancel.is_cancelled for t in pending_before_close),
+          "closeEvent cancelled every task that was still pending")
+    # Let the now-cancelled background render actually finish before this
+    # script exits, for the same reason test_sandbox.py's very last line
+    # closes `window`: an interpreter shutdown racing a still-running (even
+    # if now brief) worker thread is exactly the crash this mechanism
+    # exists to avoid.
+    QTest.qWait(500)
 
     # ---- progressive rendering: preview arrives, then is replaced -----------------
     print("\nprogressive rendering:")

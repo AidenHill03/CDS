@@ -98,28 +98,44 @@ class RenderTask:
     """
 
     def __init__(self, request_id: int, rational_map: cdx.RationalMap, param: complex,
-                viewport: cdx.Viewport, settings: cdx.RenderSettings, mode: str):
+                viewport: cdx.Viewport, settings: cdx.RenderSettings, mode: str,
+                cancel: cdx.CancelToken):
         self.request_id = request_id
         self.rational_map = rational_map
         self.param = param
         self.viewport = viewport
         self.settings = settings
         self.mode = mode
+        self.cancel = cancel
         self.signals = RenderSignals()
 
     def run(self) -> None:
+        # Checked at every natural checkpoint, not just once at the top:
+        # cancellation can arrive at any point while this runs, and a
+        # cancelled task must not emit anything at all (see
+        # SandboxWindow.closeEvent -- a cancelled-but-still-emitting task is
+        # exactly the race that made draining the pool on close necessary
+        # before cancellation existed; skipping emit() entirely here is what
+        # lets closeEvent skip waiting instead).
         try:
+            if self.cancel.is_cancelled:
+                return
             preview_res = max(1, self.viewport.resolution // PREVIEW_RESOLUTION_DIVISOR)
             preview_viewport = cdx.Viewport(self.viewport.center, self.viewport.scale, preview_res)
             preview_array = render_map(self.rational_map, self.param, preview_viewport,
-                                       self.settings, self.mode)
+                                       self.settings, self.mode, self.cancel)
+            if self.cancel.is_cancelled:
+                return
             self.signals.partial_ready.emit(self.request_id, preview_array)
 
             full_array = render_map(self.rational_map, self.param, self.viewport,
-                                    self.settings, self.mode)
+                                    self.settings, self.mode, self.cancel)
+            if self.cancel.is_cancelled:
+                return
             self.signals.full_ready.emit(self.request_id, full_array)
         except Exception as exc:   # report to the GUI thread rather than crashing the pool
-            self.signals.failed.emit(self.request_id, str(exc))
+            if not self.cancel.is_cancelled:
+                self.signals.failed.emit(self.request_id, str(exc))
 
 
 class _Runnable(QRunnable):
@@ -320,12 +336,9 @@ class SandboxWindow(QMainWindow):
         self._initial_viewport = cdx.Viewport(vp0.center, vp0.scale, vp0.resolution)
 
         self._request_id = 0
-        # A dedicated pool, not QThreadPool.globalInstance(): closeEvent
-        # below drains it before allowing the window to close, and draining
-        # the process-wide global pool would be both slower than necessary
-        # (waiting on unrelated work, if anything else in the process used
-        # it) and a needless bit of global-state coupling for a pool nothing
-        # else in this app needs to share.
+        # A dedicated pool, not QThreadPool.globalInstance(): keeps this
+        # app's renders independent of anything else in the process that
+        # might use the global pool.
         self._thread_pool = QThreadPool()
         # RenderTask (and the RenderSignals QObject it owns) has no other
         # Python-side strong reference once _start_render() returns -- the
@@ -333,9 +346,14 @@ class SandboxWindow(QMainWindow):
         # Without this, Python's GC can (and does: this was a real crash,
         # not a theoretical one -- "RuntimeError: Signal source has been
         # deleted") collect the task while its worker thread is still
-        # running and about to emit through it. Entries are removed once a
-        # task's final signal (full_ready or failed) has fired, whether
-        # that result was superseded and discarded or actually displayed.
+        # running and about to emit through it. Entries for a task that
+        # completes (or fails) normally are removed when its final signal
+        # fires. A CANCELLED task emits nothing at all (see RenderTask.run),
+        # so its entry is instead swept on the NEXT _start_render() call,
+        # once cancellation (which per-column checking bounds to roughly one
+        # column's worth of work, not the full render) has had a full round
+        # to actually finish -- the same "good enough, not provably instant"
+        # tradeoff closeEvent below makes explicitly for the same reason.
         self._pending_tasks: dict[int, RenderTask] = {}
 
         self._debounce_timer = QTimer(self)
@@ -376,6 +394,18 @@ class SandboxWindow(QMainWindow):
 
     # ---- render dispatch ---------------------------------------------------------
     def _start_render(self) -> None:
+        # Every still-pending task is now stale -- cancel it immediately
+        # rather than letting it run to completion only to be discarded by
+        # the request_id check. Also sweep away entries left over from an
+        # EARLIER round that were cancelled then: see the comment on
+        # _pending_tasks's declaration for why cleanup happens here instead
+        # of via a signal from the (silent, on cancellation) task itself.
+        for stale_id, stale_task in list(self._pending_tasks.items()):
+            if stale_task.cancel.is_cancelled:
+                del self._pending_tasks[stale_id]
+            else:
+                stale_task.cancel.cancel()
+
         self._request_id += 1
         request_id = self._request_id
 
@@ -385,7 +415,8 @@ class SandboxWindow(QMainWindow):
         settings_snapshot = cdx.RenderSettings(rs.max_iter, rs.escape_radius, rs.tol, rs.threads)
 
         task = RenderTask(request_id, self.session.map, self.session.param,
-                          viewport_snapshot, settings_snapshot, self.session.render_mode)
+                          viewport_snapshot, settings_snapshot, self.session.render_mode,
+                          cdx.CancelToken())
         task.signals.partial_ready.connect(self._on_partial_ready)
         task.signals.full_ready.connect(self._on_full_ready)
         task.signals.failed.connect(self._on_render_failed)
@@ -430,17 +461,18 @@ class SandboxWindow(QMainWindow):
 
     # ---- shutdown ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
-        # A SUPERSEDED task (one whose result gets discarded because a newer
-        # request has already replaced it) still has a real worker thread
-        # running to completion in the background -- discarding its result
-        # does not cancel it, since cdx's render_* calls have no interrupt
-        # mechanism. If the window closes (and Qt starts tearing down
-        # QObjects) before that thread reaches its own emit() call, the
-        # signal fires into already-destroyed objects and crashes. Draining
-        # the pool here is what rules that out, rather than hoping every
-        # in-flight task happens to finish first.
+        # Cancel everything still running and close right away, rather than
+        # calling self._thread_pool.waitForDone() -- with cancellation,
+        # per-column checking bounds a worker thread's remaining work to
+        # roughly one column, not the rest of a possibly multi-second
+        # render, so the residual window where a task could still be
+        # touching Qt objects as they get torn down is milliseconds, not
+        # seconds. RenderTask.run() emits nothing at all once cancelled (see
+        # its own comment), which is what keeps that residual window from
+        # being a real risk rather than just a shorter one.
         self._debounce_timer.stop()
-        self._thread_pool.waitForDone()
+        for task in self._pending_tasks.values():
+            task.cancel.cancel()
         super().closeEvent(event)
 
 
