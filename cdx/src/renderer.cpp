@@ -223,7 +223,7 @@ double Renderer::precision_floor() const {
 }
 
 template <typename F>
-void Renderer::parallel_columns(F body) const {
+void Renderer::parallel_columns(F body, const std::atomic<bool>* cancel) const {
     const int cols = view_.resolution;
     unsigned n = settings_.threads > 0
                      ? static_cast<unsigned>(settings_.threads)
@@ -231,8 +231,16 @@ void Renderer::parallel_columns(F body) const {
     if (n == 0) n = 1;
     n = std::min<unsigned>(n, static_cast<unsigned>(std::max(1, cols)));
 
+    // relaxed: this is a plain "has someone asked us to stop" poll, not
+    // synchronizing access to any other data -- the caller only ever reads
+    // the (discarded, on cancellation) partial Image after every worker
+    // thread has been joined below, which is itself a full synchronization
+    // point regardless of this load's memory order.
     if (n == 1) {
-        for (int c = 0; c < cols; ++c) body(c);
+        for (int c = 0; c < cols; ++c) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) return;
+            body(c);
+        }
         return;
     }
 
@@ -243,8 +251,11 @@ void Renderer::parallel_columns(F body) const {
         const int lo = static_cast<int>(t) * chunk;
         const int hi = std::min(cols, lo + chunk);
         if (lo >= hi) break;
-        pool.emplace_back([&body, lo, hi] {
-            for (int c = lo; c < hi; ++c) body(c);
+        pool.emplace_back([&body, lo, hi, cancel] {
+            for (int c = lo; c < hi; ++c) {
+                if (cancel && cancel->load(std::memory_order_relaxed)) return;
+                body(c);
+            }
         });
     }
     for (auto& th : pool) th.join();
@@ -253,7 +264,7 @@ void Renderer::parallel_columns(F body) const {
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
-Image Renderer::render_julia() const {
+Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
     const double R2 = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -279,14 +290,14 @@ Image Renderer::render_julia() const {
             }
             img.at(col, row) = out;
         }
-    });
+    }, cancel);
     return img;
 }
 
 // -----------------------------------------------------------------------------
 // Parameter plane
 // -----------------------------------------------------------------------------
-Image Renderer::render_parameter() const {
+Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
     const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -320,14 +331,15 @@ Image Renderer::render_parameter() const {
             }
             img.at(col, row) = out;
         }
-    });
+    }, cancel);
     return img;
 }
 
 // -----------------------------------------------------------------------------
 // Basins
 // -----------------------------------------------------------------------------
-Image Renderer::render_basin(const std::vector<Cycle>& cycles) const {
+Image Renderer::render_basin(const std::vector<Cycle>& cycles,
+                             const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
     if (cycles.empty()) return img;
@@ -365,14 +377,14 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles) const {
             }
             img.at(col, row) = label;
         }
-    });
+    }, cancel);
     return img;
 }
 
 // -----------------------------------------------------------------------------
 // Green's function
 // -----------------------------------------------------------------------------
-Image Renderer::render_greens(bool* normalized) const {
+Image Renderer::render_greens(bool* normalized, const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
     const double escR = settings_.escape_radius;
     Image img(res, res);
@@ -400,7 +412,7 @@ Image Renderer::render_greens(bool* normalized) const {
             if (is_bad(acc) || acc > kHuge || acc < -kHuge) acc = 0.0;
             img.at(col, row) = acc;
         }
-    });
+    }, cancel);
     return img;
 }
 

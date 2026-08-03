@@ -24,6 +24,7 @@
 
 #include "cdx/rational.hpp"
 
+#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <memory>
@@ -209,19 +210,30 @@ public:
     void zoom(Cplx target, double factor);
 
     // --- render modes --------------------------------------------------------
+    //
+    // Every mode below takes an optional `cancel`: a caller-owned flag,
+    // checked ONCE PER COLUMN (not just at the start and end -- a render
+    // that only checked at the boundaries would still block a caller for
+    // the full render duration, which defeats the purpose). ~1000 checks
+    // per render is free relative to the per-pixel work; see
+    // parallel_columns. When cancel is set mid-render, the render loop
+    // returns early with a PARTIAL image; the caller is expected to discard
+    // it, not display it. cancel may be nullptr (the default), meaning
+    // "never cancel," identical to the pre-cancellation behaviour.
 
     // Escape-time Julia set of the bound map. Value is the smooth escape
     // count n + 1 - log(log|z|)/log 2, or 0 for orbits that never escaped.
-    Image render_julia() const;
+    Image render_julia(const std::atomic<bool>* cancel = nullptr) const;
 
     // Parameter plane: each pixel is a parameter value, the orbit starts at
     // that map's critical point. Reproduces the Mandelbrot/multibrot sets and
     // the McMullenbrot. The bound parameter is ignored.
-    Image render_parameter() const;
+    Image render_parameter(const std::atomic<bool>* cancel = nullptr) const;
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.
-    Image render_basin(const std::vector<Cycle>& cycles) const;
+    Image render_basin(const std::vector<Cycle>& cycles,
+                       const std::atomic<bool>* cancel = nullptr) const;
 
     // Green's function (dynamical potential). Accumulates log(max(|z|,1))
     // over the orbit and divides by degree^max_iter.
@@ -230,7 +242,7 @@ public:
     // (2^200 is far outside range). When it would overflow, the result is
     // returned UNNORMALIZED and `normalized` is set false -- values remain
     // comparable within one image but not across different max_iter.
-    Image render_greens(bool* normalized = nullptr) const;
+    Image render_greens(bool* normalized = nullptr, const std::atomic<bool>* cancel = nullptr) const;
 
     // Deepest zoom the double-precision grid can still resolve: below this
     // half-width, neighbouring pixels round to the same double and the image
@@ -240,8 +252,11 @@ public:
 
 private:
     // Runs `body(col)` for every column, across the configured thread count.
+    // Checks `cancel` (if non-null) once per column, on every worker thread;
+    // a set flag stops that thread taking any further columns. Does not
+    // itself clear or own `cancel` -- purely a check.
     template <typename F>
-    void parallel_columns(F body) const;
+    void parallel_columns(F body, const std::atomic<bool>* cancel = nullptr) const;
 
     Map            map_;
     Viewport       view_;

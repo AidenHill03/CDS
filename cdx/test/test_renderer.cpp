@@ -16,10 +16,12 @@
 #include "cdx/renderer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <thread>
 
 using namespace cdx;
 
@@ -151,6 +153,43 @@ int main() {
                         100.0 * esc / M.data.size());
         }
         std::printf("  (MATLAB MEX reference on the same case: 0.708 s)\n");
+    }
+
+    // ---- cancellation --------------------------------------------------------
+    // Per-COLUMN checking (not just start/end) is the point: single-threaded
+    // so progress is deterministically one column at a time, and a cancel
+    // flag set a short, fixed delay after starting should cut the render
+    // off dramatically short of the uncancelled duration, not merely a
+    // little short (which a start/end-only check would also manage to do,
+    // for the wrong reason -- it would just run to completion regardless).
+    std::printf("\ncancellation:\n");
+    {
+        Renderer r(Map(Family::Quadratic, {-0.7269, 0.1889}),
+                   Viewport{{0.0, 0.0}, 1.5, 1500},
+                   RenderSettings{300, 2.0, 1e-6, 1});   // single-threaded: deterministic
+
+        const auto t0 = std::chrono::steady_clock::now();
+        Image full = r.render_julia();
+        const auto t1 = std::chrono::steady_clock::now();
+        const double uncancelled_s = std::chrono::duration<double>(t1 - t0).count();
+
+        std::atomic<bool> cancel{false};
+        std::thread canceller([&cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            cancel.store(true, std::memory_order_relaxed);
+        });
+        const auto t2 = std::chrono::steady_clock::now();
+        Image partial = r.render_julia(&cancel);   // discarded by contract; only timing matters here
+        const auto t3 = std::chrono::steady_clock::now();
+        canceller.join();
+        const double cancelled_s = std::chrono::duration<double>(t3 - t2).count();
+
+        std::printf("  uncancelled: %.3f s | cancelled ~20ms in: %.3f s\n",
+                    uncancelled_s, cancelled_s);
+        check(cancelled_s < uncancelled_s * 0.5,
+              "a cancelled render returns well under the uncancelled time");
+        check(static_cast<int>(partial.data.size()) == 1500 * 1500,
+              "the (discarded) partial image is still the correct shape, just incompletely filled");
     }
 
     std::printf("\n%s (%d failure%s)\n",
