@@ -24,6 +24,7 @@
 
 #include "cdx/renderer.hpp"
 #include "cdx/expr.hpp"
+#include "cdx/analysis.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -60,6 +61,24 @@ py::array_t<double> image_to_numpy(Image&& img) {
         {static_cast<py::ssize_t>(sizeof(double) * w),
          static_cast<py::ssize_t>(sizeof(double))},
         ptr, owner);
+}
+
+// The reverse of image_to_numpy, for analysis functions (wada_diagnostic,
+// extract_boundary_points) that take an Image: every render_* method hands
+// Python a NumPy array, never an Image object (Image itself is not bound),
+// so this is how a basin array a user rendered gets back into C++. Copies
+// (unlike the zero-copy render path) since there is no way to alias a
+// NumPy-owned buffer as an Image's std::vector<double> storage.
+Image numpy_to_image(py::array_t<double, py::array::c_style | py::array::forcecast> arr) {
+    if (arr.ndim() != 2) throw std::invalid_argument("expected a 2D array (rows, cols)");
+    auto buf = arr.unchecked<2>();
+    const int h = static_cast<int>(buf.shape(0));
+    const int w = static_cast<int>(buf.shape(1));
+    Image img(w, h);
+    for (int row = 0; row < h; ++row)
+        for (int col = 0; col < w; ++col)
+            img.at(col, row) = buf(row, col);
+    return img;
 }
 
 Family family_from_py(const std::string& s) {
@@ -163,6 +182,17 @@ PYBIND11_MODULE(cdx, m) {
                    (t.enabled ? "" : " (disabled)") + ">";
         });
 
+    py::class_<FixedPoint>(m, "FixedPoint")
+        .def(py::init<>())
+        .def_readwrite("point",      &FixedPoint::point)
+        .def_readwrite("multiplier", &FixedPoint::multiplier)
+        .def("__repr__", [](const FixedPoint& fp) {
+            return "<cdx.FixedPoint point=(" + std::to_string(fp.point.real()) + "," +
+                   std::to_string(fp.point.imag()) + ") multiplier=(" +
+                   std::to_string(fp.multiplier.real()) + "," +
+                   std::to_string(fp.multiplier.imag()) + ")>";
+        });
+
     py::class_<RationalMap>(m, "RationalMap")
         .def(py::init<>())
         .def(py::init<std::string>(), py::arg("name"))
@@ -190,6 +220,9 @@ PYBIND11_MODULE(cdx, m) {
         .def("deriv", &RationalMap::deriv, py::arg("z"), py::arg("a"))
         .def("degree", &RationalMap::degree, py::arg("a"))
         .def("pole_locations", &RationalMap::pole_locations, py::arg("a"))
+        .def("pole_orders", &RationalMap::pole_orders, py::arg("a"),
+             "TRUE local order at each of pole_locations(a)'s entries, same "
+             "index for index.")
         .def("critical_points", &RationalMap::critical_points, py::arg("a"),
              "All critical points on the Riemann sphere, WITH multiplicity: "
              "ordinary derivative zeros, each pole (multiplicity order-1), "
@@ -201,6 +234,10 @@ PYBIND11_MODULE(cdx, m) {
              "critical_points(a), deduplicated to one representative per "
              "critical point -- what you want when seeding one orbit per "
              "critical point rather than iterating multiplicity times.")
+        .def("fixed_points", &RationalMap::fixed_points, py::arg("a"),
+             "ALL fixed points R(z)==z (not just attracting ones -- see "
+             "cdx.find_attractors for that), each with its multiplier. "
+             "Includes infinity when R(infinity)==infinity.")
         .def("to_formula", &RationalMap::to_formula)
         .def("serialize", &RationalMap::serialize)
         .def_static("deserialize", [](const std::string& text) {
@@ -397,4 +434,86 @@ PYBIND11_MODULE(cdx, m) {
              "Green's function. Returns (array, normalized); normalized is "
              "False when degree^max_iter overflowed and the values are "
              "comparable only within this image.");
+
+    // ---- analysis layer ------------------------------------------------------
+    py::class_<FindAttractorsOptions>(m, "FindAttractorsOptions")
+        .def(py::init<>())
+        .def_readwrite("burn_in",           &FindAttractorsOptions::burn_in)
+        .def_readwrite("max_period",        &FindAttractorsOptions::max_period)
+        .def_readwrite("tol",               &FindAttractorsOptions::tol)
+        .def_readwrite("inf_cutoff",        &FindAttractorsOptions::inf_cutoff)
+        .def_readwrite("verify_multiplier", &FindAttractorsOptions::verify_multiplier);
+
+    m.def("find_attractors", &find_attractors, py::arg("map"), py::arg("a"),
+          py::arg("opts") = FindAttractorsOptions{},
+          "Discovers attracting cycles via critical orbits (Fatou's theorem). "
+          "Returns a list of Cycle, ready to pass to Renderer.render_basin.");
+
+    py::class_<WadaStats>(m, "WadaStats")
+        .def(py::init<>())
+        .def_readwrite("n_basins",            &WadaStats::n_basins)
+        .def_readwrite("unresolved_fraction", &WadaStats::unresolved_fraction)
+        .def_readwrite("boundary_fraction",   &WadaStats::boundary_fraction)
+        .def_readwrite("wada_fraction",       &WadaStats::wada_fraction)
+        .def_readwrite("radius_px",           &WadaStats::radius_px);
+
+    m.def("wada_diagnostic",
+          [](py::array_t<double, py::array::c_style | py::array::forcecast> labels,
+             double radius_fraction) {
+              return wada_diagnostic(numpy_to_image(labels), radius_fraction);
+          },
+          py::arg("labels"), py::arg("radius_fraction") = 0.004,
+          "Wada-boundary signatures on a basin label image (the array "
+          "Renderer.render_basin returns). radius_fraction scales with "
+          "resolution deliberately -- see WadaStats.wada_fraction's doc "
+          "comment for why the trend across resolutions is the signal, "
+          "not the absolute value at one setting.");
+
+    py::class_<HausdorffResult>(m, "HausdorffResult")
+        .def(py::init<>())
+        .def_readwrite("chordal",                   &HausdorffResult::chordal)
+        .def_readwrite("euclidean",                 &HausdorffResult::euclidean)
+        .def_readwrite("chordal_julia_to_target",    &HausdorffResult::chordal_julia_to_target)
+        .def_readwrite("chordal_target_to_julia",    &HausdorffResult::chordal_target_to_julia)
+        .def_readwrite("euclidean_julia_to_target",  &HausdorffResult::euclidean_julia_to_target)
+        .def_readwrite("euclidean_target_to_julia",  &HausdorffResult::euclidean_target_to_julia);
+
+    m.def("hausdorff_distance", &hausdorff_distance,
+          py::arg("julia_points"), py::arg("target_points"), py::arg("max_points") = 4000,
+          "Symmetric Hausdorff distance (chordal and Euclidean) between two "
+          "point sets, with all four directed distances also on the result -- "
+          "large julia_to_target means spurious structure, large "
+          "target_to_julia means missed boundary.");
+
+    m.def("extract_boundary_points",
+          [](py::array_t<double, py::array::c_style | py::array::forcecast> labels,
+             const Viewport& view) {
+              return extract_boundary_points(numpy_to_image(labels), view);
+          },
+          py::arg("labels"), py::arg("view"),
+          "Basin-label image (the array Renderer.render_basin returns) "
+          "boundary pixels as complex points -- how julia_points is "
+          "obtained in practice for hausdorff_distance.");
+
+    py::class_<DynamicalFacts::AttractingCycle>(m, "AttractingCycle")
+        .def(py::init<>())
+        .def_readwrite("points",     &DynamicalFacts::AttractingCycle::points)
+        .def_readwrite("period",     &DynamicalFacts::AttractingCycle::period)
+        .def_readwrite("multiplier", &DynamicalFacts::AttractingCycle::multiplier);
+
+    py::class_<DynamicalFacts>(m, "DynamicalFacts")
+        .def(py::init<>())
+        .def_readwrite("degree",            &DynamicalFacts::degree)
+        .def_readwrite("critical_points",   &DynamicalFacts::critical_points)
+        .def_readwrite("attracting_cycles", &DynamicalFacts::attracting_cycles)
+        .def_readwrite("pole_locations",    &DynamicalFacts::pole_locations)
+        .def_readwrite("pole_orders",       &DynamicalFacts::pole_orders)
+        .def_readwrite("fixed_points",      &DynamicalFacts::fixed_points);
+
+    m.def("dynamical_facts", &dynamical_facts, py::arg("map"), py::arg("a"),
+          py::arg("opts") = FindAttractorsOptions{},
+          "Bundles degree, critical_points, pole locations/orders, "
+          "fixed_points and find_attractors' attracting cycles (each with "
+          "period and multiplier) into one report -- the data-extraction "
+          "call app.session wraps for the sandbox UI.");
 }
