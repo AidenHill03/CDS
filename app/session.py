@@ -20,6 +20,44 @@ import cdx
 
 RENDER_MODES = ("julia", "parameter", "basin", "greens")
 
+# Default full-render resolution (display pixels per side, before overscan --
+# see app.sandbox's FULL_OVERSCAN_FACTOR/PREVIEW_OVERSCAN_FACTOR for how the
+# actual rendered buffer ends up larger than this). Chosen by measuring: the
+# largest resolution whose full render -- already at the 1.3x overscan
+# factor every full render now uses, in "parameter" mode (the startup
+# default -- see render_mode below) -- stayed under ~0.4s (median of 9 runs)
+# for z^2+a on the development machine.
+#
+# The number that first came out of this measurement (~1100) used the WRONG
+# map: cdx.Map(Family.Quadratic, a), the hardcoded fast path. Session always
+# renders through cdx.Map.custom(self.map, ...) (self.map is a RationalMap,
+# even for the "mandelbrot" preset -- see load_from_library/the map field
+# below), which goes through RationalMap's generic term evaluator instead --
+# measured at roughly 5-10x the cost per pixel. Re-measuring against THAT
+# path (what actually renders) put the real budget-respecting default
+# around 120, not 1100. See the P5a-final commit message for the numbers
+# and for a note on where that per-pixel cost actually goes -- there is a
+# concrete, currently-unexploited optimization available there (an
+# unnecessary full root-find of the critical point on EVERY pixel of a
+# parameter-plane render, even for shapes like z^2+a where it's the
+# parameter-independent constant 0), but fixing RationalMap's evaluator is
+# out of scope for this milestone, which only picks a default that respects
+# what the engine can do TODAY.
+DEFAULT_RESOLUTION = 120
+
+# Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
+# Julia set, not the origin (which gives the plain filled unit disc --
+# correct but uninstructive). This is NOT what the startup view shows --
+# Session starts in "parameter" mode (see render_mode below), which ignores
+# the bound parameter entirely (see render_map) -- it's what the dynamical
+# plane shows once the user switches to it.
+DEFAULT_JULIA_PARAM = complex(-0.7269, 0.1889)
+
+# Classic Mandelbrot framing: centered on -0.5, not 0, so the view spans
+# roughly [-2, 1] on the real axis instead of cropping the cardioid's tail.
+DEFAULT_PARAMETER_VIEW_CENTER = complex(-0.5, 0.0)
+DEFAULT_PARAMETER_VIEW_SCALE = 1.5
+
 
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
@@ -73,10 +111,15 @@ class Session:
 
     def __init__(self) -> None:
         self.map: cdx.RationalMap = cdx.RationalMap.mandelbrot()
-        self.param: complex = 0j
-        self.viewport: cdx.Viewport = cdx.Viewport()
+        self.param: complex = DEFAULT_JULIA_PARAM
+        # Starts on the PARAMETER PLANE (the Mandelbrot set): unlike the
+        # filled disc z^2+0 gives in julia mode, it teaches the tool by
+        # itself -- clicking around it is the natural first interaction.
+        self.viewport: cdx.Viewport = cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER,
+                                                    DEFAULT_PARAMETER_VIEW_SCALE,
+                                                    DEFAULT_RESOLUTION)
         self.render_settings: cdx.RenderSettings = cdx.RenderSettings()
-        self.render_mode: str = "julia"
+        self.render_mode: str = "parameter"
         self.library: cdx.FamilyLibrary = cdx.FamilyLibrary.with_defaults()
 
     # ---- render mode ---------------------------------------------------------

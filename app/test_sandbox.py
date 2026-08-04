@@ -25,7 +25,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.sandbox import ZOOM_FACTOR_PER_NOTCH, ImageView, RenderTask, SandboxWindow
+from app.sandbox import ImageView, RenderTask, SandboxWindow
 from app.session import Session
 
 failures = 0
@@ -122,96 +122,75 @@ def main() -> None:
     check(close(anchor_complex, anchor_after, 1e-9),
           "after panning, the point anchored at drag-start is back under the cursor")
 
-    # ---- instant zoom/pan feedback: the placeholder transform ---------------------
-    print("\ninstant feedback transform:")
+    # ---- overscan: instant feedback draws real pixels from the buffer's margin ----
+    print("\noverscan buffer mapping:")
 
-    # Cross-check against the REAL viewport update, independently -- not
-    # just that _compose_zoom is self-consistent, but that the pixel-space
-    # placeholder transform it produces EXACTLY matches what the real
-    # (complex-plane) cursor-anchored viewport update implies for an
-    # arbitrary probe pixel, computed via a completely separate path
-    # (pixel_to_complex under the OLD viewport, then the inverse mapping
-    # under the NEW one, worked out by hand here rather than reusing any
-    # ImageView method that isn't already independently verified above).
-    # If these two disagree even slightly, the image visibly jumps the
-    # instant the real render replaces the placeholder.
+    # set_image() is handed a buffer WIDER than the display viewport (same
+    # center, same pixel density, scaled up by an overscan factor -- what
+    # RenderTask.run() actually produces via _overscanned). The mapping
+    # back onto the display must use the buffer's OWN stored viewport, not
+    # assume the buffer matches the display exactly.
     session5 = Session()
-    session5.viewport = cdx.Viewport(complex(0.3, -0.2), 2.0, 500)
+    session5.viewport = cdx.Viewport(complex(0.3, -0.2), 1.0, 400)
     view5 = ImageView(session5)
-    view5.resize(500, 500)
+    view5.resize(400, 400)
 
-    probe_pixel = QPoint(340, 90)   # arbitrary; deliberately not the zoom cursor
-    cursor = QPoint(210, 260)
-    factor = ZOOM_FACTOR_PER_NOTCH ** 4
+    overscan_factor = 1.3
+    buffer_res = round(400 * overscan_factor)   # 520, exactly -- no rounding noise
+    buffer_viewport = cdx.Viewport(session5.viewport.center,
+                                   session5.viewport.scale * overscan_factor, buffer_res)
+    view5.set_image(np.zeros((buffer_res, buffer_res)), buffer_viewport)
 
-    probe_complex = view5._pixel_to_complex(probe_pixel)   # under the OLD viewport
-    w = view5._pixel_to_complex(cursor)
-    vp5 = session5.viewport
-    new_center = w - (w - vp5.center) / factor
-    new_scale = vp5.scale / factor
-    rect5 = view5._display_rect()
-    # Where the OLD viewport's probe_complex value falls under the NEW
-    # viewport -- the inverse of _pixel_to_complex, hand-derived here.
-    rel_x = (probe_complex.real - (new_center.real - new_scale)) / (2.0 * new_scale)
-    rel_y = (new_center.imag + new_scale - probe_complex.imag) / (2.0 * new_scale)
-    expected_pixel = QPointF(rect5.left() + rel_x * rect5.width(),
-                             rect5.top() + rel_y * rect5.height())
+    # Cross-check against a fully independent hand computation -- not
+    # _pixel_to_complex/_complex_to_buffer_pixel called and trusted, but the
+    # same formulas worked out by hand here -- for an arbitrary INTERIOR
+    # probe pixel (not a corner), confirming the two-corner source rect
+    # really does determine every point, as the affine argument in
+    # ImageView's docstring claims.
+    probe_pixel = QPoint(310, 120)
+    disp_vp = session5.viewport
+    rel_x = probe_pixel.x() / 400.0
+    rel_y = probe_pixel.y() / 400.0
+    probe_complex = complex(disp_vp.center.real - disp_vp.scale + rel_x * 2.0 * disp_vp.scale,
+                            disp_vp.center.imag + disp_vp.scale - rel_y * 2.0 * disp_vp.scale)
+    buf_rel_x = ((probe_complex.real - (buffer_viewport.center.real - buffer_viewport.scale))
+                / (2.0 * buffer_viewport.scale))
+    buf_rel_y = ((buffer_viewport.center.imag + buffer_viewport.scale - probe_complex.imag)
+                / (2.0 * buffer_viewport.scale))
+    expected_buffer_pixel = QPointF(buf_rel_x * buffer_res, buf_rel_y * buffer_res)
 
-    view5._compose_zoom(QPointF(cursor), factor)
-    k5, t5 = view5._preview_scale, view5._preview_translation
-    predicted_pixel = QPointF(k5 * probe_pixel.x() + t5.x(), k5 * probe_pixel.y() + t5.y())
+    source_rect = view5._buffer_source_rect()
+    actual_buffer_pixel = QPointF(source_rect.left() + rel_x * source_rect.width(),
+                                  source_rect.top() + rel_y * source_rect.height())
 
-    check(abs(predicted_pixel.x() - expected_pixel.x()) < 1e-6 and
-          abs(predicted_pixel.y() - expected_pixel.y()) < 1e-6,
-          "the placeholder zoom transform exactly matches the real viewport update, "
-          "cross-checked independently, not just internally consistent")
+    check(abs(actual_buffer_pixel.x() - expected_buffer_pixel.x()) < 1e-6 and
+          abs(actual_buffer_pixel.y() - expected_buffer_pixel.y()) < 1e-6,
+          "the buffer source rect maps a display pixel to exactly the complex point "
+          "the display viewport says it shows, via the buffer's own stored viewport")
 
-    # Composition: five steps (zoom, pan, zoom, pan, zoom -- deliberately
-    # mixed and at different anchors/directions) applied via _compose_zoom/
-    # _compose_pan must match applying the SAME steps one at a time by
-    # direct substitution to an arbitrary test point, not just the first
-    # step alone -- this is what "five wheel notches before the debounce
-    # fires needs f^5, not f" actually requires.
-    steps = [
-        ("zoom", QPointF(120, 80), ZOOM_FACTOR_PER_NOTCH ** 3),
-        ("pan", QPointF(-30, 15)),
-        ("zoom", QPointF(200, 150), ZOOM_FACTOR_PER_NOTCH ** -2),
-        ("pan", QPointF(10, -5)),
-        ("zoom", QPointF(60, 200), ZOOM_FACTOR_PER_NOTCH ** 5),
-    ]
-    test_point = QPointF(37, 91)
-    expected_point = QPointF(test_point)
-    for kind, *args in steps:
-        if kind == "zoom":
-            anchor, f = args
-            expected_point = QPointF(anchor.x() + f * (expected_point.x() - anchor.x()),
-                                     anchor.y() + f * (expected_point.y() - anchor.y()))
-        else:
-            (delta,) = args
-            expected_point = expected_point + delta
+    # With no pan/zoom drift since the render (display viewport's center
+    # equals the buffer's own center), the source rect is exactly the
+    # buffer's centred 1/overscan_factor crop.
+    expected_side = buffer_res / overscan_factor
+    expected_margin = (buffer_res - expected_side) / 2.0
+    check(abs(source_rect.width() - expected_side) < 1e-9 and
+          abs(source_rect.left() - expected_margin) < 1e-9,
+          "with no drift since the render, the source rect is the buffer's centred crop")
 
-    view6 = ImageView(Session())
-    view6.resize(400, 400)
-    for kind, *args in steps:
-        if kind == "zoom":
-            anchor, f = args
-            view6._compose_zoom(anchor, f)
-        else:
-            (delta,) = args
-            view6._compose_pan(delta)
-    k6, t6 = view6._preview_scale, view6._preview_translation
-    actual_point = QPointF(k6 * test_point.x() + t6.x(), k6 * test_point.y() + t6.y())
+    # buffer_edge_fraction: exactly 1/overscan_factor right after a fresh
+    # render (the display viewport's own half-width against the buffer's
+    # larger one), growing as the viewport zooms out or pans away from the
+    # buffer's center -- and an ImageView with no buffer yet is always due.
+    check(abs(view5.buffer_edge_fraction() - 1.0 / overscan_factor) < 1e-9,
+          "buffer_edge_fraction right after a render is exactly 1/overscan_factor")
 
-    check(abs(actual_point.x() - expected_point.x()) < 1e-6 and
-          abs(actual_point.y() - expected_point.y()) < 1e-6,
-          "composing 5 mixed zoom/pan steps matches direct sequential substitution")
+    session5.viewport = cdx.Viewport(disp_vp.center, disp_vp.scale * 1.25, disp_vp.resolution)
+    check(view5.buffer_edge_fraction() > 1.0 / overscan_factor,
+          "zooming out grows the buffer edge fraction")
 
-    # set_image resets the accumulator: a freshly painted pixmap has
-    # nothing left to approximate.
-    view6.set_image(np.zeros((10, 10)))
-    check(view6._preview_scale == 1.0 and
-          view6._preview_translation.x() == 0.0 and view6._preview_translation.y() == 0.0,
-          "set_image resets the placeholder transform to identity")
+    fresh_view = ImageView(Session())
+    check(fresh_view.buffer_edge_fraction() == 1.0,
+          "an ImageView with no buffer yet is always due for a render")
 
     # ---- window: initial render, threading, progressive display ------------------
     print("\nwindow: initial render happens and does not block:")
@@ -233,6 +212,7 @@ def main() -> None:
     print("\nrendering off the GUI thread:")
     window.session.map = cdx.RationalMap.mandelbrot()
     window.session.param = complex(-0.7269, 0.1889)
+    window.session.render_mode = "julia"   # Session now starts in "parameter"; this test needs julia
     window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
     window.session.render_settings = cdx.RenderSettings(400, 2.0, 1e-6, 1)   # single-threaded, slow
 
@@ -340,9 +320,9 @@ def main() -> None:
     seen_sizes = []
     original_set_image = window.image_view.set_image
 
-    def tracking_set_image(array):
+    def tracking_set_image(array, buffer_viewport):
         seen_sizes.append(array.shape)
-        original_set_image(array)
+        original_set_image(array, buffer_viewport)
 
     window.image_view.set_image = tracking_set_image
     window.session.viewport = cdx.Viewport(complex(0.1, 0.1), 1.8, 800)
@@ -357,7 +337,11 @@ def main() -> None:
         check(preview_shape[0] < full_shape[0],
               f"the preview ({preview_shape}) arrives before and is smaller than "
               f"the full render ({full_shape})")
-        check(full_shape == (800, 800), "the full render matches the requested resolution")
+        # Overscanned by FULL_OVERSCAN_FACTOR (1.3), not the bare requested
+        # resolution -- round(800*1.3) == 1040 exactly.
+        expected_full = round(800 * 1.3)
+        check(full_shape == (expected_full, expected_full),
+              f"the full render is the requested resolution, overscanned ({expected_full})")
 
     # ---- superseded requests are discarded ------------------------------------------
     print("\nsuperseded render requests:")
@@ -369,7 +353,7 @@ def main() -> None:
     check(current_id != stale_id, "a new request gets a new id")
 
     window.image_view._pixmap = None
-    window._on_full_ready(stale_id, np.zeros((10, 10)))
+    window._on_full_ready(stale_id, np.zeros((10, 10)), cdx.Viewport())
     check(window.image_view._pixmap is None,
           "a result tagged with a superseded request id is discarded, not displayed")
 

@@ -41,9 +41,43 @@ RENDER_DEBOUNCE_MS = 80
 # image when it arrives.
 PREVIEW_RESOLUTION_DIVISOR = 4
 
+# Overscan: every render request asks for a region WIDER than the visible
+# viewport (same pixel density, more area -- see _overscanned), so pan and
+# zoom-out have real rendered pixels to reveal immediately instead of an
+# empty border while the real re-render is still in flight. Squared cost (a
+# factor-f overscan is f^2 the pixel count of the un-overscanned request):
+# full uses a modest factor since it is already the most expensive render;
+# preview affords a much larger one because it starts from 1/16 the pixel
+# count (quartered per axis) of a full render, so even 4x its own cost is
+# still cheap -- and it's exactly the buffer on screen right after a big
+# zoom-out, where a wide real-pixel margin matters most.
+FULL_OVERSCAN_FACTOR = 1.3
+PREVIEW_OVERSCAN_FACTOR = 2.0
+
+# Trigger a fresh render once the visible viewport's edge has drifted this
+# far into the last-painted buffer's own half-width (as a fraction of it),
+# rather than relying solely on the ordinary debounce. A long continuous
+# drag or scroll restarts the debounce on every event and would otherwise
+# never let it fire, panning or zooming the visible window clean off the
+# edge of the buffer's real pixels before a fresh one ever lands.
+BUFFER_EDGE_FRACTION = 0.85
+
 # "Approaching" Renderer.precision_floor -- warn this many multiples out, so
 # the user has advance notice before the image actually degenerates.
 PRECISION_WARN_MULTIPLE = 100
+
+
+def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
+    """A viewport covering `factor` times the half-width of `viewport`, same
+    center, at the SAME pixel density (resolution scaled by the same
+    factor) -- so render cost scales as factor**2, not just factor. This is
+    the overscan buffer request; see FULL_OVERSCAN_FACTOR/
+    PREVIEW_OVERSCAN_FACTOR and ImageView's docstring for how the buffer's
+    own viewport is kept alongside the rendered array afterwards so the
+    display can map back onto it correctly.
+    """
+    resolution = max(1, round(viewport.resolution * factor))
+    return cdx.Viewport(viewport.center, viewport.scale * factor, resolution)
 
 
 def array_to_qimage(array: np.ndarray) -> QImage:
@@ -85,9 +119,9 @@ class RenderSignals(QObject):
     automatically and queues delivery to the GUI thread's event loop, which
     is what makes it safe to update widgets from the connected slots.
     """
-    partial_ready = Signal(int, object)   # request_id, ndarray
-    full_ready = Signal(int, object)       # request_id, ndarray
-    failed = Signal(int, str)              # request_id, error message
+    partial_ready = Signal(int, object, object)   # request_id, ndarray, buffer viewport
+    full_ready = Signal(int, object, object)       # request_id, ndarray, buffer viewport
+    failed = Signal(int, str)                       # request_id, error message
 
 
 class RenderTask:
@@ -117,22 +151,30 @@ class RenderTask:
         # exactly the race that made draining the pool on close necessary
         # before cancellation existed; skipping emit() entirely here is what
         # lets closeEvent skip waiting instead).
+        #
+        # Both stages render an OVERSCANNED buffer (see _overscanned), wider
+        # than self.viewport, and emit that buffer's own viewport alongside
+        # the array -- ImageView needs it to map the buffer back onto the
+        # display (see its docstring). self.viewport itself is never
+        # rendered directly.
         try:
             if self.cancel.is_cancelled:
                 return
             preview_res = max(1, self.viewport.resolution // PREVIEW_RESOLUTION_DIVISOR)
             preview_viewport = cdx.Viewport(self.viewport.center, self.viewport.scale, preview_res)
-            preview_array = render_map(self.rational_map, self.param, preview_viewport,
+            preview_buffer_viewport = _overscanned(preview_viewport, PREVIEW_OVERSCAN_FACTOR)
+            preview_array = render_map(self.rational_map, self.param, preview_buffer_viewport,
                                        self.settings, self.mode, self.cancel)
             if self.cancel.is_cancelled:
                 return
-            self.signals.partial_ready.emit(self.request_id, preview_array)
+            self.signals.partial_ready.emit(self.request_id, preview_array, preview_buffer_viewport)
 
-            full_array = render_map(self.rational_map, self.param, self.viewport,
+            full_buffer_viewport = _overscanned(self.viewport, FULL_OVERSCAN_FACTOR)
+            full_array = render_map(self.rational_map, self.param, full_buffer_viewport,
                                     self.settings, self.mode, self.cancel)
             if self.cancel.is_cancelled:
                 return
-            self.signals.full_ready.emit(self.request_id, full_array)
+            self.signals.full_ready.emit(self.request_id, full_array, full_buffer_viewport)
         except Exception as exc:   # report to the GUI thread rather than crashing the pool
             if not self.cancel.is_cancelled:
                 self.signals.failed.emit(self.request_id, str(exc))
@@ -167,28 +209,37 @@ class ImageView(QWidget):
 
     INSTANT FEEDBACK. session.viewport updates immediately on every wheel
     or pan event, but the real re-render is debounced (see SandboxWindow).
-    In between, the widget shows an OPTIMISTIC placeholder: the last
-    PAINTED pixmap, transformed by _preview_scale/_preview_translation, an
-    affine map (uniform scale + translation, no rotation) accumulated since
-    that pixmap was painted. Each wheel event composes a "scale by f about
-    the cursor pixel" step; each pan move event composes a pure translation
-    by the on-screen pixel delta since the last move event. Composition
-    (not recomputing from scratch against the original pixmap each time)
-    is what makes five wheel notches before the debounce fires show f^5,
-    not f. set_image() resets the accumulator to identity -- a freshly
-    painted pixmap has nothing left to approximate.
+    In between, the widget keeps showing the last PAINTED buffer -- but
+    that buffer is OVERSCANNED (rendered wider than the viewport it was
+    requested for; see _overscanned in this module), so it usually still
+    has real pixels covering the new, moved viewport. set_image() stores
+    the buffer's own viewport alongside its pixmap (_buffer_viewport);
+    paintEvent recomputes, on every paint, exactly which sub-rect of that
+    buffer the CURRENT session.viewport corresponds to (_buffer_source_rect)
+    and draws only that sub-rect stretched to fill the display. Because
+    this is recomputed fresh from the two known viewports every time rather
+    than accumulated incrementally across events, five wheel notches or a
+    long drag before the debounce fires need no special composition step --
+    session.viewport already reflects all of them, and the mapping from it
+    back onto the buffer is exact by construction, not an approximation
+    that could drift.
 
-    The zoom step is the EXACT inverse of the viewport's cursor-anchored
-    zoom (center' = w - (w-center)/f, scale' = scale/f), not an
-    approximation: pixel_to_complex is affine in viewport.center, so for
-    any point p_old on the OLD pixmap and the corresponding screen position
-    p_screen showing the same complex value under the NEW viewport,
-    p_screen = cursor_pixel + f*(p_old - cursor_pixel) -- a pure "scale by
-    f about cursor_pixel" -- follows directly by substituting the zoom
-    formula into pixel_to_complex and solving. If this and the real
-    viewport update ever disagree, the image visibly jumps the instant the
-    real render lands; test_sandbox.py checks the two match exactly, not
-    just approximately.
+    The mapping composes two independently-derived steps -- screen pixel to
+    complex value (_pixel_to_complex, under the CURRENT viewport) and
+    complex value to buffer-local pixel (_complex_to_buffer_pixel, under
+    the buffer's own stored viewport). Both are uniform scale + translation
+    only (no rotation, since neither viewport nor buffer is ever rotated),
+    so each is affine, and so is their composition -- meaning the two
+    corners used to build the source rect (_buffer_source_rect) determine
+    every interior point exactly, by linear interpolation, with no need to
+    recompute per-pixel. test_sandbox.py checks an arbitrary interior probe
+    pixel against a fully independent hand computation, not just the
+    corners, to confirm that.
+
+    Once the buffer's real margin runs out -- the visible viewport has
+    drifted far enough that part of it falls outside the buffer entirely --
+    see buffer_edge_fraction() for the check that asks SandboxWindow to
+    render a fresh buffer before the ordinary debounce would.
     """
 
     viewport_changed = Signal()
@@ -200,15 +251,17 @@ class ImageView(QWidget):
         self.setMinimumSize(200, 200)
 
         self._pixmap: QPixmap | None = None
-        self._preview_scale = 1.0
-        self._preview_translation = QPointF(0.0, 0.0)
+        # The viewport _pixmap was actually rendered for (wider than
+        # session.viewport by the overscan factor -- see _overscanned).
+        # None exactly when _pixmap is None; kept alongside it because
+        # _buffer_source_rect needs both to map back onto the display.
+        self._buffer_viewport: cdx.Viewport | None = None
 
         self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
 
         self._panning = False
         self._pan_anchor_complex: complex | None = None
-        self._last_pan_pixel: QPoint | None = None
 
     # ---- display geometry ----------------------------------------------------
     def _display_rect(self) -> QRect:
@@ -217,7 +270,7 @@ class ImageView(QWidget):
         y = (self.height() - side) // 2
         return QRect(x, y, side, side)
 
-    def _pixel_to_complex(self, pixel: QPoint) -> complex:
+    def _pixel_to_complex(self, pixel: QPoint | QPointF) -> complex:
         rect = self._display_rect()
         vp = self.session.viewport
         if rect.width() <= 0 or rect.height() <= 0:
@@ -231,35 +284,71 @@ class ImageView(QWidget):
         im = vp.center.imag + vp.scale - rel_y * 2.0 * vp.scale
         return complex(re, im)
 
-    # ---- instant-feedback transform: composed since the last painted render ----
-    def _compose_zoom(self, anchor: QPointF, factor: float) -> None:
-        # k_new = f*k_old; t_new = A + f*(t_old - A). See the class
-        # docstring for the derivation; test_sandbox.py checks this
-        # composed transform matches a direct recomputation, multi-step.
-        self._preview_translation = anchor + factor * (self._preview_translation - anchor)
-        self._preview_scale *= factor
+    # ---- overscan buffer mapping: buffer's own viewport, not the display's ------
+    def _complex_to_buffer_pixel(self, w: complex) -> QPointF:
+        # The exact inverse of _pixel_to_complex, applied to the BUFFER's
+        # stored viewport instead of the display's current one. Row 0 at
+        # the top, matching the pixmap (array_to_qimage already flipped it
+        # to screen convention), same as _pixel_to_complex assumes.
+        vp = self._buffer_viewport
+        width = self._pixmap.width()
+        height = self._pixmap.height()
+        rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
+        rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
+        return QPointF(rel_x * width, rel_y * height)
 
-    def _compose_pan(self, delta: QPointF) -> None:
-        self._preview_translation = self._preview_translation + delta
+    def _buffer_source_rect(self) -> QRectF | None:
+        """The sub-rect of the last-painted buffer (in its own pixel space)
+        that the CURRENT session.viewport corresponds to -- computed fresh
+        from the two known viewports every call, not accumulated across
+        events, so it is always exact regardless of how many wheel/pan
+        events have landed since the buffer was rendered. See the class
+        docstring.
+        """
+        if self._pixmap is None or self._buffer_viewport is None:
+            return None
+        rect = self._display_rect()
+        # Continuous corners (left+width, top+height), NOT QRect's own
+        # bottomRight() -- that is INCLUSIVE (left+width-1, top+height-1),
+        # a full pixel short of the edge _pixel_to_complex's rel_x/rel_y
+        # already treat as continuous. Using it here would make this crop
+        # off by roughly one buffer pixel in ~width, an approximation where
+        # this mapping is meant to be exact.
+        top_left = self._complex_to_buffer_pixel(
+            self._pixel_to_complex(QPointF(rect.left(), rect.top())))
+        bottom_right = self._complex_to_buffer_pixel(
+            self._pixel_to_complex(QPointF(rect.left() + rect.width(), rect.top() + rect.height())))
+        return QRectF(top_left, bottom_right)
 
-    def _transformed_rect(self, rect: QRect) -> QRectF:
-        k = self._preview_scale
-        t = self._preview_translation
-        return QRectF(k * rect.left() + t.x(), k * rect.top() + t.y(),
-                      k * rect.width(), k * rect.height())
+    def buffer_edge_fraction(self) -> float:
+        """How far the current session viewport's edge has drifted into
+        the last-painted buffer's own half-width, as a fraction of it (the
+        more extreme of the two axes) -- 1.0 means the visible viewport's
+        edge exactly touches the buffer's edge; values above that mean part
+        of the visible viewport is already outside the buffer's real
+        pixels. No buffer yet (nothing painted) is reported as maximally
+        due (1.0), same as an edge exactly reached -- both mean "render
+        now, don't wait for the ordinary debounce."
+        """
+        if self._buffer_viewport is None or self._buffer_viewport.scale <= 0:
+            return 1.0
+        vp = self.session.viewport
+        buf = self._buffer_viewport
+        d_re = abs(vp.center.real - buf.center.real) + vp.scale
+        d_im = abs(vp.center.imag - buf.center.imag) + vp.scale
+        return max(d_re, d_im) / buf.scale
 
     # ---- painting --------------------------------------------------------------
-    def set_image(self, array: np.ndarray) -> None:
+    def set_image(self, array: np.ndarray, buffer_viewport: cdx.Viewport) -> None:
         self._pixmap = QPixmap.fromImage(array_to_qimage(array))
-        self._preview_scale = 1.0
-        self._preview_translation = QPointF(0.0, 0.0)
+        self._buffer_viewport = buffer_viewport
         self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        if self._pixmap is not None:
-            painter.drawPixmap(self._transformed_rect(self._display_rect()), self._pixmap,
-                               QRectF(self._pixmap.rect()))
+        source_rect = self._buffer_source_rect()
+        if source_rect is not None:
+            painter.drawPixmap(QRectF(self._display_rect()), self._pixmap, source_rect)
         if self._rubber_band_rect is not None:
             pen = QPen(QColor(255, 255, 255))
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -282,7 +371,8 @@ class ImageView(QWidget):
         new_scale = vp.scale / factor
         self.session.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
 
-        self._compose_zoom(QPointF(cursor_pos), factor)
+        # Instant feedback: repainting now re-derives the buffer source
+        # rect from the viewport just set above -- see _buffer_source_rect.
         self.update()
 
         self.viewport_changed.emit()
@@ -297,7 +387,6 @@ class ImageView(QWidget):
         if is_pan:
             self._panning = True
             self._pan_anchor_complex = self._pixel_to_complex(pos)
-            self._last_pan_pixel = pos
         elif event.button() == Qt.MouseButton.LeftButton:
             self._rubber_band_origin = pos
             self._rubber_band_rect = QRect(pos, QSize())
@@ -313,14 +402,6 @@ class ImageView(QWidget):
             # test suite for the derivation this formula comes from.
             new_center = vp.center + (self._pan_anchor_complex - current_point)
             self.session.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
-
-            # Instant feedback: the raw on-screen pixel delta since the last
-            # move event is EXACTLY the translation needed (a pure center
-            # shift in the complex plane is exactly a pure pixel
-            # translation on screen; no scale change during a pan, so no
-            # anchor point is needed the way zoom's step needs one).
-            self._compose_pan(QPointF(pos) - QPointF(self._last_pan_pixel))
-            self._last_pan_pixel = pos
             self.update()
 
             self.viewport_changed.emit()
@@ -332,7 +413,6 @@ class ImageView(QWidget):
         if self._panning:
             self._panning = False
             self._pan_anchor_complex = None
-            self._last_pan_pixel = None
             self.viewport_changed.emit()
         elif self._rubber_band_origin is not None:
             rect = self._rubber_band_rect
@@ -419,7 +499,16 @@ class SandboxWindow(QMainWindow):
     @Slot()
     def _on_viewport_changed(self) -> None:
         self._update_status_bar()
-        self._debounce_timer.start()   # restarts if already running
+        # A render is normally debounced -- but if the visible viewport has
+        # drifted far enough into the last buffer's overscan margin, waiting
+        # out the debounce risks running off the buffer's real pixels before
+        # a fresh one lands (a long continuous drag/scroll restarts the
+        # debounce on every event and might never let it fire on its own).
+        if self.image_view.buffer_edge_fraction() > BUFFER_EDGE_FRACTION:
+            self._debounce_timer.stop()
+            self._start_render()
+        else:
+            self._debounce_timer.start()   # restarts if already running
 
     def _reset_view(self) -> None:
         iv = self._initial_viewport
@@ -459,18 +548,20 @@ class SandboxWindow(QMainWindow):
         self._pending_tasks[request_id] = task
         self._thread_pool.start(_Runnable(task))
 
-    @Slot(int, object)
-    def _on_partial_ready(self, request_id: int, array: np.ndarray) -> None:
+    @Slot(int, object, object)
+    def _on_partial_ready(self, request_id: int, array: np.ndarray,
+                          buffer_viewport: cdx.Viewport) -> None:
         if request_id != self._request_id:
             return   # superseded by a newer request; discard
-        self.image_view.set_image(array)
+        self.image_view.set_image(array, buffer_viewport)
 
-    @Slot(int, object)
-    def _on_full_ready(self, request_id: int, array: np.ndarray) -> None:
+    @Slot(int, object, object)
+    def _on_full_ready(self, request_id: int, array: np.ndarray,
+                       buffer_viewport: cdx.Viewport) -> None:
         self._pending_tasks.pop(request_id, None)   # this task is done; safe to release
         if request_id != self._request_id:
             return
-        self.image_view.set_image(array)
+        self.image_view.set_image(array, buffer_viewport)
 
     @Slot(int, str)
     def _on_render_failed(self, request_id: int, message: str) -> None:

@@ -35,8 +35,9 @@ def main() -> None:
     print("\ndefaults:")
     s = Session()
     check(s.map.name == "mandelbrot", "starts on the mandelbrot preset")
-    check(s.param == 0j, "starts at parameter 0")
-    check(s.render_mode == "julia", "starts in julia render mode")
+    check(s.param == complex(-0.7269, 0.1889),
+          "starts with the dendritic Julia parameter, for whenever the user switches to it")
+    check(s.render_mode == "parameter", "starts in parameter-plane render mode (the Mandelbrot set)")
     check(len(s.library) >= 6, "library starts populated (with_defaults)")
 
     # ---- render mode ------------------------------------------------------------
