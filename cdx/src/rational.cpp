@@ -9,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace cdx {
 
@@ -242,8 +243,32 @@ Cplx PoleTerm::effective_location(Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
+// 1e-12 absolute, matching pole_locations()'s own "same point" tolerance
+// (rational.cpp's pole_locations, push_unique) -- this check exists to
+// catch the SAME location told twice, not to reject a genuinely distinct
+// nearby pole, so it stays exactly as tight as that existing convention.
+constexpr double kPoleLocationSameTol = 1e-12;
+
+bool RationalMap::pole_location_conflict(Cplx location) const {
+    for (const auto& t : pole_) {
+        if (!t.enabled || t.location_is_param) continue;
+        if (std::abs(t.location - location) < kPoleLocationSameTol) return true;
+    }
+    if (std::abs(location) < kPoleLocationSameTol) {
+        for (const auto& t : poly_) {
+            if (t.enabled && t.exponent < 0) return true;
+        }
+    }
+    return false;
+}
+
 std::size_t RationalMap::add_poly(Cplx coeff, int exponent, int param_power,
                                   std::string label) {
+    if (exponent < 0) {
+        throw std::invalid_argument(
+            "poly terms cannot have a negative exponent (that represents a pole at the "
+            "origin) -- use add_pole instead, so a pole has exactly one representation");
+    }
     PolyTerm t;
     t.coeff = coeff;
     t.exponent = exponent;
@@ -255,6 +280,11 @@ std::size_t RationalMap::add_poly(Cplx coeff, int exponent, int param_power,
 
 std::size_t RationalMap::add_pole(Cplx location, Cplx strength, int order,
                                   int param_power, std::string label) {
+    if (pole_location_conflict(location)) {
+        throw std::invalid_argument(
+            "a pole already exists at " + fmt(location) + "; edit it instead of adding "
+            "a duplicate");
+    }
     PoleTerm t;
     t.location = location;
     t.strength = strength;
@@ -689,11 +719,14 @@ RationalMap RationalMap::mcmullen(int n) {
 }
 
 RationalMap RationalMap::newton_cubic() {
-    // N(z) = z - (z^3-1)/(3z^2) = (2/3) z + (1/3) z^-2
+    // N(z) = z - (z^3-1)/(3z^2) = (2/3) z + (1/3) z^-2. The second term is a
+    // pole of order 2 at the origin -- routed through add_pole, not a
+    // negative-exponent add_poly (which would now throw; see add_poly's own
+    // comment), so this preset has exactly one representation for it.
     RationalMap m("newton3");
     m.set_notes("Newton map of z^3-1, simplified to (2/3)z + (1/3)z^-2");
     m.add_poly({2.0 / 3.0, 0}, 1, 0, "(2/3)z");
-    m.add_poly({1.0 / 3.0, 0}, -2, 0, "(1/3)z^-2");
+    m.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "1/(3z^2)");
     return m;
 }
 

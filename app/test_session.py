@@ -149,6 +149,25 @@ def main() -> None:
     s2.remove_pole_term(0)
     check(len(s2.map.pole_terms()) == 0, "remove_pole_term removes the pole term")
 
+    # ---- term editing: pole-location uniqueness / negative-exponent rejection ----
+    print("\nterm editing (validation):")
+    s2b = Session()
+    s2b.map = cdx.RationalMap("scratch2")
+    try:
+        s2b.add_poly_term(1 + 0j, -2)
+        check(False, "add_poly_term with a negative exponent raises")
+    except ValueError as e:
+        check("negative exponent" in str(e), "add_poly_term raises ValueError, message explains why")
+    check(len(s2b.map.poly_terms()) == 0, "the rejected add_poly_term added nothing")
+
+    s2b.add_pole_term(1 + 0j, 1 + 0j, 1)
+    try:
+        s2b.add_pole_term(1 + 0j, 2 + 0j, 3)
+        check(False, "add_pole_term at an already-occupied location raises")
+    except ValueError as e:
+        check("already exists" in str(e), "add_pole_term raises ValueError, message names the conflict")
+    check(len(s2b.map.pole_terms()) == 1, "the rejected add_pole_term added nothing")
+
     # ---- library -----------------------------------------------------------------
     print("\nlibrary:")
     s3 = Session()

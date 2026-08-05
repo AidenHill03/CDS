@@ -27,6 +27,24 @@ static bool close(Cplx a, Cplx b, double tol = 1e-9) {
     return std::abs(a - b) < tol;
 }
 
+// add_pole() now rejects a second pole at a location that already has one
+// (see its own doc comment) -- correct for the normal editing path, but
+// several tests below deliberately construct a REDUNDANT pole (two term
+// objects at the same location) to check that pole_locations()/
+// pole_orders()/critical_points()/fixed_points() still combine such a
+// state correctly, since it CAN still arise from deserialize() or direct
+// pole_terms() mutation (both of which bypass add_pole entirely) even
+// though the validated add_pole path no longer creates one fresh. This
+// goes straight through pole_terms(), the same live-mutable-vector access
+// those two bypasses use, rather than pretending add_pole would allow it.
+static void push_pole_direct(RationalMap& m, Cplx location, Cplx strength, int order) {
+    PoleTerm t;
+    t.location = location;
+    t.strength = strength;
+    t.order = order;
+    m.pole_terms().push_back(t);
+}
+
 // Reference integer power for computing expected values in tests. Separate
 // from (and simpler than) the library's own ipow, so a bug shared between
 // the two wouldn't cancel out.
@@ -148,18 +166,130 @@ int main() {
               "evaluating exactly at a pole returns the huge escape sentinel");
     }
 
+    // ---- add_poly/add_pole validation: one representation per pole -----------
+    std::printf("\nadd_poly/add_pole validation:\n");
+    {
+        RationalMap m("test");
+        bool threw = false;
+        try { m.add_poly({1, 0}, -1); }
+        catch (const std::invalid_argument&) { threw = true; }
+        check(threw, "add_poly with a negative exponent throws std::invalid_argument");
+        check(m.poly_terms().empty(),
+              "the rejected call added nothing -- not a partial/rolled-back add");
+    }
+    {
+        RationalMap m("test");
+        // Exponent 0 (a bare constant/parameter term) and positive exponents
+        // are unaffected -- only negative ones represent a pole.
+        m.add_poly({1, 0}, 0);
+        m.add_poly({1, 0}, 5);
+        check(m.poly_terms().size() == 2, "exponent 0 and positive exponents are unaffected");
+    }
+    {
+        RationalMap m("test");
+        m.add_pole({1.0, 0.0}, {1.0, 0.0}, 1);
+        bool threw = false;
+        std::string what;
+        try { m.add_pole({1.0, 0.0}, {2.0, 0.0}, 3); }
+        catch (const std::invalid_argument& e) { threw = true; what = e.what(); }
+        check(threw, "add_pole at an already-occupied location throws std::invalid_argument");
+        check(m.pole_terms().size() == 1, "the rejected call added nothing");
+        check(what.find("1") != std::string::npos,
+              "the exception message identifies the colliding location, not just 'rejected'");
+    }
+    {
+        // Backward compatibility: a map that already has a negative-
+        // exponent PolyTerm at the origin (as any RationalMap built before
+        // this restriction existed could, e.g. one loaded via deserialize()
+        // -- add_poly's own restriction is not retroactive) must still be
+        // caught by add_pole's collision check, even though add_poly can no
+        // longer CREATE one fresh -- both mechanisms mean the same pole.
+        RationalMap m("legacy");
+        PolyTerm legacy_pole_term;
+        legacy_pole_term.coeff = {1.0, 0.0};
+        legacy_pole_term.exponent = -2;
+        m.poly_terms().push_back(legacy_pole_term);   // simulates pre-restriction / deserialized data
+        bool threw = false;
+        try { m.add_pole({0.0, 0.0}, {1.0, 0.0}, 1); }
+        catch (const std::invalid_argument&) { threw = true; }
+        check(threw, "add_pole at the origin throws when a legacy negative-exponent "
+                     "PolyTerm already implies a pole there");
+    }
+    {
+        // A DISABLED existing pole does not block a new one at the same
+        // spot -- disabled means invisible to eval() and everything else,
+        // so it should not be invisible-except-for-blocking-a-re-add.
+        RationalMap m("test");
+        m.add_pole({1.0, 0.0}, {1.0, 0.0}, 1);
+        m.pole_terms()[0].enabled = false;
+        bool threw = false;
+        try { m.add_pole({1.0, 0.0}, {2.0, 0.0}, 1); }
+        catch (const std::invalid_argument&) { threw = true; }
+        check(!threw, "a disabled pole at the same location does not block adding a new one");
+    }
+    {
+        // A pole whose location tracks the parameter (location_is_param)
+        // is skipped by the collision check -- see add_pole's own comment
+        // for why a fixed numeric collision can't be decided without `a`.
+        RationalMap m("test");
+        m.add_pole({0.0, 0.0}, {1.0, 0.0}, 1);
+        m.pole_terms()[0].location_is_param = true;
+        bool threw = false;
+        try { m.add_pole({0.0, 0.0}, {2.0, 0.0}, 1); }
+        catch (const std::invalid_argument&) { threw = true; }
+        check(!threw, "a location_is_param pole is skipped by the collision check");
+    }
+    {
+        // deserialize() bypasses add_poly/add_pole entirely (pushes
+        // directly onto the term vectors -- see rational.cpp), so an OLD
+        // saved file with a negative-exponent PolyTerm (e.g. a
+        // pre-restriction newton_cubic() someone saved to their library)
+        // must still round-trip without throwing.
+        RationalMap legacy("legacy");
+        PolyTerm legacy_term;
+        legacy_term.coeff = {1.0, 0.0};
+        legacy_term.exponent = -2;
+        legacy_term.label = "legacy pole";
+        legacy.poly_terms().push_back(legacy_term);
+        const std::string text = legacy.serialize();
+        RationalMap round;
+        std::string err;
+        check(RationalMap::deserialize(text, round, err),
+              "a serialized negative-exponent poly term still deserializes without throwing");
+        check(round.poly_terms().size() == 1 && round.poly_terms()[0].exponent == -2,
+              "...and keeps its exponent exactly, not silently converted");
+    }
+    {
+        // newton_cubic() itself must still construct without throwing --
+        // it now calls add_pole for its origin term, not a negative-
+        // exponent add_poly, and there's nothing for that add_pole call to
+        // collide with (its only poly term is the unrelated linear one).
+        bool threw = false;
+        try { RationalMap m = RationalMap::newton_cubic(); (void)m; }
+        catch (const std::invalid_argument&) { threw = true; }
+        check(!threw, "newton_cubic() constructs without throwing");
+        RationalMap m = RationalMap::newton_cubic();
+        check(m.poly_terms().size() == 1 && m.pole_terms().size() == 1,
+              "newton_cubic() now has exactly one poly term (linear) and one pole term "
+              "(the origin), not two poly terms");
+    }
+
     // ---- pole_locations: dedup and negative-exponent implication -----------
     std::printf("\npole_locations:\n");
     {
         RationalMap m("test");
         m.add_pole({1.0, 0.0}, {1.0, 0.0}, 1);
-        m.add_pole({1.0, 0.0}, {2.0, 0.0}, 2);   // same location, different term
+        push_pole_direct(m, {1.0, 0.0}, {2.0, 0.0}, 2);   // same location, different term
         m.add_pole({-1.0, 0.0}, {1.0, 0.0}, 1);
         auto locs = m.pole_locations({0, 0});
         check(locs.size() == 2, "duplicate pole locations are deduplicated");
     }
     {
-        RationalMap m = RationalMap::newton_cubic();   // has z^-2, no explicit pole term
+        // Its pole at the origin is now an explicit PoleTerm (add_poly
+        // rejects negative exponents -- see newton_cubic's own comment),
+        // not a negative polynomial exponent, but pole_locations() doesn't
+        // care which representation produced it.
+        RationalMap m = RationalMap::newton_cubic();
         auto locs = m.pole_locations({0, 0});
         check(locs.size() == 1 && close(locs[0], Cplx(0, 0)),
               "a negative polynomial exponent implies a pole at the origin");
@@ -260,8 +390,8 @@ int main() {
         // degree() itself doesn't reduce the redundancy (would claim d=2,
         // 2d-2=2, which is simply the wrong degree for this construction).
         RationalMap m("mobius");
-        m.add_pole({0, 0}, {1, 0}, 1);
-        m.add_pole({0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
         auto cp = m.critical_points({0, 0});
         check(cp.empty(),
               "R(z)=2/z: correctly zero critical points despite the redundant construction");
@@ -271,8 +401,9 @@ int main() {
         const Cplx a{0, 0};
         auto cp = m.critical_points(a);
         // Ordinary: z^3=1, the three roots Newton's method converges to
-        // (superattracting fixed points). Pole at 0: true order 2 (from the
-        // z^-2 term), multiplicity 1 -- this is the dynamically informative
+        // (superattracting fixed points). Pole at 0: true order 2 (the
+        // 1/(3z^2) term, an explicit PoleTerm), multiplicity 1 -- this is
+        // the dynamically informative
         // one (Map::critical_point returns {0,0} for the built-in Newton3
         // for exactly this reason). |p-q| = |3-2| = 1, so infinity is NOT
         // critical here, matching the CLAUDE.md-adjacent fact that this is
@@ -517,14 +648,14 @@ int main() {
         RationalMap m = RationalMap::newton_cubic();
         const auto orders = m.pole_orders({0, 0});
         check(orders.size() == 1 && orders[0] == 2,
-              "newton_cubic: the pole at the origin (from z^-2) has order 2");
+              "newton_cubic: the pole at the origin has order 2");
     }
     {
         // R(z) = 2/z from two redundant order-1 pole terms: true order is 1
         // (a simple pole), not the naive sum 1+1=2.
         RationalMap m("mobius");
-        m.add_pole({0, 0}, {1, 0}, 1);
-        m.add_pole({0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
         const auto orders = m.pole_orders({0, 0});
         check(orders.size() == 1 && orders[0] == 1,
               "R(z)=2/z: true order is 1, not the naive per-term sum of 2");
@@ -604,8 +735,8 @@ int main() {
     }
     {
         RationalMap m("mobius");
-        m.add_pole({0, 0}, {1, 0}, 1);
-        m.add_pole({0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
+        push_pole_direct(m, {0, 0}, {1, 0}, 1);
         const auto fps = m.fixed_points({0, 0});
         // R(z)=2/z: R(z)=z => z^2=2 => z=+-sqrt(2), each with multiplier -1
         // (R is an involution, R(R(z))=z, so this is the standard neutral
@@ -641,9 +772,14 @@ int main() {
     check(RationalMap::multibrot(3).to_formula() == "z^3 + a", "multibrot(3) formula");
     check(RationalMap::mcmullen(2).to_formula() == "z^2 + a/z^2", "mcmullen(2) formula");
     {
+        // The pole at the origin is now an explicit PoleTerm (add_poly
+        // rejects negative exponents), so it prints in PoleTerm's own
+        // "1/z^n" notation (see to_formula's pole-term branch, same shape
+        // mcmullen(2)'s "a/z^2" above already exercises) rather than a
+        // literal "z^-2" substring.
         const std::string f = RationalMap::newton_cubic().to_formula();
-        check(f.find("z") != std::string::npos && f.find("z^-2") != std::string::npos,
-              "newton_cubic formula mentions z and z^-2");
+        check(f.find("z") != std::string::npos && f.find("/z^2") != std::string::npos,
+              "newton_cubic formula mentions z and the pole 1/z^2");
     }
 
     // ---- serialize/deserialize round-trip --------------------------------------

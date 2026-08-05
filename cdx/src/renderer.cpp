@@ -93,26 +93,18 @@ std::optional<Family> recognize_family(const RationalMap& m) {
                 default: break;
             }
         }
-
-        // Newton's method of z^3-1, simplified to (2/3)z + (1/3)z^-2 -- no
-        // parameter dependence anywhere -- see RationalMap::newton_cubic.
-        auto is_lin = [](const PolyTerm& t) {
-            return t.exponent == 1 && t.param_power == 0 &&
-                   close_enough(t.coeff, Cplx(2.0 / 3.0, 0.0));
-        };
-        auto is_inv2 = [](const PolyTerm& t) {
-            return t.exponent == -2 && t.param_power == 0 &&
-                   close_enough(t.coeff, Cplx(1.0 / 3.0, 0.0));
-        };
-        if ((is_lin(polys[0]) && is_inv2(polys[1])) ||
-            (is_lin(polys[1]) && is_inv2(polys[0]))) {
-            return Family::Newton3;
-        }
     }
 
     // z^n + a/z^n: one z^n poly term (param_power 0, coeff 1) plus one pole
     // of order n at the origin whose strength scales with a (coeff 1,
-    // param_power 1) -- see RationalMap::mcmullen.
+    // param_power 1) -- see RationalMap::mcmullen. Newton's method of
+    // z^3-1, simplified to (2/3)z + (1/3)z^-2, has the SAME shape (one
+    // poly term, one pole at the origin -- see RationalMap::newton_cubic,
+    // whose z^-2 term is now a PoleTerm rather than a negative-exponent
+    // PolyTerm, per add_poly's own restriction) but different values: a
+    // linear (not degree-n) poly term with a FIXED coefficient (2/3, not
+    // 1) and NO parameter dependence anywhere (param_power 0 throughout,
+    // not the pole strength scaling as a^1 the way McMullen's does).
     if (polys.size() == 1 && poles.size() == 1) {
         const PolyTerm& zn = polys[0];
         const PoleTerm& p  = poles[0];
@@ -122,6 +114,13 @@ std::optional<Family> recognize_family(const RationalMap& m) {
             p.order == zn.exponent) {
             if (zn.exponent == 2) return Family::McMullen2;
             if (zn.exponent == 3) return Family::McMullen3;
+        }
+        if (zn.exponent == 1 && zn.param_power == 0 &&
+            close_enough(zn.coeff, Cplx(2.0 / 3.0, 0.0)) &&
+            !p.location_is_param && close_enough(p.location, Cplx(0, 0)) &&
+            p.order == 2 && p.param_power == 0 &&
+            close_enough(p.strength, Cplx(1.0 / 3.0, 0.0))) {
+            return Family::Newton3;
         }
     }
 

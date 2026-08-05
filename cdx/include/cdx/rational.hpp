@@ -220,8 +220,48 @@ public:
     void set_notes(std::string n) { notes_ = std::move(n); }
 
     // --- term management ----------------------------------------------------
+    // Throws std::invalid_argument for exponent < 0: that represents a pole
+    // (see the class comment's PARAMETER BINDING note and PolyTerm's own
+    // comment), and every pole must go through add_pole below instead, so
+    // there is exactly one representation for "a pole at a location" rather
+    // than two a caller could accidentally create simultaneously (a
+    // negative-exponent PolyTerm at the origin AND a PoleTerm there is the
+    // SAME mathematical object told twice -- see add_pole's own comment for
+    // why that matters). NOT retroactive: deserialize() and an already-
+    // existing RationalMap built before this restriction (or hand-
+    // constructed by pushing directly onto poly_terms(), which -- like
+    // pole_terms() -- is still a live-mutable reference this function does
+    // not gate) can still carry one; this only stops NEW ones being added
+    // through this call.
     std::size_t add_poly(Cplx coeff, int exponent, int param_power = 0,
                          std::string label = {});
+    // Throws std::invalid_argument if `location` coincides (within 1e-12,
+    // matching pole_locations()'s own "same point" tolerance) with an
+    // EXISTING enabled pole -- either another PoleTerm's location, or (for
+    // backward compatibility with a map built before add_poly's own
+    // restriction above, e.g. one loaded via deserialize) an existing
+    // enabled PolyTerm with a negative exponent, which only ever means a
+    // pole at the origin. Rejected rather than silently added: own_fraction
+    // ()'s shared-denominator construction DOES combine two such
+    // representations into the correct true order today (see
+    // clear_denominators's own comment on why a redundant common factor
+    // still cancels out of degree differences safely) -- this is not
+    // papering over a live miscount -- but the result is a pole split
+    // across two different term lists that the user can no longer edit as
+    // the one thing it conceptually is, and a fragile invariant to keep
+    // relying on every future consumer to preserve correctly by hand,
+    // exactly the kind of shared-factor subtlety that cost real debugging
+    // time getting critical_points() itself right (see CLAUDE.md). Closing
+    // off the ambiguous state at its source is more robust than continuing
+    // to lean on that cancellation elsewhere. Skipped (not checked at all,
+    // so never rejected) when the colliding EXISTING pole has
+    // location_is_param set: such a pole's location IS the parameter, so
+    // whether it collides with a fixed location depends on which `a` is in
+    // play at render time, not anything this call -- parameter-independent
+    // by construction -- can know. (The pole being ADDED here can never
+    // itself have location_is_param set: this signature has no such
+    // parameter, so a fresh PoleTerm always starts with it false; setting
+    // it is a later, direct edit via pole_terms()[i].)
     std::size_t add_pole(Cplx location, Cplx strength, int order = 1,
                          int param_power = 0, std::string label = {});
 
@@ -383,6 +423,12 @@ public:
     static RationalMap newton_cubic();        // Newton map of z^3 - 1
 
 private:
+    // True iff an EXISTING enabled pole (a PoleTerm, or a negative-exponent
+    // PolyTerm meaning the origin) sits at `location` -- see add_pole's own
+    // comment. Skips any candidate with location_is_param set, for the
+    // same reason add_pole itself does.
+    bool pole_location_conflict(Cplx location) const;
+
     std::string           name_ = "untitled";
     std::string           notes_;
     std::vector<PolyTerm> poly_;

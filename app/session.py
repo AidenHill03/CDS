@@ -191,10 +191,30 @@ class Session:
     # the common case of setting several fields at once by index.
     def add_poly_term(self, coeff: complex, exponent: int, param_power: int = 0,
                       label: str = "") -> int:
+        """Raises ValueError for exponent < 0 -- that represents a pole, and
+        every pole must go through add_pole_term instead, so there is
+        exactly one representation for "a pole at a location" (see
+        RationalMap::add_poly's own comment). The map is left unchanged on
+        rejection; the caller (e.g. the term editor) should catch this and
+        show the message inline, not let it propagate as a crash.
+        """
         return self.map.add_poly(coeff, exponent, param_power, label)
 
     def add_pole_term(self, location: complex, strength: complex, order: int = 1,
                       param_power: int = 0, label: str = "") -> int:
+        """Raises ValueError if `location` coincides with an existing
+        enabled pole -- either another pole term's location, or (for a map
+        built before add_poly's own restriction above, e.g. one loaded from
+        an older saved family) a still-present negative-exponent poly term,
+        which only ever means a pole at the origin (see RationalMap::
+        add_pole's own comment for why two representations of what is
+        conceptually one pole are rejected rather than silently combined).
+        The map is left unchanged on rejection. NOTE: this only guards
+        ADDING a new pole -- editing an EXISTING term's location via
+        edit_pole_term below to collide with another is not (yet) caught
+        here; out of scope for what "reject a second pole" was asked to
+        cover.
+        """
         return self.map.add_pole(location, strength, order, param_power, label)
 
     def remove_poly_term(self, index: int) -> None:
