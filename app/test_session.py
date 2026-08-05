@@ -106,6 +106,34 @@ def main() -> None:
     check(s.cache.stats.misses == misses_before_res_change + 1,
           "changing resolution is a cache miss (a different key), not a stale hit")
 
+    # P5b integration requirement: term edits and parameter changes must
+    # invalidate the right cache keys and nothing else. make_key() folds in
+    # map.serialize() (the FULL term content, not just object identity) and
+    # param as separate components (see render_cache.py's own docstring),
+    # so this should already hold "by construction" -- confirmed directly
+    # here rather than just asserted, since a cache key silently missing a
+    # real input is exactly the kind of bug that only shows up as a stale
+    # image, not an exception.
+    s.render()   # re-establish a hit baseline at the CURRENT (43-res) key
+    hits_before_edit = s.cache.stats.hits
+    misses_before_edit = s.cache.stats.misses
+    entries_before_edit = s.cache.stats.entry_count
+    s.map.poly_terms()[0].coeff = 3 + 0j   # mandelbrot's z^2 term, live-mutated in place
+    s.render()
+    check(s.cache.stats.misses == misses_before_edit + 1 and s.cache.stats.hits == hits_before_edit,
+          "editing a term is a cache miss, not a stale hit -- even though viewport/settings/mode "
+          "are all unchanged and s.map is the SAME Python object (mutated in place, not reassigned)")
+    check(s.cache.stats.entry_count == entries_before_edit + 1,
+          "the edit adds exactly one new entry -- the old (now-unreachable) one isn't touched, "
+          "not silently overwritten or duplicated")
+
+    misses_before_param = s.cache.stats.misses
+    s.param = s.param + 0.01
+    s.render()
+    check(s.cache.stats.misses == misses_before_param + 1,
+          "changing the parameter is also a cache miss, not a stale hit -- param is part of "
+          "the key even though it isn't part of map.serialize() at all")
+
     # A cancelled render must not poison the cache with a partial result --
     # cancelled BEFORE the render call (not raced against a slow render) so
     # this is deterministic: render_map still checks `cancel` after calling
