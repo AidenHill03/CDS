@@ -80,26 +80,130 @@ struct FixedPoint {
 };
 
 // -----------------------------------------------------------------------------
-// RationalMap::eval(z, a)/deriv(z, a) redo every term's effective_coeff /
-// effective_location / effective_strength -- each an a^param_power call --
-// on EVERY invocation, even though every caller that matters (an escape-time
-// loop) holds `a` fixed across many hundreds of calls in a row. Bound(a)
-// does that work once and returns an evaluator with it already baked in, so
-// eval()/deriv() in the hot loop become a plain Horner-style sum with no
-// per-call exponentiation or `enabled`-filtering. See RationalMap::bind().
+// RationalMap::eval(z, a) redoes every term's effective_coeff/
+// effective_location/effective_strength -- each an a^param_power call -- on
+// EVERY invocation, even though every caller that matters (an escape-time
+// loop) holds `a` fixed across many hundreds of calls in a row. It also
+// walks generic std::complex-typed terms, whose operator* carries inf/nan
+// branch handling and whose operator/ carries Smith's-algorithm branch
+// handling -- both measurably expensive run resolution^2 * max_iter times
+// (see CLAUDE.md's hand-rolled-arithmetic-in-hot-loops convention, already
+// used throughout renderer.cpp's built-in Family formulas, just not
+// previously extended to the generic RationalMap path).
+//
+// RationalMap::compile(a) does the parameter substitution once and flattens
+// every term to raw double real/imag pairs, so CompiledMap::step() in the
+// hot loop is a plain hand-rolled sum: no per-call exponentiation, no
+// `enabled` branching, and no std::complex anywhere. See step()'s own
+// comment for the exponent/division specifics.
 // -----------------------------------------------------------------------------
-class BoundRationalMap {
+class CompiledMap {
 public:
-    Cplx eval(Cplx z) const;
-    Cplx deriv(Cplx z) const;
+    // c * z^exponent, coefficient already evaluated at the bound parameter.
+    struct PolyOp { double cr, ci; int exponent; };
+    // s * (z - location)^-order, likewise.
+    struct PoleOp { double lr, li, sr, si; int order; };
+
+    // Mutates (zr, zi) in place, matching Map::step's own calling
+    // convention. Header-inline so a hot-loop call site can actually be
+    // inlined, not just declare intent to be -- see cdx::detail::cipow in
+    // this header for the arithmetic itself.
+    inline void step(double& zr, double& zi) const;
 
 private:
     friend class RationalMap;
-    struct BoundPoly { Cplx coeff; int exponent; };
-    struct BoundPole { Cplx location; Cplx strength; int order; };
-    std::vector<BoundPoly> poly_;
-    std::vector<BoundPole> pole_;
+    std::vector<PolyOp> poly_;
+    std::vector<PoleOp> pole_;
 };
+
+namespace detail {
+
+// z^e (integer e, may be negative) via hand-rolled real/imag doubles --
+// never std::complex. |e| <= 4 is unrolled as direct products: the range
+// every built-in family and the overwhelming majority of sandbox terms
+// actually use, and exactly where generic binary exponentiation wastes
+// work -- z^2 costs one multiply this way, three via repeated-squaring
+// (see ipow() in rational.cpp, which this mirrors for the general case).
+// A negative e returns the reciprocal of z^|e| via a hand-rolled division
+// -- 1/(pr+pi*i) = (pr-pi*i)/(pr^2+pi^2) -- with none of
+// std::complex::operator/'s Smith's-algorithm branch handling.
+inline void cipow(double zr, double zi, int e, double& outr, double& outi) {
+    const int ae = e < 0 ? -e : e;
+    double pr, pi;
+    switch (ae) {
+        case 0: pr = 1.0; pi = 0.0; break;
+        case 1: pr = zr;  pi = zi;  break;
+        case 2: pr = zr * zr - zi * zi; pi = 2.0 * zr * zi; break;
+        case 3: {
+            const double z2r = zr * zr - zi * zi, z2i = 2.0 * zr * zi;
+            pr = z2r * zr - z2i * zi; pi = z2r * zi + z2i * zr;
+            break;
+        }
+        case 4: {
+            const double z2r = zr * zr - zi * zi, z2i = 2.0 * zr * zi;
+            pr = z2r * z2r - z2i * z2i; pi = 2.0 * z2r * z2i;
+            break;
+        }
+        default: {
+            // Hand-rolled binary exponentiation for the rare larger
+            // exponent -- same algorithm as rational.cpp's ipow(), real/
+            // imag doubles throughout instead of std::complex.
+            double br = zr, bi = zi;
+            pr = 1.0; pi = 0.0;
+            for (int n = ae; n; n >>= 1) {
+                if (n & 1) {
+                    const double nr = pr * br - pi * bi, ni = pr * bi + pi * br;
+                    pr = nr; pi = ni;
+                }
+                const double nbr = br * br - bi * bi, nbi = 2.0 * br * bi;
+                br = nbr; bi = nbi;
+            }
+            break;
+        }
+    }
+    if (e >= 0) { outr = pr; outi = pi; return; }
+    // One division (the reciprocal of den) shared by both components,
+    // rather than two separate divisions -- real hardware division costs
+    // several times a multiply, so trading a second divide for a multiply
+    // is a real win, not just a style choice.
+    const double den = pr * pr + pi * pi;
+    const double inv_den = 1.0 / den;
+    outr = pr * inv_den;
+    outi = -pi * inv_den;
+}
+
+}  // namespace detail
+
+inline void CompiledMap::step(double& zr, double& zi) const {
+    double sumr = 0.0, sumi = 0.0;
+    for (const auto& t : poly_) {
+        double pr, pi;
+        detail::cipow(zr, zi, t.exponent, pr, pi);
+        // A REAL coefficient (ci == 0) is the common case -- every built-in
+        // preset's terms are all real (see mandelbrot/multibrot/mcmullen/
+        // newton_cubic in rational.cpp), and so is a plain user-typed
+        // number. Skip the full complex multiply's two wasted
+        // multiply-by-zero-and-add operations for it; the branch itself is
+        // free after the first call, since t.ci's value (and therefore
+        // which side of it any one term takes) never changes across the
+        // many thousands of step() calls in a single render.
+        if (t.ci == 0.0) { sumr += t.cr * pr; sumi += t.cr * pi; }
+        else { sumr += t.cr * pr - t.ci * pi; sumi += t.cr * pi + t.ci * pr; }
+    }
+    for (const auto& t : pole_) {
+        const double dr = zr - t.lr, di = zi - t.li;
+        // A point exactly at a pole maps to infinity; signal it with the
+        // same huge sentinel RationalMap::eval() uses, so a caller's
+        // escape test fires rather than seeing NaN.
+        if (dr == 0.0 && di == 0.0) { zr = 1e300; zi = 0.0; return; }
+        double invr, invi;
+        detail::cipow(dr, di, -t.order, invr, invi);   // 1 / (z-location)^order
+        if (t.si == 0.0) { sumr += t.sr * invr; sumi += t.sr * invi; }
+        else { sumr += t.sr * invr - t.si * invi; sumi += t.sr * invi + t.si * invr; }
+    }
+    zr = sumr;
+    zi = sumi;
+}
 
 // -----------------------------------------------------------------------------
 // The map itself: a named collection of terms.
@@ -137,12 +241,14 @@ public:
     // kind, so this is exact rather than a finite difference.
     Cplx deriv(Cplx z, Cplx a) const;
 
-    // Bind every term to a fixed parameter value once. Pays off whenever the
-    // same `a` will be evaluated more than a handful of times -- which is
-    // always, for a Renderer escape-time loop: `a` is fixed for an entire
-    // orbit (render_julia/render_basin/render_greens: for the whole render;
-    // render_parameter: for one pixel's worth of iterations).
-    BoundRationalMap bind(Cplx a) const;
+    // Bind every term to a fixed parameter value and flatten to raw
+    // real/imag doubles, once. Pays off whenever the same `a` will be
+    // evaluated more than a handful of times -- which is always, for a
+    // Renderer escape-time loop: `a` is fixed for an entire orbit
+    // (render_julia/render_basin/render_greens: for the whole render;
+    // render_parameter: for one pixel's worth of iterations). See
+    // CompiledMap's own doc comment for what this buys over plain eval().
+    CompiledMap compile(Cplx a) const;
 
     // --- structure ----------------------------------------------------------
     // Degree as a rational map of the sphere: max(deg numerator, deg

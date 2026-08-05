@@ -414,41 +414,62 @@ int main() {
               "as critical_points_constant() promises");
     }
 
-    // ---- bind: BoundRationalMap matches eval/deriv exactly --------------------
-    std::printf("\nbind (BoundRationalMap):\n");
+    // ---- compile: CompiledMap::step matches eval exactly -----------------------
+    std::printf("\ncompile (CompiledMap):\n");
     {
-        bool eval_ok = true, deriv_ok = true;
+        bool eval_ok = true;
         for (RationalMap m : {RationalMap::mandelbrot(), RationalMap::mcmullen(3),
                               RationalMap::newton_cubic()}) {
             for (Cplx a : as) {
-                const BoundRationalMap b = m.bind(a);
+                const CompiledMap c = m.compile(a);
                 for (Cplx z : zs) {
-                    if (!close(b.eval(z), m.eval(z, a))) eval_ok = false;
-                    if (!close(b.deriv(z), m.deriv(z, a))) deriv_ok = false;
+                    double zr = z.real(), zi = z.imag();
+                    c.step(zr, zi);
+                    if (!close(Cplx(zr, zi), m.eval(z, a))) eval_ok = false;
                 }
             }
         }
-        check(eval_ok, "BoundRationalMap::eval matches RationalMap::eval for every (z, a)");
-        check(deriv_ok, "BoundRationalMap::deriv matches RationalMap::deriv for every (z, a)");
+        check(eval_ok, "CompiledMap::step matches RationalMap::eval for every (z, a)");
     }
     {
-        // A disabled term must vanish from the bound evaluator too, not
-        // just from eval() -- bind() has its own `enabled` filter to keep
-        // in sync.
+        // A disabled term must vanish from the compiled evaluator too, not
+        // just from eval() -- compile() has its own `enabled` filter to
+        // keep in sync.
         RationalMap m = RationalMap::mandelbrot();
         m.poly_terms()[1].enabled = false;
-        const BoundRationalMap b = m.bind({5.0, 0.0});
-        check(close(b.eval({2.0, 0.0}), Cplx(4.0, 0.0)),
-              "bind() respects disabled terms, matching eval()'s behaviour");
+        const CompiledMap c = m.compile({5.0, 0.0});
+        double zr = 2.0, zi = 0.0;
+        c.step(zr, zi);
+        check(close(Cplx(zr, zi), Cplx(4.0, 0.0)),
+              "compile() respects disabled terms, matching eval()'s behaviour");
     }
     {
         // Evaluating exactly at a pole returns the same huge sentinel as
         // eval(), not NaN.
         RationalMap m("test");
         m.add_pole({1.0, 0.0}, {1.0, 0.0}, 1);
-        const BoundRationalMap b = m.bind({0, 0});
-        check(b.eval({1.0, 0.0}).real() > 1e299,
-              "bind()'d evaluator returns the escape sentinel at a pole, matching eval()");
+        const CompiledMap c = m.compile({0, 0});
+        double zr = 1.0, zi = 0.0;
+        c.step(zr, zi);
+        check(zr > 1e299,
+              "the compiled evaluator returns the escape sentinel at a pole, matching eval()");
+    }
+    {
+        // Exponents outside CompiledMap::step's unrolled |e| <= 4 special
+        // cases (see cdx::detail::cipow) must still agree with the
+        // std::complex-based ipow() eval() uses -- both positive (z^7) and
+        // negative (z^-5, a pole of an unusually high order).
+        RationalMap m("high-exponent");
+        m.add_poly({1.0, 0.0}, 7, 0, "z^7");
+        m.add_pole({0.3, -0.2}, {2.0, 1.0}, 5, 0, "order-5 pole");
+        const CompiledMap c = m.compile({0, 0});
+        bool ok = true;
+        for (Cplx z : zs) {
+            double zr = z.real(), zi = z.imag();
+            c.step(zr, zi);
+            if (!close(Cplx(zr, zi), m.eval(z, {0, 0}), 1e-6)) ok = false;
+        }
+        check(ok, "CompiledMap matches eval() for exponents beyond the |e|<=4 unrolled cases");
     }
 
     // ---- distinct_critical_points: clusters multiplicity to one point each ---

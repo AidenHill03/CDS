@@ -46,6 +46,88 @@ bool family_from_string(const std::string& s, Family& out) {
     return false;
 }
 
+namespace {
+bool close_enough(Cplx a, Cplx b) {
+    return std::abs(a - b) < 1e-9 * std::max(1.0, std::abs(b));
+}
+}  // namespace
+
+// -----------------------------------------------------------------------------
+// recognize_family -- see the doc comment in the header. Each shape below
+// mirrors the exact terms its RationalMap:: preset factory constructs (see
+// rational.cpp's mandelbrot/multibrot/mcmullen/newton_cubic), restricted to
+// ENABLED terms only. A tolerance-based coefficient comparison (not exact
+// ==) is deliberate: a map that round-tripped through
+// RationalMap::serialize()/deserialize() loses some precision (fmt() prints
+// 10 significant digits, not the ~17 a double needs to round-trip exactly),
+// and a bit-exact requirement would silently stop recognizing a SAVED
+// mandelbrot() after one save/load cycle. 1e-9 relative is tight enough
+// that no plausible deliberately-DIFFERENT coefficient could pass it by
+// accident, and loose enough to absorb that round-trip.
+// -----------------------------------------------------------------------------
+std::optional<Family> recognize_family(const RationalMap& m) {
+    std::vector<PolyTerm> polys;
+    for (const auto& t : m.poly_terms()) if (t.enabled) polys.push_back(t);
+    std::vector<PoleTerm> poles;
+    for (const auto& t : m.pole_terms()) if (t.enabled) poles.push_back(t);
+
+    // z^n + a: exactly one "+a" term (exponent 0, param_power 1, coeff 1)
+    // and one z^n term (param_power 0, coeff 1), no poles -- see
+    // RationalMap::multibrot. Order-independent: RationalMap does not
+    // guarantee term insertion order survives a round trip.
+    if (polys.size() == 2 && poles.empty()) {
+        auto is_a_term = [](const PolyTerm& t) {
+            return t.exponent == 0 && t.param_power == 1 && close_enough(t.coeff, Cplx(1, 0));
+        };
+        auto is_zn_term = [](const PolyTerm& t) {
+            return t.param_power == 0 && close_enough(t.coeff, Cplx(1, 0));
+        };
+        const PolyTerm* zn = nullptr;
+        if (is_a_term(polys[0]) && is_zn_term(polys[1])) zn = &polys[1];
+        else if (is_a_term(polys[1]) && is_zn_term(polys[0])) zn = &polys[0];
+        if (zn) {
+            switch (zn->exponent) {
+                case 2: return Family::Quadratic;
+                case 3: return Family::Cubic;
+                case 5: return Family::Quintic;
+                default: break;
+            }
+        }
+
+        // Newton's method of z^3-1, simplified to (2/3)z + (1/3)z^-2 -- no
+        // parameter dependence anywhere -- see RationalMap::newton_cubic.
+        auto is_lin = [](const PolyTerm& t) {
+            return t.exponent == 1 && t.param_power == 0 &&
+                   close_enough(t.coeff, Cplx(2.0 / 3.0, 0.0));
+        };
+        auto is_inv2 = [](const PolyTerm& t) {
+            return t.exponent == -2 && t.param_power == 0 &&
+                   close_enough(t.coeff, Cplx(1.0 / 3.0, 0.0));
+        };
+        if ((is_lin(polys[0]) && is_inv2(polys[1])) ||
+            (is_lin(polys[1]) && is_inv2(polys[0]))) {
+            return Family::Newton3;
+        }
+    }
+
+    // z^n + a/z^n: one z^n poly term (param_power 0, coeff 1) plus one pole
+    // of order n at the origin whose strength scales with a (coeff 1,
+    // param_power 1) -- see RationalMap::mcmullen.
+    if (polys.size() == 1 && poles.size() == 1) {
+        const PolyTerm& zn = polys[0];
+        const PoleTerm& p  = poles[0];
+        if (zn.param_power == 0 && close_enough(zn.coeff, Cplx(1, 0)) &&
+            !p.location_is_param && close_enough(p.location, Cplx(0, 0)) &&
+            p.param_power == 1 && close_enough(p.strength, Cplx(1, 0)) &&
+            p.order == zn.exponent) {
+            if (zn.exponent == 2) return Family::McMullen2;
+            if (zn.exponent == 3) return Family::McMullen3;
+        }
+    }
+
+    return std::nullopt;
+}
+
 // -----------------------------------------------------------------------------
 // Map
 // -----------------------------------------------------------------------------
@@ -261,6 +343,39 @@ void Renderer::parallel_columns(F body, const std::atomic<bool>* cancel) const {
     for (auto& th : pool) th.join();
 }
 
+namespace {
+// Resolves, ONCE PER RENDER, how render_julia/render_basin/render_greens
+// should advance a pixel's orbit for the CURRENT map -- shared so the
+// three-way "not Custom / Custom-but-recognized / Custom-and-compiled"
+// dispatch (see recognize_family/CompiledMap) is written once instead of
+// once per render mode. render_parameter does NOT use this: there `a` is
+// the PIXEL, not map_.param(), so its plan has to be resolved per pixel
+// instead of per render -- see its own comment.
+struct StepPlan {
+    bool use_compiled = false;
+    Family family = Family::Quadratic;   // valid when !use_compiled
+    double pr = 0.0, pi = 0.0;           // valid when !use_compiled
+    CompiledMap compiled;                // valid when use_compiled
+
+    inline void step(double& zr, double& zi) const {
+        if (use_compiled) compiled.step(zr, zi);
+        else Map::step_with(family, pr, pi, zr, zi);
+    }
+};
+
+StepPlan make_step_plan(const Map& m) {
+    const RationalMap* custom = m.custom_map();
+    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
+    StepPlan plan;
+    plan.use_compiled = custom && !recognized;
+    plan.family = recognized.value_or(m.family());
+    plan.pr = m.param().real();
+    plan.pi = m.param().imag();
+    if (plan.use_compiled) plan.compiled = custom->compile(m.param());
+    return plan;
+}
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
@@ -270,15 +385,11 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
-    // `a` = map_.param() is fixed for the WHOLE render, so for a Custom map
-    // bind it once here rather than letting eval() redo every term's
-    // effective_coeff/effective_location/effective_strength on every one of
-    // up to max_iter * resolution^2 step() calls below (see
-    // RationalMap::bind's doc comment). A built-in family's step_with has no
-    // such per-call recomputation to hoist, so it goes through map_.step()
-    // unchanged.
-    const RationalMap* custom = map_.custom_map();
-    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+    // `a` = map_.param() is fixed for the WHOLE render, so the step plan --
+    // native step_with formula for a built-in family or a recognized
+    // Custom shape, else compile(a) once -- is resolved once here rather
+    // than per pixel or per iteration. See StepPlan/make_step_plan above.
+    const StepPlan plan = make_step_plan(map_);
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
@@ -287,13 +398,7 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
             double out = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                if (custom) {
-                    const Cplx z = bound.eval(Cplx(zr, zi));
-                    zr = z.real();
-                    zi = z.imag();
-                } else {
-                    map_.step(zr, zi);
-                }
+                plan.step(zr, zi);
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {                       // per-pixel early exit
@@ -319,42 +424,44 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
-    // Goes through the instance methods critical_point_at/step_with_param
-    // rather than the static Map::critical_point/step_with used elsewhere in
-    // this file, because the parameter here is the PIXEL, not map_.param():
-    // for a Custom map, evaluating at an arbitrary parameter needs the
-    // bound RationalMap's actual terms, which only the instance has. For a
-    // built-in family these just forward straight to the static functions,
-    // so the fast path is unchanged apart from one cheap, predictable branch.
+    // The parameter here is the PIXEL, not map_.param() -- everything below
+    // is computed once per PIXEL, not once per render, unlike the other
+    // three modes. Three paths, cheapest first:
+    //   * not Custom: unchanged, step_with_param's existing behaviour.
+    //   * recognized (see recognize_family): the map IS structurally a
+    //     built-in shape, so its critical point is the O(1) native formula
+    //     (Map::critical_point -- exact for all six shapes, including
+    //     McMullen's genuinely parameter-dependent z^(2n)=a) and each
+    //     iteration is step_with's native formula. No compile() at all.
+    //   * otherwise: critical_points_constant() decides whether the
+    //     critical point can be computed once for the whole render instead
+    //     of once per pixel (see that method's doc comment -- normally the
+    //     dominant cost of rendering a Custom map's parameter plane), and
+    //     compile(p) still happens once per pixel, since `a` = p varies
+    //     pixel to pixel here unlike the other three render_* modes.
     const RationalMap* custom = map_.custom_map();
+    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
 
-    // For a Custom map whose critical point provably does not depend on the
-    // parameter (see RationalMap::critical_points_constant -- any z^n + a
-    // shape qualifies), critical_point_at(p) is the same answer at every
-    // pixel. Computing it once here turns a full Aberth-Ehrlich root-find
-    // per pixel -- critical_points()'s ordinary source, run fresh on every
-    // one of resolution^2 pixels -- into a single one: normally the
-    // dominant cost of rendering a Custom map's parameter plane.
-    const bool cp_fixed = custom && custom->critical_points_constant();
+    const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
-            const Cplx p  = view_.coord(col, row);      // the PIXEL is the parameter
-            const Cplx c0 = cp_fixed ? fixed_c0 : map_.critical_point_at(p);
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+            Cplx c0;
+            if (recognized) c0 = Map::critical_point(*recognized, p);
+            else if (cp_fixed) c0 = fixed_c0;
+            else c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
             double out = 0.0;
 
-            // `a` = p is fixed across this pixel's whole orbit (up to
-            // max_iter steps), so for a Custom map bind it once per pixel
-            // rather than once per step -- see RationalMap::bind.
-            const BoundRationalMap bound = custom ? custom->bind(p) : BoundRationalMap{};
+            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                if (custom) {
-                    const Cplx z = bound.eval(Cplx(zr, zi));
-                    zr = z.real();
-                    zi = z.imag();
+                if (recognized) {
+                    Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
+                } else if (custom) {
+                    compiled.step(zr, zi);
                 } else {
                     map_.step_with_param(p, zr, zi);
                 }
@@ -397,8 +504,7 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
     const double tol = settings_.tol;
 
     // See render_julia: `a` = map_.param() is fixed for the whole render.
-    const RationalMap* custom = map_.custom_map();
-    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+    const StepPlan plan = make_step_plan(map_);
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
@@ -407,13 +513,7 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
             double label = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                if (custom) {
-                    const Cplx z = bound.eval(Cplx(zr, zi));
-                    zr = z.real();
-                    zi = z.imag();
-                } else {
-                    map_.step(zr, zi);
-                }
+                plan.step(zr, zi);
 
                 for (int k = 0; k < nattr; ++k) {
                     if (chordal_distance(zr, zi, ar[k], ai[k]) < tol) {
@@ -445,8 +545,7 @@ Image Renderer::render_greens(bool* normalized, const std::atomic<bool>* cancel)
     if (normalized) *normalized = ok;
 
     // See render_julia: `a` = map_.param() is fixed for the whole render.
-    const RationalMap* custom = map_.custom_map();
-    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+    const StepPlan plan = make_step_plan(map_);
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
@@ -455,13 +554,7 @@ Image Renderer::render_greens(bool* normalized, const std::atomic<bool>* cancel)
             double acc = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                if (custom) {
-                    const Cplx z = bound.eval(Cplx(zr, zi));
-                    zr = z.real();
-                    zi = z.imag();
-                } else {
-                    map_.step(zr, zi);
-                }
+                plan.step(zr, zi);
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 acc += std::log(mag > 1.0 ? mag : 1.0);

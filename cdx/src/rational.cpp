@@ -313,44 +313,22 @@ Cplx RationalMap::deriv(Cplx z, Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
-BoundRationalMap RationalMap::bind(Cplx a) const {
-    BoundRationalMap b;
-    b.poly_.reserve(poly_.size());
+CompiledMap RationalMap::compile(Cplx a) const {
+    CompiledMap c;
+    c.poly_.reserve(poly_.size());
     for (const auto& t : poly_) {
         if (!t.enabled) continue;
-        b.poly_.push_back({t.effective_coeff(a), t.exponent});
+        const Cplx coeff = t.effective_coeff(a);
+        c.poly_.push_back({coeff.real(), coeff.imag(), t.exponent});
     }
-    b.pole_.reserve(pole_.size());
+    c.pole_.reserve(pole_.size());
     for (const auto& t : pole_) {
         if (!t.enabled) continue;
-        b.pole_.push_back({t.effective_location(a), t.effective_strength(a), t.order});
+        const Cplx loc = t.effective_location(a);
+        const Cplx str = t.effective_strength(a);
+        c.pole_.push_back({loc.real(), loc.imag(), str.real(), str.imag(), t.order});
     }
-    return b;
-}
-
-Cplx BoundRationalMap::eval(Cplx z) const {
-    Cplx sum(0.0, 0.0);
-    for (const auto& t : poly_) sum += t.coeff * ipow(z, t.exponent);
-    for (const auto& t : pole_) {
-        const Cplx d = z - t.location;
-        if (d == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
-        sum += t.strength / ipow(d, t.order);
-    }
-    return sum;
-}
-
-Cplx BoundRationalMap::deriv(Cplx z) const {
-    Cplx sum(0.0, 0.0);
-    for (const auto& t : poly_) {
-        if (t.exponent == 0) continue;
-        sum += t.coeff * static_cast<double>(t.exponent) * ipow(z, t.exponent - 1);
-    }
-    for (const auto& t : pole_) {
-        const Cplx d = z - t.location;
-        if (d == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
-        sum -= static_cast<double>(t.order) * t.strength / ipow(d, t.order + 1);
-    }
-    return sum;
+    return c;
 }
 
 // -----------------------------------------------------------------------------

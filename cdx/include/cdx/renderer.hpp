@@ -28,6 +28,7 @@
 #include <complex>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,20 @@ enum class Family {
 
 std::string to_string(Family f);
 bool        family_from_string(const std::string& s, Family& out);
+
+// Detects whether `m` is STRUCTURALLY one of the built-in Family shapes
+// above (z^n + a for n in {2,3,5}, z^n + a/z^n for n in {2,3}, or the fixed
+// Newton3 formula) -- see renderer.cpp for the exact per-shape checks. A
+// hit means a Custom map wrapping `m` can render through step_with's
+// native formula directly, at zero extra per-iteration cost over an
+// ordinary built-in Family render, instead of the generic (if now
+// hand-rolled and reasonably fast -- see CompiledMap) RationalMap::compile
+// path. A miss (nullopt) is always safe, just slower: this is a pure
+// performance dispatch, never a correctness one. Only ENABLED terms are
+// considered, matching what eval() actually computes -- a disabled term
+// that happens to complete a recognizable shape does not count, since it
+// contributes nothing to the map's actual behaviour.
+std::optional<Family> recognize_family(const RationalMap& m);
 
 // -----------------------------------------------------------------------------
 // A concrete map: a family with its parameter bound, or (for Custom) a

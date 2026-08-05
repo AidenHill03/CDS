@@ -130,6 +130,92 @@ int main() {
               "three basins are near-equal in area (rotational symmetry)");
     }
 
+    // ---- recognize_family: structural fast-path detection -------------------
+    std::printf("\nrecognize_family:\n");
+    {
+        auto is = [](std::optional<Family> got, Family want) { return got && *got == want; };
+
+        check(is(recognize_family(RationalMap::mandelbrot()), Family::Quadratic),
+              "mandelbrot() (z^2+a) recognized as Quadratic");
+        check(is(recognize_family(RationalMap::multibrot(3)), Family::Cubic),
+              "multibrot(3) (z^3+a) recognized as Cubic");
+        check(is(recognize_family(RationalMap::multibrot(5)), Family::Quintic),
+              "multibrot(5) (z^5+a) recognized as Quintic");
+        check(is(recognize_family(RationalMap::mcmullen(2)), Family::McMullen2),
+              "mcmullen(2) (z^2+a/z^2) recognized as McMullen2");
+        check(is(recognize_family(RationalMap::mcmullen(3)), Family::McMullen3),
+              "mcmullen(3) (z^3+a/z^3) recognized as McMullen3");
+        check(is(recognize_family(RationalMap::newton_cubic()), Family::Newton3),
+              "newton_cubic() recognized as Newton3");
+
+        // multibrot(4) has no built-in Family counterpart at all (only
+        // Quadratic/Cubic/Quintic exist) -- must NOT be misrecognized as
+        // one of those three just because it's the same SHAPE.
+        check(!recognize_family(RationalMap::multibrot(4)),
+              "multibrot(4) (z^4+a, no matching built-in Family) is NOT recognized");
+
+        // A genuinely different map -- has poles, matches nothing.
+        RationalMap general("general");
+        general.add_poly({1.0, 0.0}, 4, 0);
+        general.add_pole({1.0, 0.0}, {0.1, 0.0}, 1);
+        general.add_pole({-1.0, 0.0}, {0.1, 0.0}, 2);
+        check(!recognize_family(general), "a general map with poles is not recognized");
+
+        // A DIFFERENT coefficient on the same shape (2z^2+a, not z^2+a) is
+        // NOT the same function and must not be recognized -- this is the
+        // check that would catch recognize_family() matching on shape
+        // (exponents/param_powers) alone while ignoring coefficient values.
+        RationalMap scaled("scaled");
+        scaled.add_poly({2.0, 0.0}, 2, 0);
+        scaled.add_poly({1.0, 0.0}, 0, 1);
+        check(!recognize_family(scaled), "2z^2+a is NOT recognized as Quadratic (z^2+a)");
+
+        // Disabling the term that completes a recognizable shape must
+        // un-recognize it -- eval() would skip that term too, so the
+        // EFFECTIVE map is no longer z^2+a.
+        RationalMap disabled_mandelbrot = RationalMap::mandelbrot();
+        disabled_mandelbrot.poly_terms()[0].enabled = false;   // disable the z^2 term
+        check(!recognize_family(disabled_mandelbrot),
+              "disabling the z^2 term un-recognizes mandelbrot() (the effective map is just 'a')");
+
+        // A disabled term that ISN'T part of a shape's defining terms must
+        // not block recognition -- only enabled terms count (matches
+        // eval()'s own behaviour).
+        RationalMap mandelbrot_plus_disabled = RationalMap::mandelbrot();
+        mandelbrot_plus_disabled.add_poly({99.0, 0.0}, 9, 0, "inert probe term");
+        mandelbrot_plus_disabled.poly_terms().back().enabled = false;
+        check(is(recognize_family(mandelbrot_plus_disabled), Family::Quadratic),
+              "an extra DISABLED term does not prevent recognition");
+
+        // Round-tripping through serialize()/deserialize() (10-significant-
+        // digit text, not a bit-exact round trip) must not un-recognize a
+        // preset -- this is exactly why recognize_family() uses a
+        // tolerance-based coefficient comparison, not ==.
+        std::string text = RationalMap::mandelbrot().serialize();
+        RationalMap roundtripped;
+        std::string err;
+        check(RationalMap::deserialize(text, roundtripped, err), "mandelbrot() round-trip parses");
+        check(is(recognize_family(roundtripped), Family::Quadratic),
+              "mandelbrot() is still recognized after a serialize/deserialize round trip");
+
+        // recognize_family() must actually be a semantic guarantee, not a
+        // coincidence: cross-check that a recognized map's OWN eval() truly
+        // agrees with the native family formula it claims to be, at
+        // several (z, a) pairs -- not just that the structural check fired.
+        bool agrees = true;
+        for (Cplx a : {Cplx(0.3, -0.2), Cplx(-1.0, 0.0), Cplx(0.0, 0.7)}) {
+            for (Cplx z : {Cplx(0.5, 0.5), Cplx(-0.3, 0.9), Cplx(1.2, -0.4)}) {
+                double zr = z.real(), zi = z.imag();
+                Map::step_with(Family::McMullen3, a.real(), a.imag(), zr, zi);
+                const Cplx native(zr, zi);
+                const Cplx generic = RationalMap::mcmullen(3).eval(z, a);
+                if (std::abs(native - generic) > 1e-9) agrees = false;
+            }
+        }
+        check(agrees, "the native formula a recognized shape dispatches to actually matches "
+                      "the RationalMap's own eval() -- not just a coincidentally-passing structural check");
+    }
+
     // ---- benchmark ---------------------------------------------------------
     std::printf("\nbenchmark (matches the MATLAB MEX case):\n");
     {
