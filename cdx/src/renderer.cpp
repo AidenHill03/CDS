@@ -270,6 +270,16 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
+    // `a` = map_.param() is fixed for the WHOLE render, so for a Custom map
+    // bind it once here rather than letting eval() redo every term's
+    // effective_coeff/effective_location/effective_strength on every one of
+    // up to max_iter * resolution^2 step() calls below (see
+    // RationalMap::bind's doc comment). A built-in family's step_with has no
+    // such per-call recomputation to hoist, so it goes through map_.step()
+    // unchanged.
+    const RationalMap* custom = map_.custom_map();
+    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx c = view_.coord(col, row);
@@ -277,7 +287,13 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
             double out = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                map_.step(zr, zi);
+                if (custom) {
+                    const Cplx z = bound.eval(Cplx(zr, zi));
+                    zr = z.real();
+                    zi = z.imag();
+                } else {
+                    map_.step(zr, zi);
+                }
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {                       // per-pixel early exit
@@ -310,15 +326,38 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
     // bound RationalMap's actual terms, which only the instance has. For a
     // built-in family these just forward straight to the static functions,
     // so the fast path is unchanged apart from one cheap, predictable branch.
+    const RationalMap* custom = map_.custom_map();
+
+    // For a Custom map whose critical point provably does not depend on the
+    // parameter (see RationalMap::critical_points_constant -- any z^n + a
+    // shape qualifies), critical_point_at(p) is the same answer at every
+    // pixel. Computing it once here turns a full Aberth-Ehrlich root-find
+    // per pixel -- critical_points()'s ordinary source, run fresh on every
+    // one of resolution^2 pixels -- into a single one: normally the
+    // dominant cost of rendering a Custom map's parameter plane.
+    const bool cp_fixed = custom && custom->critical_points_constant();
+    const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx p  = view_.coord(col, row);      // the PIXEL is the parameter
-            const Cplx c0 = map_.critical_point_at(p);
+            const Cplx c0 = cp_fixed ? fixed_c0 : map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
             double out = 0.0;
 
+            // `a` = p is fixed across this pixel's whole orbit (up to
+            // max_iter steps), so for a Custom map bind it once per pixel
+            // rather than once per step -- see RationalMap::bind.
+            const BoundRationalMap bound = custom ? custom->bind(p) : BoundRationalMap{};
+
             for (int n = 0; n < settings_.max_iter; ++n) {
-                map_.step_with_param(p, zr, zi);
+                if (custom) {
+                    const Cplx z = bound.eval(Cplx(zr, zi));
+                    zr = z.real();
+                    zi = z.imag();
+                } else {
+                    map_.step_with_param(p, zr, zi);
+                }
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {
@@ -357,6 +396,10 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
     const int nattr = static_cast<int>(ar.size());
     const double tol = settings_.tol;
 
+    // See render_julia: `a` = map_.param() is fixed for the whole render.
+    const RationalMap* custom = map_.custom_map();
+    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx c = view_.coord(col, row);
@@ -364,7 +407,13 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
             double label = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                map_.step(zr, zi);
+                if (custom) {
+                    const Cplx z = bound.eval(Cplx(zr, zi));
+                    zr = z.real();
+                    zi = z.imag();
+                } else {
+                    map_.step(zr, zi);
+                }
 
                 for (int k = 0; k < nattr; ++k) {
                     if (chordal_distance(zr, zi, ar[k], ai[k]) < tol) {
@@ -395,6 +444,10 @@ Image Renderer::render_greens(bool* normalized, const std::atomic<bool>* cancel)
     if (!ok) norm = 1.0;
     if (normalized) *normalized = ok;
 
+    // See render_julia: `a` = map_.param() is fixed for the whole render.
+    const RationalMap* custom = map_.custom_map();
+    const BoundRationalMap bound = custom ? custom->bind(map_.param()) : BoundRationalMap{};
+
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx c = view_.coord(col, row);
@@ -402,7 +455,13 @@ Image Renderer::render_greens(bool* normalized, const std::atomic<bool>* cancel)
             double acc = 0.0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
-                map_.step(zr, zi);
+                if (custom) {
+                    const Cplx z = bound.eval(Cplx(zr, zi));
+                    zr = z.real();
+                    zi = z.imag();
+                } else {
+                    map_.step(zr, zi);
+                }
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 acc += std::log(mag > 1.0 ? mag : 1.0);

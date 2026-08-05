@@ -80,6 +80,28 @@ struct FixedPoint {
 };
 
 // -----------------------------------------------------------------------------
+// RationalMap::eval(z, a)/deriv(z, a) redo every term's effective_coeff /
+// effective_location / effective_strength -- each an a^param_power call --
+// on EVERY invocation, even though every caller that matters (an escape-time
+// loop) holds `a` fixed across many hundreds of calls in a row. Bound(a)
+// does that work once and returns an evaluator with it already baked in, so
+// eval()/deriv() in the hot loop become a plain Horner-style sum with no
+// per-call exponentiation or `enabled`-filtering. See RationalMap::bind().
+// -----------------------------------------------------------------------------
+class BoundRationalMap {
+public:
+    Cplx eval(Cplx z) const;
+    Cplx deriv(Cplx z) const;
+
+private:
+    friend class RationalMap;
+    struct BoundPoly { Cplx coeff; int exponent; };
+    struct BoundPole { Cplx location; Cplx strength; int order; };
+    std::vector<BoundPoly> poly_;
+    std::vector<BoundPole> pole_;
+};
+
+// -----------------------------------------------------------------------------
 // The map itself: a named collection of terms.
 // -----------------------------------------------------------------------------
 class RationalMap {
@@ -114,6 +136,13 @@ public:
     // Analytic derivative. Every term differentiates to a term of the same
     // kind, so this is exact rather than a finite difference.
     Cplx deriv(Cplx z, Cplx a) const;
+
+    // Bind every term to a fixed parameter value once. Pays off whenever the
+    // same `a` will be evaluated more than a handful of times -- which is
+    // always, for a Renderer escape-time loop: `a` is fixed for an entire
+    // orbit (render_julia/render_basin/render_greens: for the whole render;
+    // render_parameter: for one pixel's worth of iterations).
+    BoundRationalMap bind(Cplx a) const;
 
     // --- structure ----------------------------------------------------------
     // Degree as a rational map of the sphere: max(deg numerator, deg
@@ -188,6 +217,33 @@ public:
     // apart than that -- see cdx::roots()'s documentation of the same
     // effect.
     std::vector<Cplx> distinct_critical_points(Cplx a, double rel_tol = 1e-4) const;
+
+    // True iff critical_points(a) is provably the SAME SET for every `a` --
+    // e.g. any z^n + a shape: the `+ a` term has exponent 0, so it never
+    // enters the derivative and the only critical point is (and stays) 0.
+    // Structural, not numeric: checks that no term feeding the derivative,
+    // and no pole (a critical point in its own right, per the class comment
+    // above), can vary with the parameter at all. This is what lets
+    // Renderer::render_parameter call critical_points() ONCE per render for
+    // a Custom map like this, instead of once per pixel -- normally the
+    // dominant cost of rendering a Custom map's parameter plane, since each
+    // call clears denominators and runs a full Aberth-Ehrlich root-find
+    // (cdx::roots) from scratch.
+    //
+    // Conservative in one narrow, deliberate way: a poly term with
+    // exponent == 0 is exempt even though ITS OWN value can depend on `a`
+    // (that's exactly the "+a" case above) -- such a term never reaches the
+    // derivative, but it DOES still feed into the numerator polynomial used
+    // for pole-order and infinity-multiplicity bookkeeping elsewhere in
+    // critical_points(). In the ordinary case that changes nothing (that
+    // numerator's effective DEGREE is set by its highest-exponent term,
+    // whose coefficient this function already requires to be
+    // parameter-independent); it could only give a stale-but-wrong answer
+    // if `a` grew so large that the exempted term's magnitude swamped that
+    // leading term's fixed coefficient by more than roots.cpp's
+    // kTrimRelTol (1e-12) -- i.e. |a| astronomically outside any parameter
+    // range this project's viewports actually explore.
+    bool critical_points_constant() const;
 
     // All fixed points R(z) == z, found algebraically (root the polynomial
     // N(z) - z*D(z) after clearing denominators; NOT limited to attracting

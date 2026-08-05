@@ -351,6 +351,106 @@ int main() {
         check(all_ok, "20 random sandbox maps all satisfy total multiplicity == 2d-2");
     }
 
+    // ---- critical_points_constant: structural parameter-independence flag ----
+    std::printf("\ncritical_points_constant:\n");
+    {
+        // Every z^n + a preset: the "+a" term has exponent 0, so it never
+        // reaches the derivative -- the motivating case this exists for.
+        check(RationalMap::mandelbrot().critical_points_constant(),
+              "mandelbrot: critical points are constant (0 and infinity, always)");
+        check(RationalMap::multibrot(5).critical_points_constant(),
+              "multibrot(5): critical points are constant");
+        check(RationalMap::newton_cubic().critical_points_constant(),
+              "newton_cubic: no parameter dependence anywhere, so trivially constant");
+    }
+    {
+        // mcmullen's pole strength is a*1, so its own location's TRUE order
+        // -- and hence critical_points()'s pole/infinity multiplicities --
+        // genuinely depends on `a` (see the mcmullen critical_points block
+        // above: the pole itself becomes critical only because of that
+        // dependence). Must NOT be flagged constant.
+        check(!RationalMap::mcmullen(2).critical_points_constant(),
+              "mcmullen(2): pole strength depends on a, so NOT constant");
+        check(!RationalMap::mcmullen(3).critical_points_constant(),
+              "mcmullen(3): same reasoning");
+    }
+    {
+        RationalMap m("moving-pole");
+        m.add_poly({1, 0}, 2, 0);
+        m.add_pole({0, 0}, {1, 0}, 1, 0, "fixed strength");
+        m.pole_terms()[0].location_is_param = true;   // pole tracks a
+        check(!m.critical_points_constant(),
+              "a pole whose location tracks the parameter is NOT constant, "
+              "even with param_power == 0 everywhere");
+    }
+    {
+        // Cross-check against the actual set: for every one of a spread of
+        // `a` values, a map flagged constant must produce the exact same
+        // critical_points() result -- this is the property the flag exists
+        // to guarantee, not just a hardcoded expectation on presets.
+        RationalMap m = RationalMap::mandelbrot();
+        check(m.critical_points_constant(), "mandelbrot flagged constant (precondition)");
+        auto sorted_by_finite = [](std::vector<Cplx> v) {
+            std::sort(v.begin(), v.end(), [](Cplx x, Cplx y) {
+                if (std::isinf(x.real()) != std::isinf(y.real()))
+                    return std::isinf(y.real());   // finite first
+                return x.real() < y.real();
+            });
+            return v;
+        };
+        const auto reference = sorted_by_finite(m.critical_points(Cplx(1.0, 0.0)));
+        bool all_match = true;
+        for (Cplx a : as) {
+            const auto cp = sorted_by_finite(m.critical_points(a));
+            if (cp.size() != reference.size()) { all_match = false; continue; }
+            for (std::size_t i = 0; i < cp.size(); ++i) {
+                const bool both_inf =
+                    std::isinf(cp[i].real()) && std::isinf(reference[i].real());
+                if (!both_inf && !close(cp[i], reference[i], 1e-6)) all_match = false;
+            }
+        }
+        check(all_match,
+              "mandelbrot: critical_points(a) is bit-for-bit the same set across varied a, "
+              "as critical_points_constant() promises");
+    }
+
+    // ---- bind: BoundRationalMap matches eval/deriv exactly --------------------
+    std::printf("\nbind (BoundRationalMap):\n");
+    {
+        bool eval_ok = true, deriv_ok = true;
+        for (RationalMap m : {RationalMap::mandelbrot(), RationalMap::mcmullen(3),
+                              RationalMap::newton_cubic()}) {
+            for (Cplx a : as) {
+                const BoundRationalMap b = m.bind(a);
+                for (Cplx z : zs) {
+                    if (!close(b.eval(z), m.eval(z, a))) eval_ok = false;
+                    if (!close(b.deriv(z), m.deriv(z, a))) deriv_ok = false;
+                }
+            }
+        }
+        check(eval_ok, "BoundRationalMap::eval matches RationalMap::eval for every (z, a)");
+        check(deriv_ok, "BoundRationalMap::deriv matches RationalMap::deriv for every (z, a)");
+    }
+    {
+        // A disabled term must vanish from the bound evaluator too, not
+        // just from eval() -- bind() has its own `enabled` filter to keep
+        // in sync.
+        RationalMap m = RationalMap::mandelbrot();
+        m.poly_terms()[1].enabled = false;
+        const BoundRationalMap b = m.bind({5.0, 0.0});
+        check(close(b.eval({2.0, 0.0}), Cplx(4.0, 0.0)),
+              "bind() respects disabled terms, matching eval()'s behaviour");
+    }
+    {
+        // Evaluating exactly at a pole returns the same huge sentinel as
+        // eval(), not NaN.
+        RationalMap m("test");
+        m.add_pole({1.0, 0.0}, {1.0, 0.0}, 1);
+        const BoundRationalMap b = m.bind({0, 0});
+        check(b.eval({1.0, 0.0}).real() > 1e299,
+              "bind()'d evaluator returns the escape sentinel at a pole, matching eval()");
+    }
+
     // ---- distinct_critical_points: clusters multiplicity to one point each ---
     std::printf("\ndistinct_critical_points:\n");
     {

@@ -11,6 +11,7 @@
 #include "cdx/renderer.hpp"
 #include "cdx/rational.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -21,6 +22,10 @@ static int failures = 0;
 static void check(bool cond, const char* what) {
     std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what);
     if (!cond) ++failures;
+}
+
+static bool close(Cplx a, Cplx b, double tol = 1e-9) {
+    return std::abs(a - b) < tol;
 }
 
 // Fraction of pixels whose values differ by more than `tol` -- the same
@@ -153,6 +158,124 @@ int main() {
         }
         check(any_nonzero, "a non-preset custom map produces a non-degenerate image");
         check(any_finite, "...with finite (non-NaN/inf) values");
+    }
+
+    // ---- benchmark / regression guard: no per-pixel root-find, no redundant
+    //      per-iteration coefficient recomputation ---------------------------
+    // NOT a custom-vs-built-in comparison: RationalMap::eval necessarily
+    // costs more per call than a hardcoded formula (generic term iteration,
+    // std::complex arithmetic rather than this project's usual hand-rolled
+    // real/imag -- see CLAUDE.md), and that gap is not what this benchmark
+    // is for. What it isolates instead is the two specific per-pixel costs
+    // that RationalMap::critical_points_constant/bind exist to eliminate:
+    //
+    //   1. render_parameter vs. render_julia, same resolution/max_iter/map.
+    //      Both run the identical escape-time loop; render_parameter does
+    //      exactly one extra thing per pixel (find the starting point).
+    //      Before critical_points_constant(), that "one extra thing" was a
+    //      full Aberth-Ehrlich root-find PER PIXEL -- measured standalone
+    //      below at ~3.2 s for this exact resolution, i.e. many times the
+    //      entire current render. After it, render_parameter computes the
+    //      critical point ONCE for the whole render, so it should cost
+    //      barely more than render_julia.
+    //   2. RationalMap::eval() vs. bind()+BoundRationalMap::eval(), same
+    //      (z, a) pairs, called enough times to amortize noise. bind()
+    //      exists specifically so a fixed `a` used across many calls (an
+    //      escape-time orbit) doesn't redo effective_coeff/
+    //      effective_location/effective_strength on every single one.
+    std::printf("\nbenchmark: no per-pixel root-find, no redundant per-iteration recompute:\n");
+    {
+        const Cplx param{-0.7269, 0.1889};
+        Viewport v{{-0.5, 0.0}, 1.5, 400};
+        // Single-threaded: deterministic, not at the mercy of the scheduler
+        // handing the two renders different numbers of cores.
+        RenderSettings s{200, 2.0, 1e-6, 1};
+        Renderer custom(Map::custom(RationalMap::mandelbrot(), param), v, s);
+
+        // Best-of-3 each: this is a regression guard against an
+        // order-of-magnitude algorithmic change, not a precise timing
+        // measurement, so take the minimum to filter out scheduler/cache
+        // noise rather than averaging it in.
+        auto min_time_ms = [](auto&& fn) {
+            double best = -1.0;
+            for (int trial = 0; trial < 3; ++trial) {
+                const auto t0 = std::chrono::steady_clock::now();
+                fn();
+                const auto t1 = std::chrono::steady_clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                if (best < 0.0 || ms < best) best = ms;
+            }
+            return best;
+        };
+
+        const double julia_ms = min_time_ms([&] { custom.render_julia(); });
+        const double param_ms = min_time_ms([&] { custom.render_parameter(); });
+
+        std::printf("  render_julia %.2f ms | render_parameter %.2f ms (%.2fx)\n",
+                    julia_ms, param_ms, param_ms / julia_ms);
+        std::printf("  (for reference: a bare per-pixel critical_points() sweep at this "
+                     "resolution alone runs into the seconds -- see rational.cpp)\n");
+        // Generous: render_parameter does real extra work (one critical-point
+        // lookup per render, plus a bind() per pixel instead of per render),
+        // so some gap over render_julia is expected. 3x is far below what a
+        // reintroduced per-pixel root-find would cost (>>10x -- a single
+        // critical_points() call at this resolution's pixel count alone
+        // takes seconds, dwarfing either render) but well above ordinary
+        // machine noise.
+        check(param_ms < julia_ms * 3.0,
+              "render_parameter isn't dramatically slower than render_julia "
+              "(catches a return to per-pixel critical-point root-finding)");
+    }
+    {
+        RationalMap m = RationalMap::mandelbrot();
+        const Cplx a{-0.7269, 0.1889};
+        const int N = 2'000'000;
+
+        // Reset whenever the orbit escapes so both loops keep doing the same
+        // kind of work (finite complex multiplies) throughout -- letting it
+        // run off to inf/nan would spend most of the budget on degenerate
+        // arithmetic instead of the representative case this is meant to
+        // measure, and would also make the final-value equality check below
+        // meaningless (inf/nan is a poor discriminator between two
+        // computations that trivially agree once everything is already
+        // non-finite).
+        auto bounded_orbit = [](auto step) {
+            Cplx z{0.1, 0.2};
+            for (int i = 0; i < N; ++i) {
+                z = step(z);
+                if (std::abs(z) > 4.0) z = Cplx(0.1, 0.2);
+            }
+            return z;
+        };
+
+        auto min_time_ms = [](auto&& fn) {
+            double best = -1.0;
+            for (int trial = 0; trial < 3; ++trial) {
+                const auto t0 = std::chrono::steady_clock::now();
+                fn();
+                const auto t1 = std::chrono::steady_clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                if (best < 0.0 || ms < best) best = ms;
+            }
+            return best;
+        };
+
+        Cplx z_eval{}, z_bound{};
+        const double eval_ms = min_time_ms([&] {
+            z_eval = bounded_orbit([&](Cplx z) { return m.eval(z, a); });
+        });
+        const BoundRationalMap bound = m.bind(a);
+        const double bound_ms = min_time_ms([&] {
+            z_bound = bounded_orbit([&](Cplx z) { return bound.eval(z); });
+        });
+
+        std::printf("  %d iterations: eval(z,a) %.2f ms | bind(a)+eval(z) %.2f ms (%.2fx)\n",
+                    N, eval_ms, bound_ms, bound_ms / eval_ms);
+        check(bound_ms < eval_ms * 0.85,
+              "bind()+eval() measurably beats repeated eval(z, a) for a fixed a "
+              "(catches the per-iteration effective_coeff/location/strength recompute)");
+        check(close(z_eval, z_bound, 1e-9),
+              "eval(z,a) and bind(a)+eval(z) compute the identical orbit");
     }
 
     std::printf("\n%s (%d failure%s)\n",

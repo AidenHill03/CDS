@@ -313,6 +313,47 @@ Cplx RationalMap::deriv(Cplx z, Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
+BoundRationalMap RationalMap::bind(Cplx a) const {
+    BoundRationalMap b;
+    b.poly_.reserve(poly_.size());
+    for (const auto& t : poly_) {
+        if (!t.enabled) continue;
+        b.poly_.push_back({t.effective_coeff(a), t.exponent});
+    }
+    b.pole_.reserve(pole_.size());
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        b.pole_.push_back({t.effective_location(a), t.effective_strength(a), t.order});
+    }
+    return b;
+}
+
+Cplx BoundRationalMap::eval(Cplx z) const {
+    Cplx sum(0.0, 0.0);
+    for (const auto& t : poly_) sum += t.coeff * ipow(z, t.exponent);
+    for (const auto& t : pole_) {
+        const Cplx d = z - t.location;
+        if (d == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
+        sum += t.strength / ipow(d, t.order);
+    }
+    return sum;
+}
+
+Cplx BoundRationalMap::deriv(Cplx z) const {
+    Cplx sum(0.0, 0.0);
+    for (const auto& t : poly_) {
+        if (t.exponent == 0) continue;
+        sum += t.coeff * static_cast<double>(t.exponent) * ipow(z, t.exponent - 1);
+    }
+    for (const auto& t : pole_) {
+        const Cplx d = z - t.location;
+        if (d == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
+        sum -= static_cast<double>(t.order) * t.strength / ipow(d, t.order + 1);
+    }
+    return sum;
+}
+
+// -----------------------------------------------------------------------------
 int RationalMap::degree(Cplx a) const {
     // Clearing denominators: the denominator is the product of (z-p_j)^m_j
     // together with z^{|min negative exponent|}. The numerator degree is the
@@ -448,6 +489,25 @@ std::vector<Cplx> RationalMap::distinct_critical_points(Cplx a, double rel_tol) 
         if (!found) out.push_back(z);
     }
     return out;
+}
+
+bool RationalMap::critical_points_constant() const {
+    // Only terms that survive into the derivative (exponent != 0) can move
+    // an ordinary critical point; a param-dependent exponent==0 term (e.g.
+    // mandelbrot()'s "+ a") never reaches it. See the header comment for the
+    // (deliberate, narrow) degenerate case this doesn't cover.
+    for (const auto& t : poly_) {
+        if (!t.enabled) continue;
+        if (t.exponent != 0 && t.param_power != 0) return false;
+    }
+    // A pole is a critical point in its own right (critical_points()'s
+    // second source), so its location moving with `a` -- or its TRUE order
+    // changing because its strength does -- both disqualify it outright.
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        if (t.param_power != 0 || t.location_is_param) return false;
+    }
+    return true;
 }
 
 std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
