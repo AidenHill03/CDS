@@ -45,6 +45,29 @@ DEFAULT_PARAMETER_VIEW_SCALE = 1.5
 # message for the full story -- render_settings/viewport.resolution below
 # both come from whatever Settings this Session was constructed with.
 
+_POLY_TERM_FIELDS = ("coeff", "exponent", "param_power", "enabled", "label")
+_POLE_TERM_FIELDS = ("location", "strength", "order", "param_power", "enabled",
+                     "location_is_param", "label")
+
+
+def _swap_terms(terms, i: int, j: int, fields: tuple[str, ...]) -> bool:
+    """Swaps terms[i] and terms[j] field-by-field. False (no-op) if either
+    index is out of range -- the caller uses this for "move up"/"move
+    down", where one end of the list has no such neighbor. See
+    Session.move_poly_term's docstring for why this is NOT
+    `terms[i], terms[j] = terms[j], terms[i]`.
+    """
+    if not (0 <= i < len(terms) and 0 <= j < len(terms)):
+        return False
+    a, b = terms[i], terms[j]
+    a_vals = tuple(getattr(a, f) for f in fields)
+    b_vals = tuple(getattr(b, f) for f in fields)
+    for f, v in zip(fields, b_vals):
+        setattr(a, f, v)
+    for f, v in zip(fields, a_vals):
+        setattr(b, f, v)
+    return True
+
 
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
@@ -246,6 +269,28 @@ class Session:
         term = terms[index]
         for name, value in fields.items():
             setattr(term, name, value)
+
+    def move_poly_term(self, index: int, direction: int) -> bool:
+        """Swaps poly_terms()[index] with its neighbor at index+direction
+        (direction must be -1 or +1). Returns False (no-op) if that
+        neighbor doesn't exist -- index is already at that end of the list.
+
+        Deliberately NOT `terms[i], terms[j] = terms[j], terms[i]`: the
+        opaque-vector binding's __getitem__ returns a LIVE reference into
+        the underlying vector, not a snapshot copy (that's what makes
+        `poly_terms()[0].enabled = False` work at all), so that idiom's
+        usual "safe simultaneous swap" guarantee does not hold here -- the
+        second assignment reads through a reference to a slot the first
+        assignment already overwrote, silently duplicating one term into
+        both slots instead of swapping them. Snapshotting every field into
+        plain Python values (via getattr, which DOES copy out a value)
+        before writing any of them back avoids that trap.
+        """
+        return _swap_terms(self.map.poly_terms(), index, index + direction, _POLY_TERM_FIELDS)
+
+    def move_pole_term(self, index: int, direction: int) -> bool:
+        """Same as move_poly_term, for pole_terms()."""
+        return _swap_terms(self.map.pole_terms(), index, index + direction, _POLE_TERM_FIELDS)
 
     # ---- library -----------------------------------------------------------------
     def save_to_library(self, name: str | None = None) -> None:

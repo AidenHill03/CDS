@@ -149,6 +149,37 @@ def main() -> None:
     s2.remove_pole_term(0)
     check(len(s2.map.pole_terms()) == 0, "remove_pole_term removes the pole term")
 
+    # ---- term editing: reorder --------------------------------------------------
+    print("\nterm editing (reorder):")
+    s2r = Session()
+    s2r.map = cdx.RationalMap("scratch-reorder")
+    s2r.add_poly_term(1 + 0j, 2, 0, "first")
+    s2r.add_poly_term(2 + 0j, 3, 0, "second")
+    s2r.add_poly_term(3 + 0j, 4, 0, "third")
+
+    ok = s2r.move_poly_term(0, +1)
+    labels = [t.label for t in s2r.map.poly_terms()]
+    check(ok and labels == ["second", "first", "third"],
+          "move_poly_term(0, +1) swaps with its neighbor, not a silent duplicate "
+          "(the bind_vector aliasing trap this is written to avoid)")
+
+    ok = s2r.move_poly_term(0, -1)
+    check(not ok and [t.label for t in s2r.map.poly_terms()] == ["second", "first", "third"],
+          "move_poly_term at index 0 with direction -1 is a no-op (no neighbor there)")
+
+    ok = s2r.move_poly_term(2, +1)
+    check(not ok, "move_poly_term at the last index with direction +1 is a no-op")
+
+    s2r.add_pole_term(0j, 1 + 0j, 1, 0, "polefirst")
+    s2r.add_pole_term(5 + 0j, 2 + 0j, 1, 0, "polesecond")
+    before_eval = s2r.map.eval(3 + 0j, 0j)
+    ok = s2r.move_pole_term(0, +1)
+    after_eval = s2r.map.eval(3 + 0j, 0j)
+    check(ok and [t.label for t in s2r.map.pole_terms()] == ["polesecond", "polefirst"],
+          "move_pole_term swaps pole terms the same way")
+    check(after_eval == before_eval,
+          "reordering terms never changes what the map evaluates to -- it's a sum either way")
+
     # ---- term editing: pole-location uniqueness / negative-exponent rejection ----
     print("\nterm editing (validation):")
     s2b = Session()

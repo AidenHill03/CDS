@@ -29,6 +29,7 @@ import cdx
 from app.render_cache import RenderCache
 from app.session import Session, render_map
 from app.settings import Settings, load_settings, save_settings
+from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
@@ -503,6 +504,8 @@ class SandboxWindow(QMainWindow):
         # of which central-widget tab is showing either way.
         self.tabs = QTabWidget(self)
         self.tabs.addTab(self.image_view, "View")
+        self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
+        self.tabs.addTab(self.term_editor_panel, "Terms")
         self.settings_panel = SettingsPanel(self.session, self._on_settings_applied, self)
         self.tabs.addTab(self.settings_panel, "Settings")
         self.setCentralWidget(self.tabs)
@@ -531,6 +534,20 @@ class SandboxWindow(QMainWindow):
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
+
+    # ---- term edits: live but debounced, reusing the viewport-change path -------
+    def _on_term_edited(self) -> None:
+        # Deliberately the SAME debounced path viewport drag/zoom uses, not
+        # an immediate render the way Settings' explicit Apply is: term
+        # edits are meant to feel live (nudge a coefficient, watch the
+        # picture update), and a burst of edits -- dragging a spinbox,
+        # typing several digits into a coefficient cell -- should coalesce
+        # into one render the same way a scroll burst does, not fire one
+        # render per keystroke. TermEditorPanel has already validated and
+        # applied the edit to self.session.map by the time this is called;
+        # this only has to trigger the render side.
+        self._update_status_bar()
+        self._debounce_timer.start()
 
     # ---- viewport change -> debounced render ------------------------------------
     @Slot()

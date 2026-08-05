@@ -395,10 +395,12 @@ def main() -> None:
 
     # ---- Settings tab: Apply reaches the session and triggers a real re-render ------
     print("\nsettings tab:")
-    check(window.tabs.count() == 2 and window.tabs.tabText(0) == "View"
-          and window.tabs.tabText(1) == "Settings",
-          "the window has exactly a View tab and a Settings tab, in that order")
-    check(window.tabs.widget(1) is window.settings_panel,
+    check(window.tabs.count() == 3 and window.tabs.tabText(0) == "View"
+          and window.tabs.tabText(1) == "Terms" and window.tabs.tabText(2) == "Settings",
+          "the window has View, Terms, and Settings tabs, in that order")
+    check(window.tabs.widget(1) is window.term_editor_panel,
+          "the Terms tab holds the actual TermEditorPanel instance")
+    check(window.tabs.widget(2) is window.settings_panel,
           "the Settings tab holds the actual SettingsPanel instance")
 
     window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
