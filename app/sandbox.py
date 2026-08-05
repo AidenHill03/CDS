@@ -1,10 +1,10 @@
-"""app/sandbox.py -- P5a: first interactive window.
+"""app/sandbox.py -- P5a/P5b: the interactive window.
 
-Single window, driven by app.session.Session, with two tabs: the image pane
+Single window, driven by app.session.Session, with tabs: the image pane
 (render pipeline: threaded, progressive, cursor-anchored zoom, overscan
-buffer, correct orientation) and a Settings panel (app/settings_panel.py)
-for render/cache configuration. No term editor, mode selector, or facts
-panel yet.
+buffer, correct orientation), a term editor (app/term_editor_panel.py), a
+read-only dynamical-facts panel (app/facts_panel.py), and a Settings panel
+(app/settings_panel.py) for render/cache configuration.
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QTabWidge
                                QWidget)
 
 import cdx
+from app.facts_panel import FactsPanel
 from app.render_cache import RenderCache
 from app.session import Session, render_map
 from app.settings import Settings, load_settings, save_settings
@@ -506,8 +507,11 @@ class SandboxWindow(QMainWindow):
         self.tabs.addTab(self.image_view, "View")
         self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
         self.tabs.addTab(self.term_editor_panel, "Terms")
+        self.facts_panel = FactsPanel(self.session, self._on_center_view, self)
+        self.tabs.addTab(self.facts_panel, "Facts")
         self.settings_panel = SettingsPanel(self.session, self._on_settings_applied, self)
         self.tabs.addTab(self.settings_panel, "Settings")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
 
         toolbar = QToolBar("Controls", self)
@@ -548,6 +552,25 @@ class SandboxWindow(QMainWindow):
         # this only has to trigger the render side.
         self._update_status_bar()
         self._debounce_timer.start()
+        # Cheap: refresh() only recomputes when (map, param) actually
+        # changed since its last call, so this stays fresh for whenever the
+        # user next looks at the Facts tab without paying for a recompute
+        # on every keystroke's worth of edits.
+        self.facts_panel.refresh()
+
+    # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.facts_panel:
+            self.facts_panel.refresh()
+
+    # ---- facts tab: clicking a listed point centres the view on it --------------
+    def _on_center_view(self, point: complex) -> None:
+        vp = self.session.viewport
+        self.session.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
+        self.tabs.setCurrentWidget(self.image_view)
+        self._update_status_bar()
+        self._debounce_timer.stop()
+        self._start_render()
 
     # ---- viewport change -> debounced render ------------------------------------
     @Slot()
