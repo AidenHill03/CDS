@@ -23,12 +23,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # ---- defaults ------------------------------------------------------------------
-# Moved here from app/session.py -- see the P5a-final commit message for how
-# this number was measured (the largest resolution whose full render, via
-# the ACTUAL Map.custom code path the app always uses, stayed under ~0.4s on
-# the development machine). Note this is below the Settings panel's own
-# RESOLUTION_RANGE minimum of 200 -- see that constant's comment.
-DEFAULT_RESOLUTION = 120
+# Moved here from app/session.py. Measured three times, each superseding the
+# last as the underlying engine cost changed:
+#   1. P5a-final's first pass measured ~1100, but against the WRONG map --
+#      the hardcoded Family.Quadratic fast path, not what the app actually
+#      renders through (Map.custom(self.map, ...), even for the built-in
+#      "mandelbrot" preset).
+#   2. Re-measured against the real Map.custom path, P5a-final landed on
+#      120 -- correct for the engine AS IT STOOD THEN, but that path turned
+#      out to be paying two avoidable costs: a full per-pixel critical-point
+#      root-find in parameter-plane mode, and per-iteration std::complex
+#      arithmetic with no compiled/hand-rolled fast path at all.
+#   3. P5a.1 fixed both (see cdx/include/cdx/rational.hpp's CompiledMap and
+#      cdx::recognize_family, and the P5a.1 commit's own benchmark numbers).
+#      A built-in-shaped Custom map like "mandelbrot" is now recognized and
+#      dispatches to the SAME native formula a built-in Family::Quadratic
+#      Map would use -- this measurement is what THAT is worth: the largest
+#      resolution whose full render (already at the 1.3x overscan factor
+#      every full render uses) stayed under ~0.4s (median of 9 runs,
+#      parameter mode -- the startup default) on the development machine,
+#      post-fix. It landed back at 800 -- coincidentally cdx.Viewport()'s
+#      own incidental C++-side default, now actually earned rather than
+#      just inherited.
+DEFAULT_RESOLUTION = 800
 # The rest match cdx.RenderSettings()'s own C++-side defaults (see
 # cdx/include/cdx/renderer.hpp) -- duplicated here rather than read from a
 # live cdx.RenderSettings() instance so this module has no dependency on the
@@ -59,11 +76,13 @@ class FieldSpec:
     exclusive_minimum: bool = False
 
 
-# The widget's floor (100) sits below the 200 a resolution slider would
-# naturally start from, specifically so DEFAULT_RESOLUTION (measured at 120,
-# see above) is itself a valid, enterable value -- a default the range
-# excludes would be a contradiction the first time the panel opens.
-RESOLUTION_RANGE = (100, 4000)
+# 200-4000, as originally specified. An earlier engine-cost measurement put
+# DEFAULT_RESOLUTION (see above) at 120, briefly below this floor -- widened
+# to 100 to accommodate it rather than clamping the default up and
+# contradicting "default = whatever was measured". P5a.1's engine fix moved
+# the honest default back to 800, comfortably inside 200-4000 again, so the
+# floor is restored to its originally-specified value.
+RESOLUTION_RANGE = (200, 4000)
 
 FIELD_SPECS: dict[str, FieldSpec] = {
     "resolution": FieldSpec(int, RESOLUTION_RANGE[0], RESOLUTION_RANGE[1],
@@ -173,13 +192,23 @@ def save_settings(settings: Settings, path: Path | None = None) -> None:
 
 # ---- slow-render warning ----------------------------------------------------------
 # Calibrated from the SAME measurement DEFAULT_RESOLUTION itself came from
-# (see the P5a-final commit message): res=120, overscanned to round(120*1.3)
-# = 156, max_iter=200, ~0.33s median through the actual Map.custom render
-# path in "parameter" mode -- the slower of the two render modes measured,
-# and so the more conservative (over-warns rather than under-warns) anchor
-# for a heuristic meant to catch "this will feel slow", not predict it
-# precisely. 156*156*200 / 0.33 =~ 14.7M pixel-iterations/second.
-MEASURED_PIXEL_ITERATIONS_PER_SECOND = 14_700_000
+# (see that constant's comment): res=800, overscanned to round(800*1.3) =
+# 1040, max_iter=200, ~0.30s median through the actual Map.custom render
+# path in "parameter" mode, for the "mandelbrot" preset -- which, since
+# P5a.1's fast-path recognition (see cdx::recognize_family), now dispatches
+# to the SAME native formula a built-in Family::Quadratic Map would use.
+# 1040*1040*200 / 0.30 =~ 720M pixel-iterations/second at THAT speed --
+# but Settings has no idea what map will actually be rendered, and a
+# general custom map with even a couple of poles measured roughly 9x that
+# cost in the P5a.1 acceptance benchmark (two required reciprocal
+# divisions per pole -- see CompiledMap::step's own comment). A heuristic
+# that only warns at the BEST case's speed would stay silent through
+# exactly the maps most likely to actually feel slow, so this divides the
+# measured recognized-path throughput by that same ~9x -- the same
+# "over-warn rather than under-warn" choice the previous calibration made
+# by picking the slower of two render modes, applied here to the slower of
+# two MAP SHAPES instead.
+MEASURED_PIXEL_ITERATIONS_PER_SECOND = 80_000_000
 SLOW_RENDER_WARNING_SECONDS = 1.0
 # Duplicated from app.sandbox.FULL_OVERSCAN_FACTOR rather than imported, so
 # this module has no dependency on PySide6 being installed -- only the

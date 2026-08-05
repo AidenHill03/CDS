@@ -405,7 +405,7 @@ def main() -> None:
     window._start_render()
     wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
 
-    new_resolution = 150   # above the resolution widget's own 100 floor -- see FIELD_SPECS
+    new_resolution = 250   # above the resolution widget's own 200 floor -- see FIELD_SPECS
     window.settings_panel._widgets["resolution"].setValue(new_resolution)
     window.settings_panel._widgets["threads"].setValue(1)
     window.settings_panel._apply()

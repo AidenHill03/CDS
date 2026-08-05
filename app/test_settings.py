@@ -151,7 +151,7 @@ def main() -> None:
 
     # ---- slow-render warning ----------------------------------------------------
     print("\nslow-render warning:")
-    fast = Settings(resolution=100, max_iter=50)
+    fast = Settings(resolution=200, max_iter=50)
     check(slow_render_warning(fast) is None,
           "a small resolution/iteration combination gets no warning")
 
