@@ -20,7 +20,7 @@ import tempfile
 import numpy as np
 
 import cdx
-from app.session import Session, render_map
+from app.session import PRESET_FAMILY_NAMES, Session, render_map
 
 failures = 0
 
@@ -225,6 +225,120 @@ def main() -> None:
         s4.load_library_file(path)
         check(set(s4.library.names()) == names_before,
               "save_library_file/load_library_file round-trips the same names")
+
+    # ---- library: presets are read-only --------------------------------------------
+    print("\nlibrary (preset read-only guards):")
+    s3b = Session()
+    try:
+        s3b.save_to_library("mandelbrot")
+        check(False, "save_to_library over a preset name raises")
+    except ValueError as e:
+        check("preset" in str(e), "save_to_library raises ValueError naming the preset")
+    s3b.map.name = "mandelbrot"
+    try:
+        s3b.save_to_library()   # name=None -- uses self.map.name, still a preset
+        check(False, "save_to_library() with self.map.name already a preset also raises")
+    except ValueError:
+        check(True, "the guard applies whether the name comes from the argument or self.map.name")
+
+    try:
+        s3b.rename_in_library("mandelbrot", "not-mandelbrot")
+        check(False, "renaming a preset raises")
+    except ValueError:
+        check(True, "rename_in_library raises ValueError for a preset source name")
+    try:
+        s3b.save_to_library("scratch-for-rename")
+        s3b.rename_in_library("scratch-for-rename", "mandelbrot")
+        check(False, "renaming ONTO a preset name raises")
+    except ValueError:
+        check(True, "rename_in_library raises ValueError for a preset target name")
+
+    try:
+        s3b.delete_from_library("mandelbrot")
+        check(False, "deleting a preset raises")
+    except ValueError:
+        check(True, "delete_from_library raises ValueError for a preset name")
+
+    try:
+        s3b.set_library_notes("mandelbrot", "nope")
+        check(False, "editing a preset's notes raises")
+    except ValueError:
+        check(True, "set_library_notes raises ValueError for a preset name")
+
+    # ---- library: rename / delete / notes on a real user entry ---------------------
+    print("\nlibrary (rename/delete/notes):")
+    s3c = Session()
+    s3c.map = cdx.RationalMap("scratch")
+    s3c.save_to_library("fam-a")
+    s3c.set_library_notes("fam-a", "first attempt")
+    check(s3c.library.find("fam-a").notes == "first attempt", "set_library_notes updates the entry")
+
+    try:
+        s3c.set_library_notes("does-not-exist", "x")
+        check(False, "editing notes on a missing name raises")
+    except KeyError:
+        check(True, "set_library_notes raises KeyError for a missing name")
+
+    s3c.rename_in_library("fam-a", "fam-b")
+    check("fam-b" in s3c.library.names() and "fam-a" not in s3c.library.names(),
+          "rename_in_library moves the entry to the new name")
+    check(s3c.library.find("fam-b").notes == "first attempt", "the renamed entry keeps its notes")
+
+    s3c.save_to_library("fam-c")
+    try:
+        s3c.rename_in_library("fam-b", "fam-c")
+        check(False, "renaming onto an existing (non-preset) name raises")
+    except ValueError as e:
+        check("already exists" in str(e), "rename_in_library names the collision")
+
+    try:
+        s3c.rename_in_library("does-not-exist", "whatever")
+        check(False, "renaming a missing source name raises")
+    except KeyError:
+        check(True, "rename_in_library raises KeyError for a missing source name")
+
+    check(s3c.delete_from_library("fam-b") is None, "delete_from_library succeeds silently")
+    check("fam-b" not in s3c.library.names(), "the deleted entry is gone")
+    try:
+        s3c.delete_from_library("fam-b")
+        check(False, "deleting an already-gone name raises")
+    except KeyError:
+        check(True, "delete_from_library raises KeyError for a missing name")
+
+    # ---- library: user-only persistence (save_user_library/load_user_library) ------
+    print("\nlibrary (user-only persistence):")
+    with tempfile.TemporaryDirectory() as tmp:
+        lib_path = os.path.join(tmp, "library.txt")
+
+        s5a = Session()
+        s5a.map = cdx.RationalMap("scratch")
+        s5a.save_to_library("only-user-family")
+        s5a.save_user_library(lib_path)
+        saved_text = open(lib_path).read()
+        check("only-user-family" in saved_text and "mandelbrot" not in saved_text,
+              "save_user_library writes the user entry but none of the six presets")
+
+        s5b = Session()
+        check("only-user-family" not in s5b.library.names(),
+              "sanity: a fresh Session doesn't have the user family yet")
+        s5b.load_user_library(lib_path)
+        check("only-user-family" in s5b.library.names(),
+              "load_user_library merges the saved user family in")
+        check(set(PRESET_FAMILY_NAMES) <= set(s5b.library.names()),
+              "load_user_library never removes any of the six presets")
+
+        s5c = Session()
+        s5c.load_user_library(os.path.join(tmp, "does-not-exist.txt"))
+        check(set(s5c.library.names()) == PRESET_FAMILY_NAMES,
+              "load_user_library on a missing file is a silent no-op, not an error")
+
+        malformed_path = os.path.join(tmp, "malformed.txt")
+        with open(malformed_path, "w") as f:
+            f.write("this is not a valid library file\n")
+        s5d = Session()
+        s5d.load_user_library(malformed_path)   # must not raise
+        check(set(s5d.library.names()) == PRESET_FAMILY_NAMES,
+              "load_user_library on a malformed file is also a silent no-op, not an error")
 
     # ---- dynamical_facts -----------------------------------------------------------
     print("\ndynamical_facts:")

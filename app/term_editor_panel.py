@@ -191,6 +191,19 @@ class TermEditorPanel(QWidget):
         self._refresh_all()
         self._on_edit()
 
+    # ---- external resync: session.map was replaced wholesale (e.g. a family load) ------
+    def refresh_from_session(self) -> None:
+        """Called by SandboxWindow when something OUTSIDE this panel
+        replaced self.session.map wholesale (loading a family from the
+        Library tab) -- resyncs the tables and formula label, and clears
+        undo/redo: a history spanning across an unrelated map isn't
+        meaningful undo territory, and every snapshot on the stack was
+        relative to a map that self.session.map no longer even is.
+        """
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._refresh_all()
+
     # ---- refresh: rebuild both tables + the formula label from session.map -------------
     def _refresh_all(self) -> None:
         self._formula_label.setText(self.session.map.to_formula() or "(empty map)")

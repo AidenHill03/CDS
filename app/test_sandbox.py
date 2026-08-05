@@ -16,6 +16,7 @@ plugin search path):
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 
@@ -70,6 +71,17 @@ def main() -> None:
     # save_settings, against explicit temp paths.)
     sandbox_module.load_settings = lambda: Settings()
     sandbox_module.save_settings = lambda settings: None
+    # Same concern, same fix, for ~/.complexdynamics/library.txt:
+    # SandboxWindow.__init__ calls session.load_user_library(library_path())
+    # unconditionally, and LibraryPanel's on_change callback calls
+    # session.save_user_library(library_path()) on every successful
+    # save/rename/delete. Pointing library_path() at a path that never
+    # exists makes load a no-op (see Session.load_user_library's own
+    # missing-file handling) and save write somewhere harmless instead of
+    # the real file. (app/test_library_panel.py is what actually tests
+    # save_user_library/load_user_library, against explicit temp paths.)
+    _fake_library_path = tempfile.mktemp(suffix="-library.txt")
+    sandbox_module.library_path = lambda: _fake_library_path
 
     print("=== app.sandbox tests ===")
 
@@ -395,15 +407,17 @@ def main() -> None:
 
     # ---- Settings tab: Apply reaches the session and triggers a real re-render ------
     print("\nsettings tab:")
-    check(window.tabs.count() == 4 and window.tabs.tabText(0) == "View"
+    check(window.tabs.count() == 5 and window.tabs.tabText(0) == "View"
           and window.tabs.tabText(1) == "Terms" and window.tabs.tabText(2) == "Facts"
-          and window.tabs.tabText(3) == "Settings",
-          "the window has View, Terms, Facts, and Settings tabs, in that order")
+          and window.tabs.tabText(3) == "Library" and window.tabs.tabText(4) == "Settings",
+          "the window has View, Terms, Facts, Library, and Settings tabs, in that order")
     check(window.tabs.widget(1) is window.term_editor_panel,
           "the Terms tab holds the actual TermEditorPanel instance")
     check(window.tabs.widget(2) is window.facts_panel,
           "the Facts tab holds the actual FactsPanel instance")
-    check(window.tabs.widget(3) is window.settings_panel,
+    check(window.tabs.widget(3) is window.library_panel,
+          "the Library tab holds the actual LibraryPanel instance")
+    check(window.tabs.widget(4) is window.settings_panel,
           "the Settings tab holds the actual SettingsPanel instance")
 
     window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)

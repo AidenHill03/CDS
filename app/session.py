@@ -26,6 +26,13 @@ from app.settings import Settings
 
 RENDER_MODES = ("julia", "parameter", "basin", "greens")
 
+# The six built-in families are read-only: save_to_library/rename_in_library/
+# delete_from_library/set_library_notes below all refuse to touch a name in
+# this set. Computed from FamilyLibrary.with_defaults() itself, not hand-
+# copied, so this can never drift out of sync with whatever that actually
+# ships (see cdx/src/rational.cpp's own with_defaults()).
+PRESET_FAMILY_NAMES = frozenset(cdx.FamilyLibrary.with_defaults().names())
+
 # Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
 # Julia set, not the origin (which gives the plain filled unit disc --
 # correct but uninstructive). This is NOT what the startup view shows --
@@ -295,8 +302,15 @@ class Session:
     # ---- library -----------------------------------------------------------------
     def save_to_library(self, name: str | None = None) -> None:
         """Adds (or replaces, by name) the current map in the session's
-        library. Renaming the map itself when a name is given.
+        library. Renaming the map itself when a name is given. Raises
+        ValueError for a PRESET_FAMILY_NAMES target -- the six built-ins
+        are read-only, and this is the one path that could otherwise
+        silently overwrite one (e.g. loading "mandelbrot", tweaking it,
+        then saving without renaming).
         """
+        target = name if name is not None else self.map.name
+        if target in PRESET_FAMILY_NAMES:
+            raise ValueError(f"{target!r} is a built-in preset; save under a different name")
         if name is not None:
             self.map.name = name
         self.library.add(self.map)
@@ -311,6 +325,53 @@ class Session:
             raise KeyError(f"no map named {name!r} in the library")
         self.map = found
 
+    def rename_in_library(self, old_name: str, new_name: str) -> None:
+        """Renames a library entry IN THE LIBRARY -- does not touch
+        self.map, even if self.map happens to be a copy of that same
+        family; renaming a saved entry and editing what is currently
+        loaded are different actions. Raises ValueError for a preset name
+        (either side: renaming FROM one, since presets don't move, or TO
+        one, since that would shadow it) or a new_name that collides with
+        an existing entry; KeyError if old_name isn't in the library.
+        """
+        if old_name in PRESET_FAMILY_NAMES:
+            raise ValueError(f"{old_name!r} is a built-in preset and cannot be renamed")
+        found = self.library.find(old_name)
+        if found is None:
+            raise KeyError(f"no map named {old_name!r} in the library")
+        if new_name in PRESET_FAMILY_NAMES:
+            raise ValueError(f"{new_name!r} is a built-in preset name and cannot be reused")
+        if new_name != old_name and self.library.find(new_name) is not None:
+            raise ValueError(f"a family named {new_name!r} already exists")
+        found.name = new_name
+        self.library.add(found)
+        self.library.remove(old_name)
+
+    def delete_from_library(self, name: str) -> None:
+        """Raises ValueError for a preset name, KeyError if name isn't in
+        the library at all.
+        """
+        if name in PRESET_FAMILY_NAMES:
+            raise ValueError(f"{name!r} is a built-in preset and cannot be deleted")
+        if not self.library.remove(name):
+            raise KeyError(f"no map named {name!r} in the library")
+
+    def set_library_notes(self, name: str, notes: str) -> None:
+        """Edits an entry's notes field IN THE LIBRARY, independent of
+        self.map. FamilyLibrary.find returns a COPY (see load_from_library's
+        own docstring), so this reads the entry, mutates the copy, and
+        writes it back via add() (which replaces by name) rather than
+        mutating something that was never actually stored. Raises
+        ValueError for a preset name, KeyError if name isn't in the library.
+        """
+        if name in PRESET_FAMILY_NAMES:
+            raise ValueError(f"{name!r} is a built-in preset; its notes cannot be edited")
+        found = self.library.find(name)
+        if found is None:
+            raise KeyError(f"no map named {name!r} in the library")
+        found.notes = notes
+        self.library.add(found)
+
     def save_library_file(self, path: str) -> None:
         with open(path, "w") as f:
             f.write(self.library.serialize())
@@ -319,6 +380,50 @@ class Session:
         with open(path) as f:
             text = f.read()
         self.library = cdx.FamilyLibrary.deserialize(text)
+
+    def save_user_library(self, path: str) -> None:
+        """Persists only the NON-preset entries -- the six built-ins are
+        always available via FamilyLibrary.with_defaults() (see __init__)
+        and are never written out, so this file only ever grows with what
+        the user actually saved, and reloading it (load_user_library)
+        never needs to reconcile a stale copy of a preset against the
+        real one.
+        """
+        user_only = cdx.FamilyLibrary()
+        for entry_name in self.library.names():
+            if entry_name in PRESET_FAMILY_NAMES:
+                continue
+            entry = self.library.find(entry_name)
+            if entry is not None:
+                user_only.add(entry)
+        with open(path, "w") as f:
+            f.write(user_only.serialize())
+
+    def load_user_library(self, path: str) -> None:
+        """MERGES a previously-saved user library file into self.library
+        (which already has the six presets from with_defaults() -- see
+        __init__), rather than replacing it wholesale the way
+        load_library_file does -- so presets are never at the mercy of
+        what's in this file. Never raises: a missing OR malformed file
+        just means "no (usable) saved user families yet," the same
+        treatment app.settings.load_settings gives a missing or malformed
+        settings.json.
+        """
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            return
+        try:
+            loaded = cdx.FamilyLibrary.deserialize(text)
+        except ValueError:
+            return
+        for entry_name in loaded.names():
+            if entry_name in PRESET_FAMILY_NAMES:
+                continue   # a preset name in a USER file is stale/foreign data; never trust it
+            entry = loaded.find(entry_name)
+            if entry is not None:
+                self.library.add(entry)
 
     # ---- data extraction -----------------------------------------------------------
     def dynamical_facts(self, opts: cdx.FindAttractorsOptions | None = None) -> cdx.DynamicalFacts:

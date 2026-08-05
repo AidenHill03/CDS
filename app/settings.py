@@ -164,6 +164,16 @@ def settings_path() -> Path:
     return config_dir() / "settings.json"
 
 
+def library_path() -> Path:
+    """Where a user's saved family library lives -- see app.session's
+    save_user_library/load_user_library, which (unlike save_library_file/
+    load_library_file, always explicit-path exports) use this as their
+    default location, the "beside settings.json" this module's own
+    config_dir() docstring already anticipated.
+    """
+    return config_dir() / "library.txt"
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """Never raises: a missing file, unreadable file, malformed JSON, or a
     JSON value that is not an object all just fall back to Settings()'s

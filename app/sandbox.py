@@ -3,8 +3,9 @@
 Single window, driven by app.session.Session, with tabs: the image pane
 (render pipeline: threaded, progressive, cursor-anchored zoom, overscan
 buffer, correct orientation), a term editor (app/term_editor_panel.py), a
-read-only dynamical-facts panel (app/facts_panel.py), and a Settings panel
-(app/settings_panel.py) for render/cache configuration.
+read-only dynamical-facts panel (app/facts_panel.py), a family library
+(app/library_panel.py), and a Settings panel (app/settings_panel.py) for
+render/cache configuration.
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -27,9 +28,10 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QTabWidge
 
 import cdx
 from app.facts_panel import FactsPanel
+from app.library_panel import LibraryPanel
 from app.render_cache import RenderCache
 from app.session import Session, render_map
-from app.settings import Settings, load_settings, save_settings
+from app.settings import Settings, library_path, load_settings, save_settings
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
 
@@ -452,10 +454,16 @@ class SandboxWindow(QMainWindow):
         self.resize(800, 860)
 
         # Persisted settings (app/settings.py's config file, next to where a
-        # saved family library would also live -- see app.settings.config_dir)
+        # saved family library also lives -- see app.settings.config_dir)
         # survive between runs; load_settings() degrades gracefully to plain
         # defaults if that file is missing, malformed, or partially invalid.
         self.session = Session(settings=load_settings())
+        # Merges any previously-saved user families into the library
+        # Session() already populated with the six presets (see
+        # load_user_library's own docstring for why this is a merge, not a
+        # replace) -- degrades the same way load_settings() does if the
+        # file is missing (nothing saved yet) or malformed.
+        self.session.load_user_library(library_path())
         # Captured once, independent of session.viewport (a fresh Viewport,
         # not a reference to it) -- Reset View must restore exactly this
         # regardless of anything that has happened since, undo history or
@@ -509,6 +517,9 @@ class SandboxWindow(QMainWindow):
         self.tabs.addTab(self.term_editor_panel, "Terms")
         self.facts_panel = FactsPanel(self.session, self._on_center_view, self)
         self.tabs.addTab(self.facts_panel, "Facts")
+        self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
+                                          self._on_library_changed, self)
+        self.tabs.addTab(self.library_panel, "Library")
         self.settings_panel = SettingsPanel(self.session, self._on_settings_applied, self)
         self.tabs.addTab(self.settings_panel, "Settings")
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -571,6 +582,24 @@ class SandboxWindow(QMainWindow):
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
+
+    # ---- library tab: loading a family replaces session.map wholesale -----------
+    def _on_family_loaded(self) -> None:
+        # LibraryPanel has already replaced self.session.map and reset the
+        # viewport to that family's default (see its _load_selected) by the
+        # time this fires -- resync every OTHER panel that caches a view of
+        # the old map, then render right away, the same "deliberate action,
+        # not a debounce-worthy burst" treatment Reset View and Settings'
+        # Apply already get.
+        self.term_editor_panel.refresh_from_session()
+        self.facts_panel.refresh()
+        self._update_status_bar()
+        self._debounce_timer.stop()
+        self._start_render()
+
+    # ---- library tab: any successful save/rename/delete/notes edit persists -----
+    def _on_library_changed(self) -> None:
+        self.session.save_user_library(library_path())
 
     # ---- viewport change -> debounced render ------------------------------------
     @Slot()
