@@ -25,8 +25,10 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import cdx
+import app.sandbox as sandbox_module
 from app.sandbox import ImageView, RenderTask, SandboxWindow
 from app.session import Session
+from app.settings import Settings
 
 failures = 0
 
@@ -57,6 +59,17 @@ def wait_for(predicate, timeout_ms: int = 5000, step_ms: int = 20) -> bool:
 def main() -> None:
     global failures
     app = QApplication.instance() or QApplication([])
+
+    # Every SandboxWindow() below must NOT touch the real
+    # ~/.complexdynamics/settings.json -- load_settings() reading whatever a
+    # previous real run of the app left there would make these tests
+    # non-deterministic, and save_settings() writing to it would be a real
+    # side effect on the machine running the test suite. Patched for the
+    # whole module: load always returns plain defaults, save is a no-op.
+    # (app/test_settings.py is what actually tests load_settings/
+    # save_settings, against explicit temp paths.)
+    sandbox_module.load_settings = lambda: Settings()
+    sandbox_module.save_settings = lambda settings: None
 
     print("=== app.sandbox tests ===")
 
@@ -343,6 +356,26 @@ def main() -> None:
         check(full_shape == (expected_full, expected_full),
               f"the full render is the requested resolution, overscanned ({expected_full})")
 
+    # ---- render cache: RenderTask actually shares and hits session.cache ----------
+    print("\nrender cache integration:")
+    window.session.viewport = cdx.Viewport(complex(0.05, -0.05), 1.3, 60)
+    window.session.render_settings = cdx.RenderSettings(60, 2.0, 1e-6, 1)
+
+    window._start_render()
+    ok = wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+    check(ok, "first render (cache cold for this viewport/settings) completes")
+    stats_after_first = window.session.cache.stats
+
+    window._start_render()   # identical viewport/settings -- both stages should now hit
+    ok = wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+    check(ok, "second, identical render completes")
+    stats_after_second = window.session.cache.stats
+    check(stats_after_second.hits >= stats_after_first.hits + 2,
+          "a repeat request at the same viewport/settings hits the cache for both the "
+          "preview and full overscanned buffers, not just one")
+    check(stats_after_second.misses == stats_after_first.misses,
+          "the repeat request causes no new misses -- nothing new needed computing")
+
     # ---- superseded requests are discarded ------------------------------------------
     print("\nsuperseded render requests:")
     window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
@@ -360,14 +393,48 @@ def main() -> None:
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "the current (non-superseded) request still completes normally")
 
+    # ---- Settings tab: Apply reaches the session and triggers a real re-render ------
+    print("\nsettings tab:")
+    check(window.tabs.count() == 2 and window.tabs.tabText(0) == "View"
+          and window.tabs.tabText(1) == "Settings",
+          "the window has exactly a View tab and a Settings tab, in that order")
+    check(window.tabs.widget(1) is window.settings_panel,
+          "the Settings tab holds the actual SettingsPanel instance")
+
+    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
+    window._start_render()
+    wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+
+    new_resolution = 150   # above the resolution widget's own 100 floor -- see FIELD_SPECS
+    window.settings_panel._widgets["resolution"].setValue(new_resolution)
+    window.settings_panel._widgets["threads"].setValue(1)
+    window.settings_panel._apply()
+
+    check(window.session.viewport.resolution == new_resolution,
+          "Apply updates the session's viewport resolution")
+    check(window.session.render_settings.threads == 1,
+          "Apply updates the session's render_settings too, not just resolution")
+
+    ok = wait_for(lambda: window.image_view._buffer_viewport is not None
+                 and window.image_view._buffer_viewport.resolution == round(new_resolution * 1.3),
+                 timeout_ms=10000)
+    check(ok, "Apply triggers an immediate re-render at the NEW resolution -- not the debounce, "
+          "and not the old one")
+
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
     initial = window._initial_viewport
-    window.session.viewport = cdx.Viewport(complex(5, 5), 0.001, 60)
+    # Resolution stays at new_resolution (from the Settings Apply above) --
+    # only center/scale are thrown away here, to isolate what Reset View
+    # itself is being tested against.
+    window.session.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
     window._reset_view()
     vp = window.session.viewport
     check(close(vp.center, initial.center) and abs(vp.scale - initial.scale) < 1e-12,
           "Reset View restores exactly the viewport captured at startup")
+    check(vp.resolution == new_resolution,
+          "Reset View does NOT revert resolution -- that is a Settings concern (see the last "
+          "Apply above), not part of 'the view' pan/zoom resets")
 
     # ---- precision floor warning ---------------------------------------------------
     print("\nprecision floor warning:")

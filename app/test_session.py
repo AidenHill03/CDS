@@ -4,9 +4,11 @@ Mirrors the C++ suite's style (PASS/FAIL per check, properties rather than
 golden output) rather than pulling in a Python test framework this project
 does not otherwise use. Run with:
 
-    PYTHONPATH=../cdx/build python test_session.py
+    PYTHONPATH=cdx/build python -m app.test_session
 
-(from this directory).
+(from the repository root -- app.session now imports app.render_cache, so
+this must run package-qualified with the repo root on sys.path, not
+standalone from inside this directory).
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ import math
 import os
 import tempfile
 
+import numpy as np
+
 import cdx
-from session import Session
+from app.session import Session, render_map
 
 failures = 0
 
@@ -68,6 +72,58 @@ def main() -> None:
     s.set_render_mode("greens")
     greens = s.render()
     check(greens.shape == (41, 41), "greens render matches viewport resolution")
+
+    # ---- render cache -----------------------------------------------------------
+    print("\nrender cache:")
+    s.map = cdx.RationalMap.mandelbrot()
+    s.param = 0j
+    s.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
+    s.set_render_mode("julia")
+    s.cache.clear()
+
+    before = s.cache.stats
+    first = s.render()
+    after_first = s.cache.stats
+    check(after_first.misses == before.misses + 1 and after_first.entry_count == 1,
+          "Session.render() populates the cache on a miss")
+
+    second = s.render()
+    after_second = s.cache.stats
+    check(after_second.hits == after_first.hits + 1 and after_second.misses == after_first.misses,
+          "an identical Session.render() call is a cache hit, not a second render")
+    check(np.array_equal(first, second), "a cache hit returns the same pixels as the original render")
+
+    s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 2)   # only threads differs
+    after_threads = s.cache.stats
+    s.render()
+    check(s.cache.stats.hits == after_threads.hits + 1,
+          "threads is not part of the cache key -- changing only thread count still hits")
+
+    s.viewport = cdx.Viewport(complex(0, 0), 1.5, 43)   # a real, output-affecting change
+    misses_before_res_change = s.cache.stats.misses
+    s.render()
+    check(s.cache.stats.misses == misses_before_res_change + 1,
+          "changing resolution is a cache miss (a different key), not a stale hit")
+
+    # A cancelled render must not poison the cache with a partial result --
+    # cancelled BEFORE the render call (not raced against a slow render) so
+    # this is deterministic: render_map still checks `cancel` after calling
+    # into the engine, so a token that was already cancelled on entry never
+    # gets to populate the cache at all.
+    cancel_key_viewport = cdx.Viewport(complex(0.4, 0.4), 1.2, 41)
+    cancel_token = cdx.CancelToken()
+    cancel_token.cancel()
+    entries_before_cancel = s.cache.stats.entry_count
+    render_map(s.map, s.param, cancel_key_viewport, s.render_settings, "julia",
+              cancel_token, s.cache)
+    check(s.cache.stats.entry_count == entries_before_cancel,
+          "a cancelled render's partial result is never stored in the cache")
+
+    misses_before_retry = s.cache.stats.misses
+    render_map(s.map, s.param, cancel_key_viewport, s.render_settings, "julia", None, s.cache)
+    check(s.cache.stats.misses == misses_before_retry + 1,
+          "a subsequent lookup for that same key still misses -- nothing was cached under it")
 
     # ---- term editing ----------------------------------------------------------
     print("\nterm editing:")

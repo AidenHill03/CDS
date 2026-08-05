@@ -1,9 +1,10 @@
 """app/sandbox.py -- P5a: first interactive window.
 
-Single window, single image pane, driven by app.session.Session. Scope is
-deliberately minimal -- proves the render pipeline (threaded, progressive,
-cursor-anchored zoom, correct orientation), not the full sandbox UI. No term
-editor, mode selector, or facts panel yet.
+Single window, driven by app.session.Session, with two tabs: the image pane
+(render pipeline: threaded, progressive, cursor-anchored zoom, overscan
+buffer, correct orientation) and a Settings panel (app/settings_panel.py)
+for render/cache configuration. No term editor, mode selector, or facts
+panel yet.
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -21,10 +22,14 @@ import numpy as np
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QToolBar, QWidget
+from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QTabWidget, QToolBar,
+                               QWidget)
 
 import cdx
+from app.render_cache import RenderCache
 from app.session import Session, render_map
+from app.settings import Settings, load_settings, save_settings
+from app.settings_panel import SettingsPanel
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
 # handful of notches gives a noticeable zoom without a single notch jumping
@@ -133,7 +138,7 @@ class RenderTask:
 
     def __init__(self, request_id: int, rational_map: cdx.RationalMap, param: complex,
                 viewport: cdx.Viewport, settings: cdx.RenderSettings, mode: str,
-                cancel: cdx.CancelToken):
+                cancel: cdx.CancelToken, cache: RenderCache | None = None):
         self.request_id = request_id
         self.rational_map = rational_map
         self.param = param
@@ -141,6 +146,7 @@ class RenderTask:
         self.settings = settings
         self.mode = mode
         self.cancel = cancel
+        self.cache = cache
         self.signals = RenderSignals()
 
     def run(self) -> None:
@@ -164,14 +170,14 @@ class RenderTask:
             preview_viewport = cdx.Viewport(self.viewport.center, self.viewport.scale, preview_res)
             preview_buffer_viewport = _overscanned(preview_viewport, PREVIEW_OVERSCAN_FACTOR)
             preview_array = render_map(self.rational_map, self.param, preview_buffer_viewport,
-                                       self.settings, self.mode, self.cancel)
+                                       self.settings, self.mode, self.cancel, self.cache)
             if self.cancel.is_cancelled:
                 return
             self.signals.partial_ready.emit(self.request_id, preview_array, preview_buffer_viewport)
 
             full_buffer_viewport = _overscanned(self.viewport, FULL_OVERSCAN_FACTOR)
             full_array = render_map(self.rational_map, self.param, full_buffer_viewport,
-                                    self.settings, self.mode, self.cancel)
+                                    self.settings, self.mode, self.cancel, self.cache)
             if self.cancel.is_cancelled:
                 return
             self.signals.full_ready.emit(self.request_id, full_array, full_buffer_viewport)
@@ -443,7 +449,11 @@ class SandboxWindow(QMainWindow):
         self.setWindowTitle("ComplexDynamics sandbox (P5a)")
         self.resize(800, 860)
 
-        self.session = Session()
+        # Persisted settings (app/settings.py's config file, next to where a
+        # saved family library would also live -- see app.settings.config_dir)
+        # survive between runs; load_settings() degrades gracefully to plain
+        # defaults if that file is missing, malformed, or partially invalid.
+        self.session = Session(settings=load_settings())
         # Captured once, independent of session.viewport (a fresh Viewport,
         # not a reference to it) -- Reset View must restore exactly this
         # regardless of anything that has happened since, undo history or
@@ -484,7 +494,18 @@ class SandboxWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.image_view = ImageView(self.session, self)
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
-        self.setCentralWidget(self.image_view)
+
+        # A QTabWidget as the central widget, not the bare ImageView --
+        # this is what makes room for the Settings tab (and whatever tab
+        # comes after it) without redesigning the window. The toolbar stays
+        # a QMainWindow-level toolbar, not per-tab: Reset View only means
+        # anything on the View tab, but QMainWindow toolbars are independent
+        # of which central-widget tab is showing either way.
+        self.tabs = QTabWidget(self)
+        self.tabs.addTab(self.image_view, "View")
+        self.settings_panel = SettingsPanel(self.session, self._on_settings_applied, self)
+        self.tabs.addTab(self.settings_panel, "Settings")
+        self.setCentralWidget(self.tabs)
 
         toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
@@ -494,6 +515,22 @@ class SandboxWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         self.statusBar().showMessage("")
+
+    # ---- settings: apply on demand, from the Settings tab -----------------------
+    def _on_settings_applied(self, new_settings: Settings) -> None:
+        # Already validated by SettingsPanel before this is ever called
+        # (see its _apply) -- this just carries the effects: update the
+        # live session (viewport.resolution/render_settings/cache budget --
+        # see Session.apply_settings), persist for next launch, and render
+        # right away rather than waiting for the ordinary debounce. An
+        # explicit Apply click is exactly the kind of deliberate action the
+        # debounce (meant to coalesce rapid, ambient events like scrolling)
+        # isn't for.
+        self.session.apply_settings(new_settings)
+        save_settings(new_settings)
+        self._update_status_bar()
+        self._debounce_timer.stop()
+        self._start_render()
 
     # ---- viewport change -> debounced render ------------------------------------
     @Slot()
@@ -511,8 +548,14 @@ class SandboxWindow(QMainWindow):
             self._debounce_timer.start()   # restarts if already running
 
     def _reset_view(self) -> None:
+        # Center/scale only -- NOT resolution. Resolution is a Settings
+        # field now (see app/settings.py), independent of where the user
+        # is looking; Reset View undoes pan/zoom, not an Apply from the
+        # Settings tab. Using the session's CURRENT resolution (whatever
+        # Settings last applied), not _initial_viewport's, is what keeps
+        # those two concerns from fighting each other.
         iv = self._initial_viewport
-        self.session.viewport = cdx.Viewport(iv.center, iv.scale, iv.resolution)
+        self.session.viewport = cdx.Viewport(iv.center, iv.scale, self.session.viewport.resolution)
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
@@ -541,7 +584,7 @@ class SandboxWindow(QMainWindow):
 
         task = RenderTask(request_id, self.session.map, self.session.param,
                           viewport_snapshot, settings_snapshot, self.session.render_mode,
-                          cdx.CancelToken())
+                          cdx.CancelToken(), self.session.cache)
         task.signals.partial_ready.connect(self._on_partial_ready)
         task.signals.full_ready.connect(self._on_full_ready)
         task.signals.failed.connect(self._on_render_failed)

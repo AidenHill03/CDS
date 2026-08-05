@@ -7,43 +7,24 @@ Renderer's own configuration -- see ARCHITECTURE.md's layering rules. This
 module holds no mathematics of its own; every operation here is a thin
 wrapper delegating straight to a cdx call.
 
-Requires the cdx extension module to be importable, e.g.:
+Requires the cdx extension module to be importable, and (since the
+render-cache import below) must be imported as `app.session` -- the
+package-qualified form, with the REPOSITORY ROOT on sys.path, not `session`
+run standalone from inside this directory. See app/test_session.py or
+app/sandbox.py for the actual invocation:
 
-    PYTHONPATH=../cdx/build python session.py
+    PYTHONPATH=cdx/build python -m app.test_session
 
-(run from this directory), or add cdx/build to PYTHONPATH some other way.
+(run from the repository root).
 """
 
 from __future__ import annotations
 
 import cdx
+from app.render_cache import RenderCache, make_key
+from app.settings import Settings
 
 RENDER_MODES = ("julia", "parameter", "basin", "greens")
-
-# Default full-render resolution (display pixels per side, before overscan --
-# see app.sandbox's FULL_OVERSCAN_FACTOR/PREVIEW_OVERSCAN_FACTOR for how the
-# actual rendered buffer ends up larger than this). Chosen by measuring: the
-# largest resolution whose full render -- already at the 1.3x overscan
-# factor every full render now uses, in "parameter" mode (the startup
-# default -- see render_mode below) -- stayed under ~0.4s (median of 9 runs)
-# for z^2+a on the development machine.
-#
-# The number that first came out of this measurement (~1100) used the WRONG
-# map: cdx.Map(Family.Quadratic, a), the hardcoded fast path. Session always
-# renders through cdx.Map.custom(self.map, ...) (self.map is a RationalMap,
-# even for the "mandelbrot" preset -- see load_from_library/the map field
-# below), which goes through RationalMap's generic term evaluator instead --
-# measured at roughly 5-10x the cost per pixel. Re-measuring against THAT
-# path (what actually renders) put the real budget-respecting default
-# around 120, not 1100. See the P5a-final commit message for the numbers
-# and for a note on where that per-pixel cost actually goes -- there is a
-# concrete, currently-unexploited optimization available there (an
-# unnecessary full root-find of the critical point on EVERY pixel of a
-# parameter-plane render, even for shapes like z^2+a where it's the
-# parameter-independent constant 0), but fixing RationalMap's evaluator is
-# out of scope for this milestone, which only picks a default that respects
-# what the engine can do TODAY.
-DEFAULT_RESOLUTION = 120
 
 # Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
 # Julia set, not the origin (which gives the plain filled unit disc --
@@ -58,10 +39,17 @@ DEFAULT_JULIA_PARAM = complex(-0.7269, 0.1889)
 DEFAULT_PARAMETER_VIEW_CENTER = complex(-0.5, 0.0)
 DEFAULT_PARAMETER_VIEW_SCALE = 1.5
 
+# NOTE on Settings.resolution: see app/settings.py's DEFAULT_RESOLUTION
+# comment for how that number (120, not the ~1100 a first, flawed
+# measurement suggested) was actually measured, and the P5a-final commit
+# message for the full story -- render_settings/viewport.resolution below
+# both come from whatever Settings this Session was constructed with.
+
 
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
-               cancel: cdx.CancelToken | None = None):
+               cancel: cdx.CancelToken | None = None,
+               cache: RenderCache | None = None):
     """Renders `rational_map` at `param` over `viewport`/`settings`, in the
     given mode. A free function rather than a Session method, and taking
     every value explicitly rather than reading them off a Session, so a
@@ -80,28 +68,50 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     A slow find_attractors call (a root-finding-heavy custom map) is not
     interruptible by this yet.
 
+    `cache`, if given, is consulted BEFORE rendering anything (a hit skips
+    computation entirely, including find_attractors for basin mode) and
+    populated AFTER, but only with a result that completed -- a cancelled
+    render's partial array is never stored, since `cancel` itself (not some
+    separate flag the caller has to remember to pass) is what render_map
+    checks to decide that. RenderCache.make_key deliberately excludes
+    `settings.threads`: it changes how fast this runs, never what it
+    produces, so two requests differing only in thread count share a hit.
+
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
     convention; plot with origin='lower').
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
+
+    key = None
+    if cache is not None:
+        key = make_key(rational_map.serialize(), param, mode, viewport.center, viewport.scale,
+                       viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
     renderer = cdx.Renderer(map=cdx.Map.custom(rational_map, param), viewport=viewport,
                             settings=settings)
     if mode == "julia":
-        return renderer.render_julia(cancel)
-    if mode == "parameter":
-        return renderer.render_parameter(cancel)
-    if mode == "basin":
-        # Recomputed on every call rather than cached: find_attractors is a
-        # real cost for a root-finding-heavy custom map, but there is no
-        # cache-invalidation machinery here to get wrong, and nothing so far
-        # has needed one. Revisit if profiling says so.
+        array = renderer.render_julia(cancel)
+    elif mode == "parameter":
+        array = renderer.render_parameter(cancel)
+    elif mode == "basin":
+        # find_attractors is a real cost for a root-finding-heavy custom
+        # map, but only on a cache MISS now -- a repeat request at the same
+        # key (map, param, viewport, settings) skips it entirely, same as
+        # skipping render_basin itself.
         cycles = cdx.find_attractors(rational_map, param)
-        return renderer.render_basin(cycles, cancel)
-    if mode == "greens":
+        array = renderer.render_basin(cycles, cancel)
+    elif mode == "greens":
         array, _normalized = renderer.render_greens(cancel=cancel)
-        return array
-    raise AssertionError(f"unreachable: mode={mode!r}")
+    else:
+        raise AssertionError(f"unreachable: mode={mode!r}")
+
+    if cache is not None and (cancel is None or not cancel.is_cancelled):
+        cache.put(key, array)
+    return array
 
 
 class Session:
@@ -109,18 +119,54 @@ class Session:
     term editing, a family library, and dynamical-facts extraction.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self.map: cdx.RationalMap = cdx.RationalMap.mandelbrot()
         self.param: complex = DEFAULT_JULIA_PARAM
+        self._settings = settings if settings is not None else Settings()
         # Starts on the PARAMETER PLANE (the Mandelbrot set): unlike the
         # filled disc z^2+0 gives in julia mode, it teaches the tool by
         # itself -- clicking around it is the natural first interaction.
         self.viewport: cdx.Viewport = cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER,
                                                     DEFAULT_PARAMETER_VIEW_SCALE,
-                                                    DEFAULT_RESOLUTION)
-        self.render_settings: cdx.RenderSettings = cdx.RenderSettings()
+                                                    self._settings.resolution)
+        self.render_settings: cdx.RenderSettings = cdx.RenderSettings(
+            self._settings.max_iter, self._settings.escape_radius,
+            self._settings.tol, self._settings.threads)
         self.render_mode: str = "parameter"
         self.library: cdx.FamilyLibrary = cdx.FamilyLibrary.with_defaults()
+        # One cache for this session's lifetime, shared by every render --
+        # foreground (render() below) and background (app/sandbox.py's
+        # RenderTask, which is handed this same instance). A resolution or
+        # setting change makes old entries unreachable, not wrong; they age
+        # out under the byte budget rather than needing an explicit flush
+        # (see app.render_cache's own docstring).
+        self.cache: RenderCache = RenderCache(self._settings.cache_budget_bytes)
+
+    @property
+    def settings(self) -> Settings:
+        """The Settings this session is currently rendering with -- kept in
+        sync by apply_settings() below, the only way this changes after
+        construction (viewport.resolution/render_settings/cache.budget
+        aren't mutated directly by anything else in this class).
+        """
+        return self._settings
+
+    def apply_settings(self, settings: Settings) -> None:
+        """Applies a (validated -- see app.settings.validate_field, used by
+        the Settings panel before ever calling this) Settings to this
+        session: render_settings, the viewport's resolution (keeping its
+        current center/scale -- Settings does not own WHERE the user is
+        looking, only how it's rendered), and the cache's byte budget.
+        Does NOT clear the cache; see RenderCache's own docstring for why a
+        resolution/setting change should age old entries out under the
+        budget rather than flush them.
+        """
+        self._settings = settings
+        vp = self.viewport
+        self.viewport = cdx.Viewport(vp.center, vp.scale, settings.resolution)
+        self.render_settings = cdx.RenderSettings(settings.max_iter, settings.escape_radius,
+                                                  settings.tol, settings.threads)
+        self.cache.set_budget(settings.cache_budget_bytes)
 
     # ---- render mode ---------------------------------------------------------
     def set_render_mode(self, mode: str) -> None:
@@ -134,7 +180,7 @@ class Session:
         function applied to the session's own current state.
         """
         return render_map(self.map, self.param, self.viewport, self.render_settings,
-                          self.render_mode)
+                          self.render_mode, cache=self.cache)
 
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/
