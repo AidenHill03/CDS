@@ -214,6 +214,78 @@ int main() {
         check(empty_all_zero, "with no cycles, every pixel's iteration count is 0 (nothing ran)");
     }
 
+    // ---- render_parameter_greens: the family escape-rate function G_M(c) ---
+    std::printf("\nrender_parameter_greens (family escape-rate function):\n");
+    {
+        RenderSettings s{50, 2.0, 1e-6, 0};
+
+        // c=0 (deep in the Mandelbrot set -- the map is z^2, orbit of the
+        // critical point 0 stays at 0 forever) must give EXACTLY zero: the
+        // orbit never leaves |z|<=1, so log(max(|z|,1)) accumulates 0.0
+        // every single iteration.
+        {
+            Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{0.0, 0.0}, 0.01, 1}, s);
+            bool ok = false;
+            Image g = r.render_parameter_greens(&ok);
+            check(ok, "a small, well-behaved max_iter normalizes without overflow");
+            check(g.at(0, 0) == 0.0, "c=0 (deep in the set) has G_M(c) exactly 0");
+        }
+
+        // A parameter far outside the Mandelbrot set (escapes almost
+        // immediately) must give a STRICTLY POSITIVE value -- zero-vs-
+        // positive is the qualitative membership signature this function
+        // exists to compute, checked directly rather than assumed.
+        {
+            Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{10.0, 0.0}, 0.01, 1}, s);
+            Image g = r.render_parameter_greens();
+            check(g.at(0, 0) > 0.0, "c=10 (far outside the set) has G_M(c) strictly positive");
+        }
+
+        // The bound parameter map_.param() must be IGNORED here, exactly as
+        // render_parameter itself ignores it (the pixel IS the parameter) --
+        // two Renderers differing only in map_.param() must agree exactly.
+        {
+            Viewport v{{-0.5, 0.0}, 1.5, 31};
+            Renderer r_a(Map(Family::Quadratic, {0.0, 0.0}), v, s);
+            Renderer r_b(Map(Family::Quadratic, {3.0, 4.0}), v, s);
+            const Image ga = r_a.render_parameter_greens();
+            const Image gb = r_b.render_parameter_greens();
+            bool identical = true;
+            for (size_t i = 0; i < ga.data.size(); ++i)
+                if (ga.data[i] != gb.data[i]) { identical = false; break; }
+            check(identical,
+                  "the bound parameter is ignored -- two renderers differing only in "
+                  "map_.param() produce byte-identical output");
+        }
+
+        // Comparability: the SAME parameter c, rendered through two
+        // DIFFERENT viewport windows (same map/settings), must give the
+        // SAME value -- this is a per-pixel-parameter function, not
+        // something that depends on the rendered window's geometry.
+        {
+            Renderer r1(Map(Family::Quadratic, {0, 0}), Viewport{{5.0, 0.0}, 0.5, 11}, s);
+            Renderer r2(Map(Family::Quadratic, {0, 0}), Viewport{{5.0, 0.0}, 2.0, 11}, s);
+            const Image g1 = r1.render_parameter_greens();
+            const Image g2 = r2.render_parameter_greens();
+            check(g1.at(5, 5) == g2.at(5, 5),
+                  "the same parameter value gives the same G_M(c) across two different "
+                  "viewport windows");
+        }
+
+        // Overflow guard: degree^max_iter (2^2000) is far outside double
+        // range at a large max_iter -- must report unnormalized rather
+        // than silently producing Inf/NaN. Same contract as render_greens.
+        {
+            RenderSettings s_big{2000, 2.0, 1e-6, 0};
+            Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{5.0, 0.0}, 0.01, 1}, s_big);
+            bool ok = true;
+            Image g = r.render_parameter_greens(&ok);
+            check(!ok, "degree^max_iter overflowing sets normalized=false, same as render_greens");
+            check(std::isfinite(g.at(0, 0)),
+                  "the unnormalized fallback value is finite, never Inf or NaN");
+        }
+    }
+
     // ---- recognize_family: structural fast-path detection -------------------
     std::printf("\nrecognize_family:\n");
     {

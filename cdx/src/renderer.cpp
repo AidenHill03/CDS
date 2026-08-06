@@ -481,6 +481,76 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 }
 
 // -----------------------------------------------------------------------------
+// Parameter-plane Green's function (family escape-rate function, G_M(c) for
+// the quadratic family) -- see the header comment for why this is a
+// DIFFERENT function on a DIFFERENT space from render_greens, not a
+// reparameterization of it. Structurally: render_parameter's per-pixel
+// critical-point/step dispatch, with render_greens' accumulate-and-
+// normalize body substituted for render_parameter's escape-time test.
+// -----------------------------------------------------------------------------
+Image Renderer::render_parameter_greens(bool* normalized, const std::atomic<bool>* cancel) const {
+    const int    res  = view_.resolution;
+    const double escR = settings_.escape_radius;
+    Image img(res, res);
+
+    // See render_parameter for the three-path critical-point/step
+    // dispatch this mirrors exactly.
+    const RationalMap* custom = map_.custom_map();
+    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
+
+    const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
+    const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+
+    // Unlike the critical point above, degree is ALWAYS parameter-
+    // independent (RationalMap::degree(Cplx a) is purely structural and
+    // never reads `a` -- see its own implementation), so the
+    // normalization exponent is computed ONCE for the whole render, the
+    // same as render_greens does for its own fixed-`a` case, never
+    // per-pixel.
+    int degree;
+    if (recognized) degree = Map(*recognized, Cplx(0.0, 0.0)).degree();
+    else if (custom) degree = custom->degree(Cplx(0.0, 0.0));
+    else degree = map_.degree();
+
+    double norm = std::pow(static_cast<double>(degree), static_cast<double>(settings_.max_iter));
+    const bool ok = !(is_bad(norm) || norm > kHuge || norm <= 0.0);
+    if (!ok) norm = 1.0;
+    if (normalized) *normalized = ok;
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+            Cplx c0;
+            if (recognized) c0 = Map::critical_point(*recognized, p);
+            else if (cp_fixed) c0 = fixed_c0;
+            else c0 = map_.critical_point_at(p);
+            double zr = c0.real(), zi = c0.imag();
+
+            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+
+            double acc = 0.0;
+            for (int n = 0; n < settings_.max_iter; ++n) {
+                if (recognized) {
+                    Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
+                } else if (custom) {
+                    compiled.step(zr, zi);
+                } else {
+                    map_.step_with_param(p, zr, zi);
+                }
+                const double mag = std::sqrt(zr * zr + zi * zi);
+                if (is_bad(mag)) break;
+                acc += std::log(mag > 1.0 ? mag : 1.0);
+                if (mag > escR) break;
+            }
+            acc /= norm;
+            if (is_bad(acc) || acc > kHuge || acc < -kHuge) acc = 0.0;
+            img.at(col, row) = acc;
+        }
+    }, cancel);
+    return img;
+}
+
+// -----------------------------------------------------------------------------
 // Basins
 // -----------------------------------------------------------------------------
 Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations,

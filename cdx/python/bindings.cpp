@@ -494,7 +494,29 @@ PYBIND11_MODULE(cdx, m) {
              py::arg("cancel") = nullptr,
              "Green's function. Returns (array, normalized); normalized is "
              "False when degree^max_iter overflowed and the values are "
-             "comparable only within this image.");
+             "comparable only within this image.")
+
+        .def("render_parameter_greens",
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
+                 bool normalized = false;
+                 py::array_t<double> arr;
+                 {
+                     py::gil_scoped_release release;
+                     Image img = r.render_parameter_greens(&normalized, cp);
+                     py::gil_scoped_acquire acquire;
+                     arr = image_to_numpy(std::move(img));
+                 }
+                 return py::make_tuple(arr, normalized);
+             },
+             py::arg("cancel") = nullptr,
+             "The family escape-rate function on the PARAMETER plane (G_M(c) "
+             "for the quadratic family) -- a DIFFERENT function on a "
+             "DIFFERENT space from render_greens: the pixel is a parameter, "
+             "the orbit starts at THAT parameter's critical point (like "
+             "render_parameter), and the accumulated quantity is that "
+             "critical orbit's escape rate. Returns (array, normalized), "
+             "same overflow-guard semantics as render_greens.");
 
     // ---- analysis layer ------------------------------------------------------
     py::class_<FindAttractorsOptions>(m, "FindAttractorsOptions")

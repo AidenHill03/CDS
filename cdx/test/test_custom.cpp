@@ -137,6 +137,26 @@ int main() {
               "(critical_point_at and step_with_param both correct)");
     }
 
+    // ---- render_parameter_greens: custom mandelbrot matches the built-in fast path --
+    std::printf("\nrender_parameter_greens: custom mandelbrot matches Family::Quadratic:\n");
+    {
+        Viewport v{{-0.5, 0.0}, 1.5, 81};
+        RenderSettings s{100, 2.0, 1e-6, 0};
+
+        Renderer built_in(Map(Family::Quadratic, {0, 0}), v, s);
+        Renderer custom(Map::custom(RationalMap::mandelbrot(), {0, 0}), v, s);
+
+        bool norm_a = false, norm_b = false;
+        const Image a = built_in.render_parameter_greens(&norm_a);
+        const Image b = custom.render_parameter_greens(&norm_b);
+        check(norm_a == norm_b, "both agree on whether the normalization overflowed");
+        const double frac = mismatch_fraction(a, b, 1e-6);
+        std::printf("  mismatch fraction: %.6f\n", frac);
+        check(frac < 0.001,
+              "custom-path family escape-rate function matches the built-in fast path -- the "
+              "recognized-shape critical-point/degree dispatch agrees with the general path");
+    }
+
     // ---- a genuinely custom map with no built-in equivalent -------------------
     std::printf("\na map with no built-in equivalent still renders sensibly:\n");
     {
