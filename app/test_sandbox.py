@@ -566,6 +566,31 @@ def main() -> None:
     check(window.mode_combo.currentText() == window.session.render_mode,
           "the combo box starts on the session's actual startup render mode")
 
+    # ---- window title / About dialog -----------------------------------------------
+    print("\nwindow title / About dialog:")
+    check(window.windowTitle() == "ComplexDynamics",
+          "the window title is the product name, not an internal milestone tag")
+    menu_titles = [a.text() for a in window.menuBar().actions()]
+    check("Help" in menu_titles, "a Help menu exists (macOS moves it into the app menu)")
+    # window.help_menu directly, matching how SandboxWindow itself accesses
+    # it (see _build_ui's own comment on why it's stored on self at all) --
+    # NOT re-fetched via menuBar().actions()[i].menu(), which hits a real
+    # PySide6/shiboken wrapper-identity quirk after the event loop has run
+    # a few iterations (confirmed directly: menuBar().actions()[i] hands
+    # back a wrapper whose .menu() call raises "already deleted" even
+    # though the SAME menu is perfectly valid via a direct reference or
+    # findChildren) -- a quirk of that particular lookup path, not evidence
+    # the menu itself is actually gone.
+    about_actions = [a.text() for a in window.help_menu.actions()]
+    check("About ComplexDynamics" in about_actions,
+          "the Help menu has an 'About ComplexDynamics' action")
+    check(window.about_action.text() == "About ComplexDynamics",
+          "window.about_action (what _build_ui actually wires the click handler to) matches too")
+    from app.about_dialog import AboutDialog
+    about = AboutDialog(window)
+    check(about.windowTitle() == "About ComplexDynamics", "the dialog's own title matches too")
+    about.close()
+
     # ---- render is off the GUI thread: a slow render must not block processEvents --
     # Fast built-in family (not a term-based custom map: slower per pixel,
     # and unnecessarily so for what this is testing), single render thread,

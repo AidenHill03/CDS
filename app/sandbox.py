@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QMain
                                QPushButton, QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
+from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
@@ -39,6 +40,7 @@ from app.session import PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map
 from app.settings import Settings, library_path, load_settings, save_settings
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
+from app.version import PRODUCT_NAME
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
 # handful of notches gives a noticeable zoom without a single notch jumping
@@ -804,7 +806,7 @@ class ImageView(QWidget):
 class SandboxWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ComplexDynamics sandbox (P5a)")
+        self.setWindowTitle(PRODUCT_NAME)   # the product name, not an internal milestone tag
         self.resize(800, 860)
         self._status_base_message = ""
         self._status_cursor_text = ""
@@ -920,7 +922,27 @@ class SandboxWindow(QMainWindow):
 
         self.addToolBar(toolbar)
 
+        # On macOS, Qt moves a menu titled "Help" (and any action inside
+        # named "About <AppName>") into the system application menu
+        # automatically -- this is the standard, idiomatic way to get a
+        # real "About ComplexDynamics" entry there, not a bespoke button.
+        #
+        # Stored on self DELIBERATELY, not left as a local -- addMenu()/
+        # addAction() return a wrapper PySide6 can garbage-collect (deleting
+        # the underlying C++ QMenu/QAction with it) once nothing in Python
+        # still references it, even though the menu bar's own C++ parent-
+        # child tree still lists it visually. Confirmed as a REAL bug, not
+        # a hypothetical one: a local-only `help_menu` here made a later
+        # `window.menuBar().actions()[...].menu()` raise "Internal C++
+        # object (QMenu) already deleted" the moment this method returned.
+        self.help_menu = self.menuBar().addMenu("Help")
+        self.about_action = self.help_menu.addAction(f"About {PRODUCT_NAME}")
+        self.about_action.triggered.connect(self._show_about_dialog)
+
         self.statusBar().showMessage("")
+
+    def _show_about_dialog(self) -> None:
+        AboutDialog(self).exec()
 
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, mode: str) -> None:
