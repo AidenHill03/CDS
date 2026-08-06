@@ -22,6 +22,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+# Pure-numpy, no Qt/cdx dependency (see app/colour.py's own docstring) --
+# importing it here doesn't compromise this module's own "must stay
+# importable without the cdx extension" property.
+from app.colour import PALETTE_NAMES, SCALING_MODES
+
 # ---- defaults ------------------------------------------------------------------
 # Moved here from app/session.py. Measured three times, each superseding the
 # last as the underlying engine cost changed:
@@ -60,6 +65,19 @@ DEFAULT_THREADS = 0
 # desktop, without needing to think about it.
 DEFAULT_CACHE_BUDGET_BYTES = 256 * 1024 * 1024
 
+# "classic" (the familiar blue/white/orange Mandelbrot look), not viridis --
+# P5c's own spec frames viridis/magma as being for "when the image is data,
+# not decoration," which is a choice a user makes deliberately, not the
+# right first impression on a sandbox meant to be explored. log1p is the
+# explicitly-specified default scaling (see app/colour.py's own docstring
+# for why: a linear map puts 90% of a typical escaped image in the first 5%
+# of the palette). Period 0 means no cyclic banding -- the plain smooth
+# escape-time look; banding is an adjustable enhancement, not a forced
+# default.
+DEFAULT_COLOUR_PALETTE = "classic"
+DEFAULT_COLOUR_SCALING = "log1p"
+DEFAULT_COLOUR_PERIOD = 0.0
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -67,13 +85,20 @@ class FieldSpec:
     app/sandbox.py's SettingsPanel) UI generation. `minimum`/`maximum` are
     inclusive unless `exclusive_minimum` is set (needed for fields like
     escape_radius/tol where exactly 0 is meaningless, not just small).
+
+    `choices`, when set, makes this an ENUM field instead of a numeric
+    range: `kind` must be `str`, `minimum`/`maximum`/`exclusive_minimum`
+    are ignored, and validate_field checks membership in `choices` rather
+    than a numeric bound. SettingsPanel builds a QComboBox for these
+    instead of a QSpinBox/QDoubleSpinBox (see _widget_for).
     """
-    kind: type            # int or float
+    kind: type            # int, float, or str (str only valid with choices set)
     minimum: float
     maximum: float
-    default: float
+    default: float | str
     label: str
     exclusive_minimum: bool = False
+    choices: tuple[str, ...] | None = None
 
 
 # 200-4000, as originally specified. An earlier engine-cost measurement put
@@ -99,6 +124,20 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "threads": FieldSpec(int, 0, 256, DEFAULT_THREADS, "Thread count (0 = hardware concurrency)"),
     "cache_budget_bytes": FieldSpec(int, 0, 16 * 1024 ** 3, DEFAULT_CACHE_BUDGET_BYTES,
                                     "Cache byte budget"),
+    # minimum/maximum/exclusive_minimum are unused for choices-based
+    # fields (see FieldSpec's own docstring) -- 0/0 rather than omitted,
+    # since FieldSpec has no default for either.
+    "colour_palette": FieldSpec(str, 0, 0, DEFAULT_COLOUR_PALETTE, "Colour palette",
+                                choices=PALETTE_NAMES),
+    "colour_scaling": FieldSpec(str, 0, 0, DEFAULT_COLOUR_SCALING, "Colour scaling",
+                                choices=SCALING_MODES),
+    # 0 (no cyclic banding) is a legitimate, meaningful value here, not
+    # excluded the way escape_radius/tol exclude 0 -- so NOT
+    # exclusive_minimum. Ceiling is arbitrary headroom past any max_iter a
+    # user would realistically set (see FIELD_SPECS["max_iter"]'s own
+    # ceiling of 100_000); a period longer than max_iter just never wraps.
+    "colour_period": FieldSpec(float, 0.0, 100_000.0, DEFAULT_COLOUR_PERIOD,
+                               "Colour cycle period (0 = off)"),
 }
 
 
@@ -110,6 +149,9 @@ class Settings:
     tol: float = DEFAULT_TOL
     threads: int = DEFAULT_THREADS
     cache_budget_bytes: int = DEFAULT_CACHE_BUDGET_BYTES
+    colour_palette: str = DEFAULT_COLOUR_PALETTE
+    colour_scaling: str = DEFAULT_COLOUR_SCALING
+    colour_period: float = DEFAULT_COLOUR_PERIOD
 
     def sanitized(self) -> Settings:
         """A copy with every field individually validated, out-of-range or
@@ -137,6 +179,10 @@ def validate_field(name: str, raw_value) -> tuple[bool, object, str]:
         value = spec.kind(raw_value)
     except (TypeError, ValueError):
         return False, None, f"{spec.label} must be a {spec.kind.__name__}"
+    if spec.choices is not None:
+        if value not in spec.choices:
+            return False, None, f"{spec.label} must be one of {spec.choices}"
+        return True, value, ""
     if spec.kind is float and (value != value or value in (float("inf"), float("-inf"))):
         return False, None, f"{spec.label} must be a finite number"
     if spec.exclusive_minimum and value <= spec.minimum:

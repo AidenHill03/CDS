@@ -83,10 +83,33 @@ def main() -> None:
     ok, _value, _err = validate_field("escape_radius", float("nan"))
     check(not ok, "NaN fails")
 
+    # ---- validate_field: choices-based (enum) fields -------------------------------
+    print("\nvalidate_field (choices):")
+    ok, value, _err = validate_field("colour_palette", "viridis")
+    check(ok and value == "viridis", "a listed palette name passes and is returned unchanged")
+
+    ok, value, err = validate_field("colour_palette", "not-a-real-palette")
+    check(not ok and value is None and "must be one of" in err,
+          "an unlisted palette name fails with a message naming the valid choices")
+
+    ok, value, _err = validate_field("colour_scaling", "log1p")
+    check(ok and value == "log1p", "a listed scaling mode passes")
+
+    ok, _value, _err = validate_field("colour_scaling", "histogram")
+    check(ok, "the other listed scaling mode also passes")
+
+    ok, _value, _err = validate_field("colour_period", 0.0)
+    check(ok, "colour_period=0.0 (no cyclic banding) is valid -- NOT an exclusive minimum, "
+              "unlike escape_radius/tol")
+
+    ok, _value, _err = validate_field("colour_period", -1.0)
+    check(not ok, "a negative colour_period is rejected")
+
     # ---- Settings.sanitized(): tolerant, per-field fallback to defaults -----------
     print("\nSettings.sanitized():")
     broken = Settings(resolution=99999, max_iter=-5, escape_radius=2.0, tol=1e-6,
-                      threads=0, cache_budget_bytes=100)
+                      threads=0, cache_budget_bytes=100, colour_palette="bogus",
+                      colour_period=-5.0)
     fixed = broken.sanitized()
     check(fixed.resolution == FIELD_SPECS["resolution"].default,
           "an out-of-range resolution falls back to the field's own default")
@@ -96,6 +119,10 @@ def main() -> None:
           "fields that WERE already valid are left exactly as they were, not also reset")
     check(fixed.cache_budget_bytes == 100,
           "a valid (if small) cache_budget_bytes is kept, not silently bumped up")
+    check(fixed.colour_palette == FIELD_SPECS["colour_palette"].default,
+          "an unlisted colour_palette falls back to its own default, same as a numeric field")
+    check(fixed.colour_period == FIELD_SPECS["colour_period"].default,
+          "a negative colour_period falls back to its own default")
 
     # ---- persistence: round-trip, missing file, malformed file --------------------
     print("\npersistence:")
@@ -107,7 +134,8 @@ def main() -> None:
               "loading a file that does not exist yet returns plain defaults")
 
         custom = Settings(resolution=800, max_iter=500, escape_radius=4.0, tol=1e-4,
-                          threads=4, cache_budget_bytes=64 * 1024 * 1024)
+                          threads=4, cache_budget_bytes=64 * 1024 * 1024,
+                          colour_palette="magma", colour_scaling="histogram", colour_period=20.0)
         save_settings(custom, path)
         roundtripped = load_settings(path)
         check(roundtripped == custom, "save_settings/load_settings round-trips every field exactly")

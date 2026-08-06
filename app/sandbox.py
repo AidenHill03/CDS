@@ -23,14 +23,15 @@ import numpy as np
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QTabWidget, QToolBar,
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QLabel, QMainWindow, QPushButton,
+                               QTabWidget, QToolBar, QWidget)
 
 import cdx
+from app.colour import colour_basin, colour_escape_time
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
 from app.render_cache import RenderCache
-from app.session import Session, render_map
+from app.session import RENDER_MODES, Session, render_map
 from app.settings import Settings, library_path, load_settings, save_settings
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
@@ -89,8 +90,8 @@ def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
     return cdx.Viewport(viewport.center, viewport.scale * factor, resolution)
 
 
-def array_to_qimage(array: np.ndarray) -> QImage:
-    """Converts a cdx render array into a displayable QImage.
+def array_to_qimage(array: np.ndarray, mode: str, settings: Settings, max_iter: int) -> QImage:
+    """Converts a cdx render array into a displayable, COLOURED QImage.
 
     cdx render arrays have row 0 at the BOTTOM (matching Viewport::coord;
     see CLAUDE.md) but QImage has row 0 at the TOP -- flip vertically first,
@@ -101,10 +102,47 @@ def array_to_qimage(array: np.ndarray) -> QImage:
     itself, once, here, is what rules that class of bug out entirely rather
     than relying on every caller remembering an origin='lower'-equivalent.
 
-    Grayscale, min-max normalized. Deliberately simple -- proving the
-    pipeline does not need a colormap.
+    Dispatches to app.colour by render mode: "julia"/"parameter" are
+    escape-time (colour_escape_time, using `settings`' palette/scaling/
+    period); "basin" is categorical basin colouring, FLAT for now (no
+    shading -- render_basin has no per-pixel convergence-speed output yet,
+    see P5c's basin-shading milestone). "greens" still uses the old plain
+    grayscale min-max stretch below, pending P5c's dedicated
+    equipotential-band display for Green's-function data -- switching it
+    to a real colour treatment happens there, not here, to avoid touching
+    this dispatch twice with half-finished Green's-specific settings.
+
+    Colouring is a pure DISPLAY-time transform, deliberately not baked into
+    what RenderCache stores (raw float arrays) -- changing the palette must
+    never be a cache key or trigger a re-render, only a re-paint.
     """
     flipped = np.flipud(array)
+    if mode in ("julia", "parameter"):
+        rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,
+                                 scaling=settings.colour_scaling,
+                                 period=settings.colour_period or None)
+        return _rgb_to_qimage(rgb)
+    if mode == "basin":
+        rgb = colour_basin(flipped, iterations=None, max_iter=max_iter)
+        return _rgb_to_qimage(rgb)
+    return _grayscale_qimage(flipped)
+
+
+def _rgb_to_qimage(rgb: np.ndarray) -> QImage:
+    rgb = np.ascontiguousarray(rgb)
+    height, width, _channels = rgb.shape
+    image = QImage(rgb.data, width, height, width * 3, QImage.Format.Format_RGB888)
+    # .copy(): `rgb` is a local array pybind11/numpy does not keep alive on
+    # QImage's behalf. Without this, the buffer QImage points at is freed as
+    # soon as this function returns, and the image is garbage or a crash.
+    return image.copy()
+
+
+def _grayscale_qimage(flipped: np.ndarray) -> QImage:
+    """The original pre-P5c path: grayscale, min-max normalized. Still used
+    for "greens" mode until P5c's dedicated equipotential-band display
+    lands (see array_to_qimage's own docstring).
+    """
     lo = float(flipped.min())
     hi = float(flipped.max())
     if hi > lo:
@@ -114,9 +152,6 @@ def array_to_qimage(array: np.ndarray) -> QImage:
     gray = np.ascontiguousarray(normalized.astype(np.uint8))
     height, width = gray.shape
     image = QImage(gray.data, width, height, width, QImage.Format.Format_Grayscale8)
-    # .copy(): `gray` is a local array pybind11/numpy does not keep alive on
-    # QImage's behalf. Without this, the buffer QImage points at is freed as
-    # soon as this function returns, and the image is garbage or a crash.
     return image.copy()
 
 
@@ -350,7 +385,19 @@ class ImageView(QWidget):
 
     # ---- painting --------------------------------------------------------------
     def set_image(self, array: np.ndarray, buffer_viewport: cdx.Viewport) -> None:
-        self._pixmap = QPixmap.fromImage(array_to_qimage(array))
+        # Reads CURRENT session state, not whatever was active when the
+        # underlying render was dispatched -- correct for a Settings change
+        # (a palette switch while a render is in flight should show up the
+        # instant this frame is displayed) and safe for render_mode too:
+        # a mode switch always starts a fresh render under a NEW request_id
+        # (see SandboxWindow._start_render/_on_mode_changed), so any result
+        # still arriving under the OLD request_id is already discarded by
+        # the request_id check in _on_partial_ready/_on_full_ready before
+        # set_image is ever called -- this can never run with a mode that
+        # doesn't match what was actually rendered.
+        image = array_to_qimage(array, self.session.render_mode, self.session.settings,
+                                self.session.render_settings.max_iter)
+        self._pixmap = QPixmap.fromImage(image)
         self._buffer_viewport = buffer_viewport
         self.update()
 
@@ -527,12 +574,25 @@ class SandboxWindow(QMainWindow):
 
         toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
+        toolbar.addWidget(QLabel("Mode:", self))
+        self.mode_combo = QComboBox(self)
+        self.mode_combo.addItems(RENDER_MODES)
+        self.mode_combo.setCurrentText(self.session.render_mode)
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        toolbar.addWidget(self.mode_combo)
         reset_button = QPushButton("Reset View", self)
         reset_button.clicked.connect(self._reset_view)
         toolbar.addWidget(reset_button)
         self.addToolBar(toolbar)
 
         self.statusBar().showMessage("")
+
+    # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
+    def _on_mode_changed(self, mode: str) -> None:
+        self.session.set_render_mode(mode)
+        self._update_status_bar()
+        self._debounce_timer.stop()
+        self._start_render()
 
     # ---- settings: apply on demand, from the Settings tab -----------------------
     def _on_settings_applied(self, new_settings: Settings) -> None:

@@ -21,8 +21,8 @@ below, not touching _build_ui's layout code.
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
+                               QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_field
 
@@ -31,6 +31,7 @@ from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_fi
 # (which knows nothing about widgets or layout).
 FIELD_GROUPS = {
     "Rendering": ["resolution", "max_iter", "escape_radius", "tol", "threads"],
+    "Colouring": ["colour_palette", "colour_scaling", "colour_period"],
     "Cache": ["cache_budget_bytes"],
 }
 
@@ -44,13 +45,19 @@ CACHE_READOUT_REFRESH_MS = 500
 _ERROR_STYLE = "border: 1px solid #cc4444;"
 
 
-def _spinbox_for(name: str) -> QSpinBox | QDoubleSpinBox:
+def _widget_for(name: str) -> QSpinBox | QDoubleSpinBox | QComboBox:
     """Builds (but does not populate) the editing widget for one
-    FIELD_SPECS entry. cache_budget_bytes is the one field shown in
-    different units than it's stored in (MB, not raw bytes) -- see
-    _mb_widget_range/_to_mb/_from_mb.
+    FIELD_SPECS entry. cache_budget_bytes is the one NUMERIC field shown
+    in different units than it's stored in (MB, not raw bytes) -- see
+    _mb_widget_range/_to_mb/_from_mb. A choices-based field (colour_palette,
+    colour_scaling) gets a QComboBox instead of a spinbox entirely --
+    see FieldSpec's own docstring.
     """
     spec = FIELD_SPECS[name]
+    if spec.choices is not None:
+        box = QComboBox()
+        box.addItems(spec.choices)
+        return box
     if name == "cache_budget_bytes":
         box = QSpinBox()
         box.setRange(*_mb_widget_range(spec))
@@ -104,6 +111,24 @@ def _from_widget_value(name: str, raw):
     return raw
 
 
+def _set_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox, value) -> None:
+    if isinstance(widget, QComboBox):
+        widget.setCurrentText(value)
+    else:
+        widget.setValue(value)
+
+
+def _get_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox):
+    return widget.currentText() if isinstance(widget, QComboBox) else widget.value()
+
+
+def _connect_change(widget: QSpinBox | QDoubleSpinBox | QComboBox, slot) -> None:
+    if isinstance(widget, QComboBox):
+        widget.currentTextChanged.connect(slot)
+    else:
+        widget.valueChanged.connect(slot)
+
+
 class SettingsPanel(QWidget):
     """Render/cache settings, editable and applied on demand. Reads its
     initial values from `session.settings` and, on a successful Apply,
@@ -119,7 +144,7 @@ class SettingsPanel(QWidget):
         self.session = session
         self._on_apply = on_apply
         self._last_good: Settings = session.settings
-        self._widgets: dict[str, QSpinBox | QDoubleSpinBox] = {}
+        self._widgets: dict[str, QSpinBox | QDoubleSpinBox | QComboBox] = {}
 
         self._build_ui()
         self._load_into_widgets(self._last_good)
@@ -170,8 +195,8 @@ class SettingsPanel(QWidget):
         form = QFormLayout(box)
         for name in field_names:
             spec = FIELD_SPECS[name]
-            widget = _spinbox_for(name)
-            widget.valueChanged.connect(self._update_slow_render_hint)
+            widget = _widget_for(name)
+            _connect_change(widget, self._update_slow_render_hint)
             self._widgets[name] = widget
             form.addRow(spec.label + ":", widget)
         return box
@@ -180,11 +205,11 @@ class SettingsPanel(QWidget):
     def _load_into_widgets(self, settings: Settings) -> None:
         for name, widget in self._widgets.items():
             widget.blockSignals(True)
-            widget.setValue(_to_widget_value(name, getattr(settings, name)))
+            _set_widget(widget, _to_widget_value(name, getattr(settings, name)))
             widget.blockSignals(False)
 
     def _draft_settings_from_widgets(self) -> dict:
-        return {name: _from_widget_value(name, widget.value())
+        return {name: _from_widget_value(name, _get_widget(widget))
                for name, widget in self._widgets.items()}
 
     # ---- Apply: validate every field, revert invalid ones, apply the rest together ----

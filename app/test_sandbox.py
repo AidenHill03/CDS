@@ -22,12 +22,14 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import cdx
 import app.sandbox as sandbox_module
-from app.sandbox import ImageView, RenderTask, SandboxWindow
+from app.colour import PALETTES
+from app.sandbox import ImageView, RenderTask, SandboxWindow, array_to_qimage
 from app.session import Session
 from app.settings import Settings
 
@@ -84,6 +86,62 @@ def main() -> None:
     sandbox_module.library_path = lambda: _fake_library_path
 
     print("=== app.sandbox tests ===")
+
+    # ---- array_to_qimage: mode-aware colouring dispatch ---------------------------
+    print("\narray_to_qimage (mode-aware colouring):")
+    settings = Settings(colour_palette="viridis", colour_scaling="log1p", colour_period=0.0)
+    # A tiny 1x2 array: row 0 (bottom, per cdx convention) never escapes,
+    # row 1 (top) escapes near max_iter -- exercises both the never-escaped
+    # flat colour AND a real palette lookup in one image.
+    escape_array = np.array([[0.0], [199.0]])   # (height=2, width=1)
+
+    img = array_to_qimage(escape_array, "julia", settings, max_iter=200)
+    check(img.format() == QImage.Format.Format_RGB888,
+          "julia mode produces an RGB image, not the old single-channel grayscale")
+    check(img.width() == 1 and img.height() == 2, "output dimensions match the input array")
+    # array_to_qimage flips vertically (row0-bottom -> row0-top for QImage,
+    # same as the pre-P5c grayscale path) -- so QImage row 0 (top) shows the
+    # ARRAY's row 1 (the escaped pixel, value 199.0).
+    top_pixel = img.pixelColor(0, 0)
+    check((top_pixel.red(), top_pixel.green(), top_pixel.blue())
+          == tuple(int(c) for c in PALETTES["viridis"][255]),
+          "the escaped pixel (smooth value near max_iter) lands at viridis' top colour, "
+          "at the FLIPPED row (QImage top = array row 1)")
+    bottom_pixel = img.pixelColor(0, 1)
+    check((bottom_pixel.red(), bottom_pixel.green(), bottom_pixel.blue()) == (0, 0, 0),
+          "the never-escaped pixel (array row 0, QImage bottom row) is flat black, not "
+          "viridis' own index-0 colour")
+
+    img_param = array_to_qimage(escape_array, "parameter", settings, max_iter=200)
+    check(img_param.format() == QImage.Format.Format_RGB888,
+          "parameter mode gets the same escape-time RGB treatment as julia mode")
+
+    basin_array = np.array([[0.0, 1.0, 2.0]])
+    basin_img = array_to_qimage(basin_array, "basin", settings, max_iter=200)
+    check(basin_img.format() == QImage.Format.Format_RGB888, "basin mode also produces RGB")
+    unresolved = basin_img.pixelColor(0, 0)
+    check((unresolved.red(), unresolved.green(), unresolved.blue()) == (0, 0, 0),
+          "basin mode: an unresolved (label 0) pixel is flat black")
+    b1, b2 = basin_img.pixelColor(1, 0), basin_img.pixelColor(2, 0)
+    check((b1.red(), b1.green(), b1.blue()) != (b2.red(), b2.green(), b2.blue()),
+          "basin mode: two different basin ids get visually distinct colours")
+
+    greens_array = np.array([[0.5, 5.0]])
+    greens_img = array_to_qimage(greens_array, "greens", settings, max_iter=200)
+    check(greens_img.format() == QImage.Format.Format_Grayscale8,
+          "greens mode still uses the old plain grayscale path -- P5c's dedicated "
+          "equipotential-band display hasn't landed yet (see array_to_qimage's own docstring)")
+
+    period_settings = Settings(colour_palette="viridis", colour_scaling="log1p", colour_period=10.0)
+    # Nonzero values one period apart, so both go through the real palette
+    # lookup rather than one of them tripping the never-escaped (value==0)
+    # short-circuit.
+    wrap_array = np.array([[1.0, 11.0]])
+    wrap_img = array_to_qimage(wrap_array, "julia", period_settings, max_iter=200)
+    p1, p2 = wrap_img.pixelColor(0, 0), wrap_img.pixelColor(1, 0)
+    check((p1.red(), p1.green(), p1.blue()) == (p2.red(), p2.green(), p2.blue()),
+          "with a colour_period of 10, values one period apart (1.0 and 11.0) land at the "
+          "SAME colour -- the settings' period reaches the actual displayed pixels")
 
     # ---- pixel <-> complex coordinate mapping -----------------------------------
     print("\npixel <-> complex mapping:")
@@ -222,6 +280,16 @@ def main() -> None:
     window = SandboxWindow()
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "the initial render eventually produces a displayed image")
+
+    # Checked HERE, immediately after construction and before anything else
+    # touches session.render_mode -- later sections poke session.render_mode
+    # directly (bypassing the combo box, to set up unrelated scenarios),
+    # which is not something the combo box is expected to track (nothing in
+    # the real app ever changes render_mode except through the combo box
+    # itself -- see the dedicated "mode selector" section further down for
+    # that actual UI path).
+    check(window.mode_combo.currentText() == window.session.render_mode,
+          "the combo box starts on the session's actual startup render mode")
 
     # ---- render is off the GUI thread: a slow render must not block processEvents --
     # Fast built-in family (not a term-based custom map: slower per pixel,
@@ -439,6 +507,20 @@ def main() -> None:
                  timeout_ms=10000)
     check(ok, "Apply triggers an immediate re-render at the NEW resolution -- not the debounce, "
           "and not the old one")
+
+    # ---- mode selector: switching modes reaches the session and re-renders ------------
+    print("\nmode selector:")
+    check([window.mode_combo.itemText(i) for i in range(window.mode_combo.count())]
+          == list(sandbox_module.RENDER_MODES),
+          "the combo box offers exactly RENDER_MODES, in order")
+
+    window.image_view._pixmap = None   # so wait_for below can't see a stale hit from above
+    window.mode_combo.setCurrentText("julia")
+    check(window.session.render_mode == "julia",
+          "selecting a mode in the combo box updates session.render_mode")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching modes triggers an immediate re-render -- not the debounce, and the "
+          "new mode actually produces a displayed image")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
