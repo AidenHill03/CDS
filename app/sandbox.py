@@ -317,6 +317,7 @@ class ImageView(QWidget):
 
     viewport_changed = Signal()
     orbit_changed = Signal()
+    cursor_readout_changed = Signal(str)
 
     def __init__(self, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
@@ -339,6 +340,10 @@ class ImageView(QWidget):
         # own doc comment) rather than silently showing values that are
         # only comparable within this one image.
         self._last_normalized: bool | None = None
+        # See set_image's own comment -- the raw numeric payload + mode it
+        # was rendered under, for the cursor readout's sampling.
+        self._buffer_payload = None
+        self._buffer_mode: str | None = None
 
         # ---- critical-point overlay (dynamical plane only) --------------------
         self._show_critical_points = False
@@ -412,6 +417,59 @@ class ImageView(QWidget):
         rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
         rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
         return QPointF(rel_x * width, rel_y * height)
+
+    # ---- cursor readout: live coordinate + mode-dependent sampled value ---------
+    def cursor_readout_text(self, pixel: QPoint | QPointF) -> str:
+        """z's coordinate, with PRECISION THAT SCALES WITH ZOOM DEPTH (four
+        decimals is useless at scale 1e-9 -- P5c's own wording) -- enough
+        decimal digits that two ADJACENT pixels' coordinates print as
+        different strings, not just enough to show the value at all. Plus
+        a mode-dependent second field sampled from the last-rendered
+        buffer (see _sample_at_pixel): escape value for julia/parameter,
+        basin index for basin, potential for greens/parameter_greens.
+        """
+        w = self._pixel_to_complex(pixel)
+        vp = self.session.viewport
+        pixel_step = (2.0 * vp.scale) / max(vp.resolution, 1)
+        if pixel_step > 0 and math.isfinite(pixel_step):
+            decimals = max(4, int(math.ceil(-math.log10(pixel_step))) + 1)
+        else:
+            decimals = 4
+        coord = f"z = {w.real:.{decimals}f}{'+' if w.imag >= 0 else '-'}{abs(w.imag):.{decimals}f}j"
+        sample = self._sample_at_pixel(pixel)
+        return f"{coord}   {sample}" if sample else coord
+
+    def _sample_at_pixel(self, pixel: QPoint | QPointF) -> str | None:
+        if self._buffer_payload is None or self._buffer_viewport is None or self._pixmap is None:
+            return None
+        buf_pixel = self._complex_to_buffer_pixel(self._pixel_to_complex(pixel))
+        col = int(buf_pixel.x())
+        row_top = int(buf_pixel.y())   # top-down, matching _complex_to_buffer_pixel's own convention
+
+        mode = self._buffer_mode
+        payload = self._buffer_payload
+        if mode == "basin":
+            height, width = payload[0].shape
+        elif mode in ("greens", "parameter_greens"):
+            height, width = payload[0].shape
+        else:
+            height, width = payload.shape
+
+        if not (0 <= col < width and 0 <= row_top < height):
+            return None   # cursor is over the display but off the (possibly overscanned-
+                          # differently) buffer's own real pixels -- nothing to sample
+        raw_row = height - 1 - row_top   # buffer is top-down; the array itself is row-0-bottom
+
+        if mode in ("julia", "parameter"):
+            value = payload[raw_row, col]
+            return "never escaped" if value == 0.0 else f"escape = {value:.4g}"
+        if mode == "basin":
+            label = payload[0][raw_row, col]
+            return "unresolved" if label == 0.0 else f"basin = {int(label)}"
+        if mode in ("greens", "parameter_greens"):
+            value = payload[0][raw_row, col]
+            return f"potential = {value:.4g}"
+        return None
 
     def _buffer_source_rect(self) -> QRectF | None:
         """The sub-rect of the last-painted buffer (in its own pixel space)
@@ -547,6 +605,16 @@ class ImageView(QWidget):
         self._pixmap = QPixmap.fromImage(image)
         self._buffer_viewport = buffer_viewport
         self._last_normalized = normalized
+        # Raw payload + the mode it was rendered under, kept for the cursor
+        # readout's mode-dependent second field (escape value / basin
+        # index / potential) -- sampling needs the actual numbers, which
+        # array_to_qimage's RGB output has already discarded. Capturing
+        # session.render_mode HERE (not re-reading it later, e.g. from
+        # mouseMoveEvent) is what keeps this correct even mid-mode-switch:
+        # see the comment above on why session.render_mode is guaranteed
+        # to match `payload` at this exact point.
+        self._buffer_payload = payload
+        self._buffer_mode = self.session.render_mode
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -689,6 +757,14 @@ class ImageView(QWidget):
             self._rubber_band_rect = QRect(self._rubber_band_origin, pos).normalized()
             self.update()
 
+        # Live, on every move regardless of panning/dragging -- the cursor
+        # coordinate (and, mid-pan, what's still on screen at that point)
+        # stays meaningful throughout the gesture, not just once it ends.
+        self.cursor_readout_changed.emit(self.cursor_readout_text(pos))
+
+    def leaveEvent(self, event) -> None:
+        self.cursor_readout_changed.emit("")
+
     def mouseReleaseEvent(self, event) -> None:
         if self._panning:
             self._panning = False
@@ -730,6 +806,8 @@ class SandboxWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("ComplexDynamics sandbox (P5a)")
         self.resize(800, 860)
+        self._status_base_message = ""
+        self._status_cursor_text = ""
 
         # Persisted settings (app/settings.py's config file, next to where a
         # saved family library also lives -- see app.settings.config_dir)
@@ -783,6 +861,7 @@ class SandboxWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.image_view = ImageView(self.session, self)
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
+        self.image_view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
         self.metadata_header = MetadataHeader(self.session, self)
 
@@ -1016,6 +1095,14 @@ class SandboxWindow(QMainWindow):
 
     # ---- status bar: scale + precision-floor warning ----------------------------
     def _update_status_bar(self) -> None:
+        # Deliberately the EXPENSIVE half (constructs a cdx.Renderer just
+        # to read precision_floor) -- called only at discrete state-change
+        # points (viewport/settings/mode changes, a completed render),
+        # never per mouse-move event. The cheap, per-mouse-move half lives
+        # in _on_cursor_readout_changed below; both write into
+        # _status_base_message/_status_cursor_text and _render_status_bar
+        # combines them, so neither overwrites the other's half of the
+        # displayed message.
         vp = self.session.viewport
         renderer = cdx.Renderer(map=cdx.Map.custom(self.session.map, self.session.param),
                                 viewport=vp, settings=self.session.render_settings)
@@ -1036,7 +1123,17 @@ class SandboxWindow(QMainWindow):
         if self.image_view._last_normalized is False:
             message += ("   ⚠ Green's function normalization overflowed at this max_iter -- "
                         "values are comparable only within this image, not across renders")
-        self.statusBar().showMessage(message)
+        self._status_base_message = message
+        self._render_status_bar()
+
+    def _on_cursor_readout_changed(self, text: str) -> None:
+        self._status_cursor_text = text
+        self._render_status_bar()
+
+    def _render_status_bar(self) -> None:
+        text = f"{self._status_base_message}   {self._status_cursor_text}" \
+            if self._status_cursor_text else self._status_base_message
+        self.statusBar().showMessage(text)
 
     # ---- shutdown ------------------------------------------------------------------
     def closeEvent(self, event) -> None:

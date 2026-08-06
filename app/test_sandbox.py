@@ -31,7 +31,7 @@ import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
 from app.sandbox import ImageView, RenderTask, SandboxWindow, array_to_qimage
-from app.session import Session
+from app.session import Session, render_map
 from app.settings import Settings
 
 failures = 0
@@ -368,6 +368,76 @@ def main() -> None:
           "a real drag (rubber-band zoom) does NOT also seed an orbit at the release point")
     check(close(gesture_view.session.viewport.center, complex(0, 0), 0.7),
           "sanity: the drag actually did rubber-band zoom (viewport changed)")
+
+    # ---- cursor readout: coordinate precision + mode-dependent sampled value ------
+    print("\ncursor readout:")
+    readout_session = Session()
+    readout_session.map = cdx.RationalMap.mandelbrot()
+    readout_session.param = -1 + 0j
+    readout_session.set_render_mode("julia")
+    readout_session.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    readout_view = ImageView(readout_session)
+    readout_view.resize(400, 400)
+
+    check(readout_view.cursor_readout_text(QPoint(200, 200)) == "z = 0.0000+0.0000j",
+          "with no buffer rendered yet, the readout is JUST the coordinate -- no sampled value")
+
+    real_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+                            readout_session.render_settings, "julia")
+    readout_view.set_image(real_array, readout_session.viewport)
+    center_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check("never escaped" in center_text,
+          "the basilica's own critical point (screen center here) never escapes -- sampled "
+          "correctly through the REAL render pipeline, not a synthetic array")
+    corner_text = readout_view.cursor_readout_text(QPoint(2, 2))
+    check("escape = " in corner_text,
+          "a corner pixel (far from the filled Julia set) samples a real escape value")
+
+    # Precision scales with zoom depth -- four decimals is useless at
+    # scale 1e-9 (P5c's own wording), checked directly, not assumed from
+    # reading the formula.
+    readout_session.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    normal_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    normal_decimals = len(normal_text.split("z = ")[1].split("+")[0].split(".")[1])
+    check(normal_decimals == 4, "at an ordinary zoom level, the coordinate shows 4 decimals")
+
+    readout_session.viewport = cdx.Viewport(complex(0, 0), 1e-9, 41)
+    deep_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    deep_decimals = len(deep_text.split("z = ")[1].split("+")[0].split(".")[1])
+    check(deep_decimals > normal_decimals,
+          "at scale 1e-9, the coordinate shows MORE decimals than at ordinary zoom -- enough "
+          "to actually distinguish adjacent pixels, not a fixed 4 regardless of depth")
+
+    two_adjacent_pixels = [readout_view._pixel_to_complex(QPoint(200, 200)),
+                          readout_view._pixel_to_complex(QPoint(201, 200))]
+    check(two_adjacent_pixels[0] != two_adjacent_pixels[1],
+          "sanity: two adjacent screen pixels really do map to different complex values here")
+
+    # ---- cursor readout: mode-dependent second field (basin, greens) --------------
+    print("\ncursor readout (basin / greens sampling):")
+    readout_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 41)
+    readout_session.set_render_mode("basin")
+    basin_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+                             readout_session.render_settings, "basin")
+    readout_view.set_image(basin_array, readout_session.viewport)
+    basin_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check("basin = " in basin_text or "unresolved" in basin_text,
+          "basin mode's cursor readout samples the label layer, not the escape-time format")
+
+    readout_session.set_render_mode("greens")
+    greens_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+                              readout_session.render_settings, "greens")
+    readout_view.set_image(greens_array, readout_session.viewport)
+    greens_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check("potential = " in greens_text,
+          "greens mode's cursor readout samples the potential, not escape/basin formatting")
+
+    # ---- cursor readout: leaveEvent clears it --------------------------------------
+    print("\ncursor readout (leaveEvent):")
+    cleared = []
+    readout_view.cursor_readout_changed.connect(cleared.append)
+    readout_view.leaveEvent(None)
+    check(cleared == [""], "the mouse leaving the widget emits an EMPTY readout, clearing it")
 
     # ---- cursor-anchored zoom formula --------------------------------------------
     print("\ncursor-anchored zoom:")
@@ -824,6 +894,22 @@ def main() -> None:
     window.term_editor_panel._notify_edit()   # the real path _on_term_edited fires from
     check("renamed-live" in window.metadata_header._label.text(),
           "a term edit refreshes the header's map name/formula")
+
+    # ---- cursor readout reaches the actual status bar ------------------------------
+    print("\ncursor readout (live status bar):")
+    window.image_view.mouseMoveEvent(_FakeMouseEvent(QPoint(200, 200)))
+    check("z = " in window.statusBar().currentMessage(),
+          "moving the mouse over the image updates the REAL status bar, not just the "
+          "signal/label in isolation")
+    check("scale = " in window.statusBar().currentMessage(),
+          "the cursor readout is APPENDED to the existing scale/precision message, not "
+          "replacing it")
+
+    window.image_view.leaveEvent(None)
+    check("z = " not in window.statusBar().currentMessage(),
+          "the mouse leaving the image clears the cursor readout from the live status bar too")
+    check("scale = " in window.statusBar().currentMessage(),
+          "...while the scale/precision half of the message is untouched by that")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
