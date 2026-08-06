@@ -19,7 +19,7 @@ Run with:
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication, QComboBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox
 
 from app.session import Session
 from app.settings import FIELD_SPECS, Settings
@@ -110,6 +110,22 @@ def main() -> None:
     check(applied[-1].colour_palette == "viridis" and applied[-1].colour_scaling == "histogram"
          and applied[-1].colour_period == 15.0,
           "the applied Settings reflects the combo-box selections and the period spinbox")
+
+    # ---- Green's function fields: QCheckBox for the bool field ------------------------
+    print("\nGreen's function fields (checkbox widget):")
+    contour_widget = panel._widgets["greens_contour"]
+    check(isinstance(contour_widget, QCheckBox), "greens_contour gets a QCheckBox, not a spinbox")
+    check(contour_widget.isChecked() == session.settings.greens_contour,
+          "the checkbox starts on session.settings' current value (False)")
+
+    applied.clear()
+    contour_widget.setChecked(True)
+    panel._widgets["greens_band_width"].setValue(3.0)
+    panel._apply()
+    check(len(applied) == 1, "changing only the checkbox/band-width fields still triggers a "
+                             "valid Apply")
+    check(applied[-1].greens_contour is True and applied[-1].greens_band_width == 3.0,
+          "the applied Settings reflects the checkbox state and the band-width spinbox")
 
     # ---- Clear Cache ------------------------------------------------------------------
     print("\nclear cache:")

@@ -76,8 +76,16 @@ def main() -> None:
     check(param_plane.shape == (41, 41), "parameter-plane render matches viewport resolution")
 
     s.set_render_mode("greens")
-    greens = s.render()
-    check(greens.shape == (41, 41), "greens render matches viewport resolution")
+    greens_array, greens_normalized = s.render()
+    check(greens_array.shape == (41, 41), "greens render matches viewport resolution")
+    check(isinstance(greens_normalized, bool),
+          "greens render returns (array, normalized) -- normalized is a real bool")
+
+    s.set_render_mode("parameter_greens")
+    pgreens_array, pgreens_normalized = s.render()
+    check(pgreens_array.shape == (41, 41),
+          "parameter_greens render also matches viewport resolution")
+    check(isinstance(pgreens_normalized, bool), "parameter_greens also returns a real bool")
 
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")

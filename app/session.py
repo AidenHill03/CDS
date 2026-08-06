@@ -26,7 +26,17 @@ import cdx
 from app.render_cache import RenderCache, make_key
 from app.settings import Settings
 
-RENDER_MODES = ("julia", "parameter", "basin", "greens")
+RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens")
+
+# Which modes render the PARAMETER plane (pixel = a value of the map's
+# own free parameter `a`, orbit seeded at that parameter's critical
+# point) rather than the DYNAMICAL plane (pixel = an initial condition,
+# under whatever `a` is currently bound). Consulted wherever "which plane
+# is this" matters beyond just dispatching a render call -- e.g. the
+# critical-point overlay and cursor readout are dynamical-plane-only
+# concepts (see P5c's own spec: critical points belong to the dynamical
+# plane, not the parameter plane).
+PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens"})
 
 # The six built-in families are read-only: save_to_library/rename_in_library/
 # delete_from_library/set_library_notes below all refuse to touch a name in
@@ -110,16 +120,23 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     produces, so two requests differing only in thread count share a hit.
 
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
-    convention; plot with origin='lower'). Every mode except "basin" returns
-    a plain 2D (height, width) array. "basin" returns a STACKED 3D array,
-    shape (2, height, width): index 0 is the label (0 = unresolved, else the
-    basin/cycle id, per cdx::Renderer::render_basin), index 1 is the
-    iteration count each pixel took to resolve -- for basin SHADING (see
-    app/colour.py's colour_basin). Stacked into one array rather than
-    returned as a tuple so RenderCache (a plain CacheKey -> np.ndarray map)
-    and RenderTask's Qt signals (already typed for a single array) need no
-    changes at all -- both already work generically off `.nbytes`/array
-    identity, with no assumption about a specific shape.
+    convention; plot with origin='lower'), except:
+      - "basin" returns a STACKED 3D array, shape (2, height, width):
+        index 0 is the label (0 = unresolved, else the basin/cycle id, per
+        cdx::Renderer::render_basin), index 1 is the iteration count each
+        pixel took to resolve -- for basin SHADING (see app/colour.py's
+        colour_basin). Stacked into one array rather than returned as a
+        tuple so byte-accounting stays simple (a single array's .nbytes).
+      - "greens"/"parameter_greens" return a (array, normalized) TUPLE,
+        the same shape cdx.Renderer.render_greens/render_parameter_greens
+        themselves already return -- normalized is False when
+        degree^max_iter overflowed (see those methods' own doc comments)
+        and the app should warn rather than silently show values that are
+        comparable only within this one image. Unlike "basin" this is a
+        genuine tuple, not stacked into the array, since the second value
+        is a single bool, not a second per-pixel field -- RenderCache
+        (see its own CachedValue type) and RenderTask's Qt signals both
+        already handle "array, or (array, small metadata)" generically.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -147,7 +164,11 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         labels, iterations = renderer.render_basin(cycles, cancel)
         array = np.stack([labels, iterations])
     elif mode == "greens":
-        array, _normalized = renderer.render_greens(cancel=cancel)
+        g, normalized = renderer.render_greens(cancel=cancel)
+        array = (g, normalized)
+    elif mode == "parameter_greens":
+        g, normalized = renderer.render_parameter_greens(cancel=cancel)
+        array = (g, normalized)
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 

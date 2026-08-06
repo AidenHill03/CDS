@@ -119,6 +119,25 @@ def main() -> None:
           "raising the budget does not resurrect already-evicted entries")
 
     # ---- clear() ---------------------------------------------------------------------
+    # ---- tuple payloads: a mode with extra metadata (e.g. greens' normalized flag) ---
+    print("\ntuple payloads:")
+    tuple_cache = RenderCache(budget_bytes=10_000_000)
+    key_g = make_key("map-g", 0j, "greens", 0j, 1.5, 100, 200, 2.0, 1e-6)
+    payload = (np.arange(9, dtype=np.float64).reshape(3, 3), False)
+    tuple_cache.put(key_g, payload)
+    fetched_payload = tuple_cache.get(key_g)
+    check(fetched_payload is not None, "a tuple payload is fetched back on a hit")
+    check(np.array_equal(fetched_payload[0], payload[0]) and fetched_payload[1] is False,
+          "both the array and the metadata (here, normalized=False) round-trip exactly")
+    check(tuple_cache.stats.current_bytes == payload[0].nbytes,
+          "byte accounting for a tuple payload counts only the array, not the metadata")
+
+    replaced = (np.arange(4, dtype=np.float64).reshape(2, 2), True)
+    tuple_cache.put(key_g, replaced)
+    check(tuple_cache.stats.current_bytes == replaced[0].nbytes,
+          "replacing a tuple entry updates current_bytes to the NEW array's size, not a "
+          "stale leftover from the old one")
+
     print("\nclear:")
     clear_cache = RenderCache(budget_bytes=10_000)
     clear_cache.put(k1, arr)

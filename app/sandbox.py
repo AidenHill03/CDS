@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QLabel, QMainWindow, QPu
                                QTabWidget, QToolBar, QWidget)
 
 import cdx
-from app.colour import colour_basin, colour_escape_time
+from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
 from app.render_cache import RenderCache
@@ -90,8 +90,16 @@ def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
     return cdx.Viewport(viewport.center, viewport.scale * factor, resolution)
 
 
-def array_to_qimage(array: np.ndarray, mode: str, settings: Settings, max_iter: int) -> QImage:
-    """Converts a cdx render array into a displayable, COLOURED QImage.
+def array_to_qimage(payload, mode: str, settings: Settings,
+                    max_iter: int) -> tuple[QImage, bool | None]:
+    """Converts a cdx render payload (see session.render_map's own
+    docstring for what `payload` actually is per mode) into a displayable,
+    COLOURED QImage. Returns (image, normalized): `normalized` is only
+    meaningful for "greens"/"parameter_greens" (see render_map/
+    cdx::Renderer::render_greens's own doc comments for what the flag
+    means -- False means degree^max_iter overflowed and the values are
+    comparable only within this one image); it's None for every other
+    mode, which have no such concept.
 
     cdx render arrays have row 0 at the BOTTOM (matching Viewport::coord;
     see CLAUDE.md) but QImage has row 0 at the TOP -- flip vertically first,
@@ -105,38 +113,50 @@ def array_to_qimage(array: np.ndarray, mode: str, settings: Settings, max_iter: 
     Dispatches to app.colour by render mode: "julia"/"parameter" are
     escape-time (colour_escape_time, using `settings`' palette/scaling/
     period); "basin" is categorical + SHADED basin colouring (hue = basin
-    id, brightness = convergence speed). "greens" still uses the old plain
-    grayscale min-max stretch below, pending P5c's dedicated
-    equipotential-band display for Green's-function data -- switching it
-    to a real colour treatment happens there, not here, to avoid touching
-    this dispatch twice with half-finished Green's-specific settings.
+    id, brightness = convergence speed); "greens"/"parameter_greens" are
+    scalar-field equipotential banding (colour_scalar_field, using
+    `settings`' greens_band_width/greens_period_bands/greens_contour) --
+    the SAME display treatment for both, since they're the same KIND of
+    data (a non-negative potential) even though they live on different
+    planes (see cdx::Renderer::render_parameter_greens' own header comment
+    on why the two are computed by genuinely different kernels).
 
-    "basin" mode's `array` is STACKED (see render_map's own docstring):
+    "basin" mode's payload is STACKED (see render_map's own docstring):
     shape (2, height, width), index 0 = labels, index 1 = iterations --
     unpacked and flipped as two separate 2D layers BEFORE the generic
     np.flipud path below, since flipud always flips axis 0, which for a
     3D stacked array is the LAYER axis, not the row axis; flipping the
     unpacked 2D layers individually (axis 0 IS the row axis there) is what
     actually produces a correctly oriented image instead of silently
-    swapping labels and iterations.
+    swapping labels and iterations. "greens"/"parameter_greens" payloads
+    are a plain (array, normalized) TUPLE, not stacked -- only the array
+    itself needs flipping.
 
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
     never be a cache key or trigger a re-render, only a re-paint.
     """
     if mode == "basin":
-        labels = np.flipud(array[0])
-        iterations = np.flipud(array[1])
+        labels = np.flipud(payload[0])
+        iterations = np.flipud(payload[1])
         rgb = colour_basin(labels, iterations, max_iter=max_iter,
                            period=settings.colour_period or None)
-        return _rgb_to_qimage(rgb)
-    flipped = np.flipud(array)
+        return _rgb_to_qimage(rgb), None
+    if mode in ("greens", "parameter_greens"):
+        g, normalized = payload
+        flipped = np.flipud(g)
+        rgb = colour_scalar_field(flipped, palette=settings.colour_palette,
+                                  band_width=settings.greens_band_width,
+                                  period_bands=settings.greens_period_bands,
+                                  contour=settings.greens_contour)
+        return _rgb_to_qimage(rgb), normalized
+    flipped = np.flipud(payload)
     if mode in ("julia", "parameter"):
         rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,
                                  scaling=settings.colour_scaling,
                                  period=settings.colour_period or None)
-        return _rgb_to_qimage(rgb)
-    return _grayscale_qimage(flipped)
+        return _rgb_to_qimage(rgb), None
+    raise AssertionError(f"unreachable: mode={mode!r}")
 
 
 def _rgb_to_qimage(rgb: np.ndarray) -> QImage:
@@ -149,23 +169,6 @@ def _rgb_to_qimage(rgb: np.ndarray) -> QImage:
     return image.copy()
 
 
-def _grayscale_qimage(flipped: np.ndarray) -> QImage:
-    """The original pre-P5c path: grayscale, min-max normalized. Still used
-    for "greens" mode until P5c's dedicated equipotential-band display
-    lands (see array_to_qimage's own docstring).
-    """
-    lo = float(flipped.min())
-    hi = float(flipped.max())
-    if hi > lo:
-        normalized = (flipped - lo) * (255.0 / (hi - lo))
-    else:
-        normalized = np.zeros_like(flipped)
-    gray = np.ascontiguousarray(normalized.astype(np.uint8))
-    height, width = gray.shape
-    image = QImage(gray.data, width, height, width, QImage.Format.Format_Grayscale8)
-    return image.copy()
-
-
 class RenderSignals(QObject):
     """QRunnable isn't itself a QObject and so cannot emit signals; this is
     the companion object RenderTask uses instead. Created on the GUI thread
@@ -174,8 +177,8 @@ class RenderSignals(QObject):
     automatically and queues delivery to the GUI thread's event loop, which
     is what makes it safe to update widgets from the connected slots.
     """
-    partial_ready = Signal(int, object, object)   # request_id, ndarray, buffer viewport
-    full_ready = Signal(int, object, object)       # request_id, ndarray, buffer viewport
+    partial_ready = Signal(int, object, object)   # request_id, render_map() payload, buffer viewport
+    full_ready = Signal(int, object, object)       # request_id, render_map() payload, buffer viewport
     failed = Signal(int, str)                       # request_id, error message
 
 
@@ -312,6 +315,14 @@ class ImageView(QWidget):
         # None exactly when _pixmap is None; kept alongside it because
         # _buffer_source_rect needs both to map back onto the display.
         self._buffer_viewport: cdx.Viewport | None = None
+        # Set by set_image from array_to_qimage's own return value -- only
+        # meaningful for "greens"/"parameter_greens" (see array_to_qimage's
+        # docstring), None otherwise. SandboxWindow's status bar reads this
+        # to warn when a Green's-function render's degree^max_iter
+        # normalization overflowed (see cdx::Renderer::render_greens'
+        # own doc comment) rather than silently showing values that are
+        # only comparable within this one image.
+        self._last_normalized: bool | None = None
 
         self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
@@ -395,7 +406,7 @@ class ImageView(QWidget):
         return max(d_re, d_im) / buf.scale
 
     # ---- painting --------------------------------------------------------------
-    def set_image(self, array: np.ndarray, buffer_viewport: cdx.Viewport) -> None:
+    def set_image(self, payload, buffer_viewport: cdx.Viewport) -> None:
         # Reads CURRENT session state, not whatever was active when the
         # underlying render was dispatched -- correct for a Settings change
         # (a palette switch while a render is in flight should show up the
@@ -406,10 +417,11 @@ class ImageView(QWidget):
         # the request_id check in _on_partial_ready/_on_full_ready before
         # set_image is ever called -- this can never run with a mode that
         # doesn't match what was actually rendered.
-        image = array_to_qimage(array, self.session.render_mode, self.session.settings,
-                                self.session.render_settings.max_iter)
+        image, normalized = array_to_qimage(payload, self.session.render_mode, self.session.settings,
+                                            self.session.render_settings.max_iter)
         self._pixmap = QPixmap.fromImage(image)
         self._buffer_viewport = buffer_viewport
+        self._last_normalized = normalized
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -732,19 +744,25 @@ class SandboxWindow(QMainWindow):
         self._thread_pool.start(_Runnable(task))
 
     @Slot(int, object, object)
-    def _on_partial_ready(self, request_id: int, array: np.ndarray,
+    def _on_partial_ready(self, request_id: int, payload,
                           buffer_viewport: cdx.Viewport) -> None:
         if request_id != self._request_id:
             return   # superseded by a newer request; discard
-        self.image_view.set_image(array, buffer_viewport)
+        self.image_view.set_image(payload, buffer_viewport)
+        # Refreshes the unnormalized-Green's-function warning as soon as a
+        # frame actually displays it, not just on the next unrelated
+        # viewport/settings change that happens to also call
+        # _update_status_bar -- see that method's own comment.
+        self._update_status_bar()
 
     @Slot(int, object, object)
-    def _on_full_ready(self, request_id: int, array: np.ndarray,
+    def _on_full_ready(self, request_id: int, payload,
                        buffer_viewport: cdx.Viewport) -> None:
         self._pending_tasks.pop(request_id, None)   # this task is done; safe to release
         if request_id != self._request_id:
             return
-        self.image_view.set_image(array, buffer_viewport)
+        self.image_view.set_image(payload, buffer_viewport)
+        self._update_status_bar()
 
     @Slot(int, str)
     def _on_render_failed(self, request_id: int, message: str) -> None:
@@ -767,6 +785,14 @@ class SandboxWindow(QMainWindow):
                         "this image is degenerate")
         elif vp.scale <= floor * PRECISION_WARN_MULTIPLE:
             message += f"   ⚠ approaching the precision floor ({floor:.3e})"
+        # image_view._last_normalized is set by set_image from
+        # array_to_qimage's return value (see both docstrings) -- False
+        # only for "greens"/"parameter_greens" when degree^max_iter
+        # overflowed double range; None for every other mode, and for a
+        # greens mode before its first render has completed.
+        if self.image_view._last_normalized is False:
+            message += ("   ⚠ Green's function normalization overflowed at this max_iter -- "
+                        "values are comparable only within this image, not across renders")
         self.statusBar().showMessage(message)
 
     # ---- shutdown ------------------------------------------------------------------

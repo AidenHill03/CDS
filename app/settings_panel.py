@@ -21,8 +21,8 @@ below, not touching _build_ui's layout code.
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_field
 
@@ -32,6 +32,7 @@ from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_fi
 FIELD_GROUPS = {
     "Rendering": ["resolution", "max_iter", "escape_radius", "tol", "threads"],
     "Colouring": ["colour_palette", "colour_scaling", "colour_period"],
+    "Green's function": ["greens_band_width", "greens_period_bands", "greens_contour"],
     "Cache": ["cache_budget_bytes"],
 }
 
@@ -45,15 +46,18 @@ CACHE_READOUT_REFRESH_MS = 500
 _ERROR_STYLE = "border: 1px solid #cc4444;"
 
 
-def _widget_for(name: str) -> QSpinBox | QDoubleSpinBox | QComboBox:
+def _widget_for(name: str) -> QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox:
     """Builds (but does not populate) the editing widget for one
     FIELD_SPECS entry. cache_budget_bytes is the one NUMERIC field shown
     in different units than it's stored in (MB, not raw bytes) -- see
     _mb_widget_range/_to_mb/_from_mb. A choices-based field (colour_palette,
-    colour_scaling) gets a QComboBox instead of a spinbox entirely --
-    see FieldSpec's own docstring.
+    colour_scaling) gets a QComboBox instead of a spinbox entirely, and a
+    bool field (greens_contour) gets a QCheckBox -- see FieldSpec's own
+    docstring for both.
     """
     spec = FIELD_SPECS[name]
+    if spec.kind is bool:
+        return QCheckBox()
     if spec.choices is not None:
         box = QComboBox()
         box.addItems(spec.choices)
@@ -111,20 +115,28 @@ def _from_widget_value(name: str, raw):
     return raw
 
 
-def _set_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox, value) -> None:
+def _set_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox, value) -> None:
     if isinstance(widget, QComboBox):
         widget.setCurrentText(value)
+    elif isinstance(widget, QCheckBox):
+        widget.setChecked(value)
     else:
         widget.setValue(value)
 
 
-def _get_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox):
-    return widget.currentText() if isinstance(widget, QComboBox) else widget.value()
+def _get_widget(widget: QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox):
+    if isinstance(widget, QComboBox):
+        return widget.currentText()
+    if isinstance(widget, QCheckBox):
+        return widget.isChecked()
+    return widget.value()
 
 
-def _connect_change(widget: QSpinBox | QDoubleSpinBox | QComboBox, slot) -> None:
+def _connect_change(widget: QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox, slot) -> None:
     if isinstance(widget, QComboBox):
         widget.currentTextChanged.connect(slot)
+    elif isinstance(widget, QCheckBox):
+        widget.stateChanged.connect(slot)
     else:
         widget.valueChanged.connect(slot)
 
@@ -144,7 +156,7 @@ class SettingsPanel(QWidget):
         self.session = session
         self._on_apply = on_apply
         self._last_good: Settings = session.settings
-        self._widgets: dict[str, QSpinBox | QDoubleSpinBox | QComboBox] = {}
+        self._widgets: dict[str, QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox] = {}
 
         self._build_ui()
         self._load_into_widgets(self._last_good)

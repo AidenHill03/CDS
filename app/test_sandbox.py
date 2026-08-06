@@ -95,9 +95,10 @@ def main() -> None:
     # flat colour AND a real palette lookup in one image.
     escape_array = np.array([[0.0], [199.0]])   # (height=2, width=1)
 
-    img = array_to_qimage(escape_array, "julia", settings, max_iter=200)
+    img, normalized = array_to_qimage(escape_array, "julia", settings, max_iter=200)
     check(img.format() == QImage.Format.Format_RGB888,
           "julia mode produces an RGB image, not the old single-channel grayscale")
+    check(normalized is None, "julia mode's normalized flag is None -- not a greens-family concept")
     check(img.width() == 1 and img.height() == 2, "output dimensions match the input array")
     # array_to_qimage flips vertically (row0-bottom -> row0-top for QImage,
     # same as the pre-P5c grayscale path) -- so QImage row 0 (top) shows the
@@ -112,7 +113,7 @@ def main() -> None:
           "the never-escaped pixel (array row 0, QImage bottom row) is flat black, not "
           "viridis' own index-0 colour")
 
-    img_param = array_to_qimage(escape_array, "parameter", settings, max_iter=200)
+    img_param, _n = array_to_qimage(escape_array, "parameter", settings, max_iter=200)
     check(img_param.format() == QImage.Format.Format_RGB888,
           "parameter mode gets the same escape-time RGB treatment as julia mode")
 
@@ -125,8 +126,9 @@ def main() -> None:
     basin_array = np.stack([basin_labels, basin_iters])
     check(basin_array.shape == (2, 1, 4), "sanity: the stacked test array has the expected shape")
 
-    basin_img = array_to_qimage(basin_array, "basin", settings, max_iter=200)
+    basin_img, basin_normalized = array_to_qimage(basin_array, "basin", settings, max_iter=200)
     check(basin_img.format() == QImage.Format.Format_RGB888, "basin mode also produces RGB")
+    check(basin_normalized is None, "basin mode's normalized flag is also None")
     unresolved = basin_img.pixelColor(0, 0)
     check((unresolved.red(), unresolved.green(), unresolved.blue()) == (0, 0, 0),
           "basin mode: an unresolved (label 0) pixel is flat black")
@@ -138,18 +140,42 @@ def main() -> None:
           "basin mode: within the same basin, the FAST-converging pixel (iters=3) is brighter "
           "than the slow one (iters=190) -- shading actually reaches the displayed image")
 
-    greens_array = np.array([[0.5, 5.0]])
-    greens_img = array_to_qimage(greens_array, "greens", settings, max_iter=200)
-    check(greens_img.format() == QImage.Format.Format_Grayscale8,
-          "greens mode still uses the old plain grayscale path -- P5c's dedicated "
-          "equipotential-band display hasn't landed yet (see array_to_qimage's own docstring)")
+    # render_map's "greens"/"parameter_greens" return (array, normalized)
+    # TUPLES (see its own docstring), not a plain array -- array_to_qimage
+    # must be fed that same shape.
+    greens_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
+                               greens_period_bands=12.0, greens_contour=False)
+    greens_payload = (np.array([[np.e ** 0, np.e ** 12]]), True)
+    greens_img, greens_normalized = array_to_qimage(greens_payload, "greens", greens_settings,
+                                                     max_iter=200)
+    check(greens_img.format() == QImage.Format.Format_RGB888,
+          "greens mode now gets a real RGB colour treatment (equipotential bands), not the "
+          "old flat grayscale stretch")
+    check(greens_normalized is True, "a normalized=True payload passes the flag straight through")
+    g1, g2 = greens_img.pixelColor(0, 0), greens_img.pixelColor(1, 0)
+    check((g1.red(), g1.green(), g1.blue()) == (g2.red(), g2.green(), g2.blue()),
+          "e^0 and e^12 (12 bands apart at band_width=1, period_bands=12) land at the "
+          "same colour -- greens_period_bands actually reaches the displayed pixels")
+
+    unnorm_payload = (np.array([[1.0, 2.0]]), False)
+    _img, unnorm_flag = array_to_qimage(unnorm_payload, "parameter_greens", greens_settings,
+                                        max_iter=200)
+    check(unnorm_flag is False,
+          "parameter_greens propagates a normalized=False payload through unchanged")
+
+    contour_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
+                                greens_period_bands=12.0, greens_contour=True)
+    contour_payload = (np.array([[np.e ** 0, np.e ** 3]]), True)
+    contour_img, _n2 = array_to_qimage(contour_payload, "greens", contour_settings, max_iter=200)
+    check(contour_img.format() == QImage.Format.Format_RGB888,
+          "greens_contour=True still produces a valid RGB image")
 
     period_settings = Settings(colour_palette="viridis", colour_scaling="log1p", colour_period=10.0)
     # Nonzero values one period apart, so both go through the real palette
     # lookup rather than one of them tripping the never-escaped (value==0)
     # short-circuit.
     wrap_array = np.array([[1.0, 11.0]])
-    wrap_img = array_to_qimage(wrap_array, "julia", period_settings, max_iter=200)
+    wrap_img, _n3 = array_to_qimage(wrap_array, "julia", period_settings, max_iter=200)
     p1, p2 = wrap_img.pixelColor(0, 0), wrap_img.pixelColor(1, 0)
     check((p1.red(), p1.green(), p1.blue()) == (p2.red(), p2.green(), p2.blue()),
           "with a colour_period of 10, values one period apart (1.0 and 11.0) land at the "
@@ -544,6 +570,48 @@ def main() -> None:
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "switching to basin mode renders and displays successfully end-to-end, with the "
           "new stacked labels+iterations array flowing all the way through")
+
+    # Both Green's-function modes, likewise through the REAL pipeline --
+    # session.render_map's (array, normalized) tuple flowing through
+    # RenderCache/RenderTask's Qt signals/array_to_qimage, and the status
+    # bar picking up image_view._last_normalized once the render lands.
+    window.image_view._pixmap = None
+    window.image_view._last_normalized = None
+    window.mode_combo.setCurrentText("greens")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching to greens mode renders and displays successfully end-to-end")
+    check(window.image_view._last_normalized in (True, False),
+          "the real render pipeline actually sets _last_normalized to a real bool, not left "
+          "at its constructor default of None")
+    check(window.image_view._last_normalized is True,
+          "at this session's default max_iter, degree^max_iter does not overflow, so the "
+          "normalization is genuinely fine -- no warning belongs in the status bar")
+    check("overflowed" not in window.statusBar().currentMessage(),
+          "no unnormalized warning in the status bar when normalization actually succeeded")
+
+    window.image_view._pixmap = None
+    window.image_view._last_normalized = None
+    window.mode_combo.setCurrentText("parameter_greens")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching to parameter_greens mode renders and displays successfully end-to-end")
+    check(window.image_view._last_normalized is True, "parameter_greens also normalizes fine here")
+
+    # Force the overflow path (huge max_iter -> degree^max_iter overflows
+    # double) and confirm the status bar actually warns, not just that
+    # the internal flag is set correctly (already checked in the pure
+    # array_to_qimage tests above) -- this is the one thing only a live
+    # window can confirm: the flag reaching the ACTUAL displayed message.
+    window.session.render_settings = cdx.RenderSettings(2000, 2.0, 1e-6, 0)
+    window.image_view._pixmap = None
+    window.image_view._last_normalized = None
+    window._start_render()
+    ok = wait_for(lambda: window.image_view._last_normalized is not None, timeout_ms=10000)
+    check(ok, "a render completes even with the overflow-inducing max_iter")
+    check(window.image_view._last_normalized is False,
+          "max_iter=2000 overflows degree^max_iter -- normalization genuinely failed here")
+    window._update_status_bar()
+    check("overflowed" in window.statusBar().currentMessage(),
+          "the status bar surfaces the unnormalized warning once the flag is actually False")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")

@@ -294,16 +294,37 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
 # ---- scalar field (Green's-function-shaped data) ---------------------------------------
 
 def colour_scalar_field(values: np.ndarray, palette: str = "viridis", band_width: float = 1.0,
-                        period_bands: float = 12.0, eps: float = 1e-9) -> np.ndarray:
+                        period_bands: float = 12.0, eps: float = 1e-9,
+                        contour: bool = False,
+                        contour_rgb: tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
     """Full scalar-field colouring pipeline: quantises log(value+eps) into
     `period_bands` cyclic steps (via the same palette machinery as
     escape-time), giving the classic equipotential-banded look. Every
     pixel gets a real colour -- there is no "never escaped"-style mask
     here, since 0 is a legitimate potential value, not a sentinel.
+
+    CONTOUR LINES, when `contour` is set: drawn directly into the pixel
+    grid (not a separate QPainter overlay -- an equipotential boundary is
+    exactly "where the integer band index differs between adjacent
+    pixels," a property of the rendered array itself, not of screen/
+    viewport geometry the way a critical-point marker is). A pixel is on
+    a contour if EITHER its left or its top neighbour landed in a
+    different (unwrapped) band -- checked on the integer band index
+    BEFORE the cyclic period wrap, so a contour line marks every true
+    equipotential boundary, not just the ones that happen to also cross
+    a period-wrap seam.
     """
     if palette not in PALETTES:
         raise ValueError(f"unknown palette {palette!r}; must be one of {PALETTE_NAMES}")
     bands = scale_scalar_field(values, band_width, eps)
     t = np.mod(bands, period_bands) / period_bands if period_bands > 0 else np.zeros_like(bands)
     mask = np.ones(np.asarray(values).shape, dtype=bool)
-    return _apply_palette(t, mask, PALETTES[palette], (0, 0, 0))
+    rgb = _apply_palette(t, mask, PALETTES[palette], (0, 0, 0))
+    if contour:
+        band_index = np.floor(bands).astype(np.int64)
+        on_contour = np.zeros(band_index.shape, dtype=bool)
+        on_contour[:, 1:] |= band_index[:, 1:] != band_index[:, :-1]
+        on_contour[1:, :] |= band_index[1:, :] != band_index[:-1, :]
+        rgb = rgb.copy()
+        rgb[on_contour] = contour_rgb
+    return rgb

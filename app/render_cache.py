@@ -49,40 +49,57 @@ class CacheStats:
     budget_bytes: int
 
 
+# A cached value is usually a plain ndarray, but a render mode that carries
+# extra per-render metadata alongside its pixels (e.g. "greens"/
+# "parameter_greens" pairing the array with the normalized-vs-overflowed
+# bool -- see app.session.render_map) stores a (ndarray, metadata) tuple
+# instead. Only the array actually costs bytes worth budgeting against; a
+# bool (or any other small metadata payload) is negligible, so this is the
+# ONE place that distinction matters -- every other RenderCache method
+# already treats the stored value as opaque.
+CachedValue = np.ndarray | tuple
+
+
+def _nbytes(value: CachedValue) -> int:
+    array = value[0] if isinstance(value, tuple) else value
+    return array.nbytes
+
+
 class RenderCache:
-    """Maps CacheKey -> rendered NumPy array, evicting least-recently-USED
-    entries (not least-recently-inserted: a re-fetched entry is moved to
-    the front, same as a normal LRU) once `current_bytes` would exceed
-    `budget_bytes`. Changing the budget down evicts immediately; changing
-    it up just raises the ceiling for future inserts -- existing entries
-    are never touched by a budget change alone.
+    """Maps CacheKey -> a rendered NumPy array (or, for a mode with extra
+    metadata, an (array, metadata) tuple -- see CachedValue), evicting
+    least-recently-USED entries (not least-recently-inserted: a re-fetched
+    entry is moved to the front, same as a normal LRU) once `current_bytes`
+    would exceed `budget_bytes`. Changing the budget down evicts
+    immediately; changing it up just raises the ceiling for future inserts
+    -- existing entries are never touched by a budget change alone.
     """
 
     def __init__(self, budget_bytes: int) -> None:
         self._lock = threading.Lock()
-        self._entries: OrderedDict[CacheKey, np.ndarray] = OrderedDict()
+        self._entries: OrderedDict[CacheKey, CachedValue] = OrderedDict()
         self._current_bytes = 0
         self._budget_bytes = budget_bytes
         self._hits = 0
         self._misses = 0
 
-    def get(self, key: CacheKey) -> np.ndarray | None:
+    def get(self, key: CacheKey) -> CachedValue | None:
         with self._lock:
-            array = self._entries.get(key)
-            if array is None:
+            value = self._entries.get(key)
+            if value is None:
                 self._misses += 1
                 return None
             self._hits += 1
             self._entries.move_to_end(key)
-            return array
+            return value
 
-    def put(self, key: CacheKey, array: np.ndarray) -> None:
+    def put(self, key: CacheKey, value: CachedValue) -> None:
         with self._lock:
             existing = self._entries.pop(key, None)
             if existing is not None:
-                self._current_bytes -= existing.nbytes
-            self._entries[key] = array
-            self._current_bytes += array.nbytes
+                self._current_bytes -= _nbytes(existing)
+            self._entries[key] = value
+            self._current_bytes += _nbytes(value)
             self._evict_to_budget()
 
     def _evict_to_budget(self) -> None:
@@ -91,8 +108,8 @@ class RenderCache:
         # budget check below leaves current_bytes over budget for it alone,
         # rather than refusing to cache anything at that resolution at all.
         while self._current_bytes > self._budget_bytes and len(self._entries) > 1:
-            _stale_key, stale_array = self._entries.popitem(last=False)
-            self._current_bytes -= stale_array.nbytes
+            _stale_key, stale_value = self._entries.popitem(last=False)
+            self._current_bytes -= _nbytes(stale_value)
 
     def set_budget(self, budget_bytes: int) -> None:
         with self._lock:

@@ -78,6 +78,18 @@ DEFAULT_COLOUR_PALETTE = "classic"
 DEFAULT_COLOUR_SCALING = "log1p"
 DEFAULT_COLOUR_PERIOD = 0.0
 
+# Green's-function display (both G_f(z) on the dynamical plane and G_M(c)
+# on the parameter plane -- see app.colour.colour_scalar_field, which both
+# share). band_width=1.0 and 12 cyclic bands are a reasonable, legible
+# starting point (roughly matching the classic equipotential-band look
+# fractal software defaults to); NOT tied to colour_period above -- that's
+# an escape-time-specific concept (wraps a raw iteration VALUE), this
+# wraps an already-log-scaled BAND INDEX, a different unit entirely.
+# Contour lines default OFF: the spec calls them "optional."
+DEFAULT_GREENS_BAND_WIDTH = 1.0
+DEFAULT_GREENS_PERIOD_BANDS = 12.0
+DEFAULT_GREENS_CONTOUR = False
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -91,8 +103,14 @@ class FieldSpec:
     are ignored, and validate_field checks membership in `choices` rather
     than a numeric bound. SettingsPanel builds a QComboBox for these
     instead of a QSpinBox/QDoubleSpinBox (see _widget_for).
+
+    `kind is bool` is its own third kind (independent of `choices`):
+    `minimum`/`maximum`/`exclusive_minimum` are ignored the same way, and
+    validate_field accepts True/False or anything Python's own bool()
+    treats as boolean-shaped input, coerced via bool(). SettingsPanel
+    builds a QCheckBox for these (see _widget_for).
     """
-    kind: type            # int, float, or str (str only valid with choices set)
+    kind: type            # int, float, str (with choices), or bool
     minimum: float
     maximum: float
     default: float | str
@@ -138,6 +156,18 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     # ceiling of 100_000); a period longer than max_iter just never wraps.
     "colour_period": FieldSpec(float, 0.0, 100_000.0, DEFAULT_COLOUR_PERIOD,
                                "Colour cycle period (0 = off)"),
+    # log(value)/band_width must stay meaningfully sized -- 0 would make
+    # every value fall in the same band (division by zero, in fact), so
+    # this one IS exclusive_minimum, unlike colour_period above.
+    "greens_band_width": FieldSpec(float, 0.0, 1000.0, DEFAULT_GREENS_BAND_WIDTH,
+                                   "Green's function band width", exclusive_minimum=True),
+    "greens_period_bands": FieldSpec(float, 1.0, 1000.0, DEFAULT_GREENS_PERIOD_BANDS,
+                                     "Green's function bands per cycle"),
+    # minimum/maximum/exclusive_minimum are unused for a bool field (see
+    # FieldSpec's own docstring) -- 0/0 rather than omitted, matching the
+    # same convention the choices-based fields above already use.
+    "greens_contour": FieldSpec(bool, 0, 0, DEFAULT_GREENS_CONTOUR,
+                                "Green's function contour lines"),
 }
 
 
@@ -152,6 +182,9 @@ class Settings:
     colour_palette: str = DEFAULT_COLOUR_PALETTE
     colour_scaling: str = DEFAULT_COLOUR_SCALING
     colour_period: float = DEFAULT_COLOUR_PERIOD
+    greens_band_width: float = DEFAULT_GREENS_BAND_WIDTH
+    greens_period_bands: float = DEFAULT_GREENS_PERIOD_BANDS
+    greens_contour: bool = DEFAULT_GREENS_CONTOUR
 
     def sanitized(self) -> Settings:
         """A copy with every field individually validated, out-of-range or
@@ -175,6 +208,19 @@ def validate_field(name: str, raw_value) -> tuple[bool, object, str]:
     error_message); error_message is "" when ok is True.
     """
     spec = FIELD_SPECS[name]
+    if spec.kind is bool:
+        # Deliberately NOT bool(raw_value) -- Python's bool() truthy-casts
+        # any non-empty string, so bool("false") is True, a real footgun
+        # for a hand-edited settings.json. Only an actual bool (the normal
+        # case: JSON true/false, or a QCheckBox's .isChecked()) or an int
+        # 0/1 (JSON has no separate bool literal some hand-editors might
+        # reach for) are accepted; anything else -- including strings --
+        # is rejected outright rather than silently coerced.
+        if isinstance(raw_value, bool):
+            return True, raw_value, ""
+        if isinstance(raw_value, int) and raw_value in (0, 1):
+            return True, bool(raw_value), ""
+        return False, None, f"{spec.label} must be true or false"
     try:
         value = spec.kind(raw_value)
     except (TypeError, ValueError):

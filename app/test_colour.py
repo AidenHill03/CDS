@@ -169,6 +169,31 @@ def main() -> None:
     except ValueError:
         check(True, "colour_scalar_field validates its palette argument too")
 
+    # ---- colour_scalar_field: contour lines ------------------------------------------
+    print("\ncolour_scalar_field (contour lines):")
+    # A row that crosses several equipotential bands (e^0, e^1, ..., e^5,
+    # band_width=1) so there's a real boundary to detect, plus a flat
+    # region (all e^0) so there's also a real NO-boundary case to check.
+    varying = np.array([[np.e ** 0, np.e ** 1, np.e ** 2, np.e ** 3, np.e ** 4, np.e ** 5]])
+    flat = np.full((1, 6), np.e ** 0)
+
+    without_contour = colour_scalar_field(varying, band_width=1.0, period_bands=12.0)
+    with_contour = colour_scalar_field(varying, band_width=1.0, period_bands=12.0, contour=True)
+    check(not np.array_equal(without_contour, with_contour),
+          "contour=True changes the output when the field actually crosses band boundaries")
+    check(tuple(with_contour[0, 1]) == (0, 0, 0),
+          "a pixel on a real band boundary is drawn in the contour colour")
+
+    flat_with_contour = colour_scalar_field(flat, band_width=1.0, period_bands=12.0, contour=True)
+    flat_without = colour_scalar_field(flat, band_width=1.0, period_bands=12.0)
+    check(np.array_equal(flat_with_contour, flat_without),
+          "a perfectly flat field (no band boundaries anywhere) is unchanged by contour=True")
+
+    custom_colour = colour_scalar_field(varying, band_width=1.0, period_bands=12.0, contour=True,
+                                        contour_rgb=(255, 0, 0))
+    check(tuple(custom_colour[0, 1]) == (255, 0, 0),
+          "contour_rgb controls the actual drawn colour, not just an on/off flag")
+
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")
     raise SystemExit(0 if failures == 0 else 1)
