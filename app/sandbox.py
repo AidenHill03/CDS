@@ -18,6 +18,7 @@ Entry point: `python -m app.sandbox`.
 from __future__ import annotations
 
 import math
+import os
 import sys
 
 import numpy as np
@@ -1178,6 +1179,17 @@ def main() -> None:
     app = QApplication(sys.argv)
     window = SandboxWindow()
     window.show()
+    if os.environ.get("CDX_VERIFY_LAUNCH_SELFTEST"):
+        # A packaged build "launching" only means something if a real
+        # window came up -- process survival alone doesn't prove Qt's
+        # platform plugin loaded. Used by CI (see .github/workflows) as a
+        # smoke test on every packaged artifact, not just at dev time.
+        def _check() -> None:
+            ok = window.isVisible() and window.windowTitle() == PRODUCT_NAME
+            print("LAUNCH_SELFTEST_OK" if ok else "LAUNCH_SELFTEST_FAIL", flush=True)
+            app.exit(0 if ok else 1)
+
+        QTimer.singleShot(2000, _check)
     sys.exit(app.exec())
 
 
