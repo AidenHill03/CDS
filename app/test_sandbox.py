@@ -809,6 +809,22 @@ def main() -> None:
           "self.image_view) would silently no-op now that image_view isn't the tab's own "
           "page, which is exactly the regression this guards against")
 
+    # ---- metadata header: reflects mode/map changes live ------------------------------
+    print("\nmetadata header:")
+    from app.metadata_header import format_metadata_text
+    check(window.metadata_header._label.text() == format_metadata_text(window.session),
+          "the header's displayed text matches the session's actual current state")
+
+    window.mode_combo.setCurrentText("parameter")
+    check("Parameter plane" in window.metadata_header._label.text(),
+          "switching modes via the combo box refreshes the header's domain text")
+    window.mode_combo.setCurrentText("julia")
+
+    window.session.map.name = "renamed-live"
+    window.term_editor_panel._notify_edit()   # the real path _on_term_edited fires from
+    check("renamed-live" in window.metadata_header._label.text(),
+          "a term edit refreshes the header's map name/formula")
+
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
     initial = window._initial_viewport

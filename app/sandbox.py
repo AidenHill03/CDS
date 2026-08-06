@@ -31,6 +31,7 @@ import cdx
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
+from app.metadata_header import MetadataHeader
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
 from app.render_cache import RenderCache
@@ -783,15 +784,19 @@ class SandboxWindow(QMainWindow):
         self.image_view = ImageView(self.session, self)
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
+        self.metadata_header = MetadataHeader(self.session, self)
 
-        # The View tab holds a small container (image + the orbit-tracking
-        # strip below it), not the bare ImageView -- the orbit panel is
+        # The View tab holds a small container -- the metadata header
+        # above the image, the orbit-tracking strip below it -- not the
+        # bare ImageView. The header sits directly above what it
+        # describes so a screenshot of just this tab is self-explanatory
+        # (P5c's own reason for building it at all); the orbit panel is
         # meaningless without the image it overlays and needs to stay
-        # visible while the user clicks the image to seed a new orbit, so
-        # it belongs directly under it, not on some other tab.
+        # visible while the user clicks the image to seed a new orbit.
         self.view_container = QWidget(self)
         view_layout = QVBoxLayout(self.view_container)
         view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.addWidget(self.metadata_header)
         view_layout.addWidget(self.image_view, 1)
         view_layout.addWidget(self.orbit_panel)
 
@@ -841,6 +846,7 @@ class SandboxWindow(QMainWindow):
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, mode: str) -> None:
         self.session.set_render_mode(mode)
+        self.metadata_header.refresh()   # domain/mode text depends on the mode itself
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
@@ -874,6 +880,7 @@ class SandboxWindow(QMainWindow):
         # this only has to trigger the render side.
         self._update_status_bar()
         self._debounce_timer.start()
+        self.metadata_header.refresh()   # name/formula depend directly on the edited map
         # Cheap: refresh() only recomputes when (map, param) actually
         # changed since its last call, so this stays fresh for whenever the
         # user next looks at the Facts tab without paying for a recompute
@@ -911,6 +918,7 @@ class SandboxWindow(QMainWindow):
         self.facts_panel.refresh()
         self.image_view.refresh_critical_points()
         self.image_view.refresh_orbit_staleness()
+        self.metadata_header.refresh()   # name/formula/param all just changed wholesale
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
