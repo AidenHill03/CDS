@@ -25,12 +25,14 @@ from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, 
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QMainWindow,
-                               QPushButton, QTabWidget, QToolBar, QWidget)
+                               QPushButton, QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
+from app.orbit_panel import OrbitPanel
+from app.orbit_tracker import OrbitTracker
 from app.render_cache import RenderCache
 from app.session import PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map
 from app.settings import Settings, library_path, load_settings, save_settings
@@ -313,12 +315,14 @@ class ImageView(QWidget):
     """
 
     viewport_changed = Signal()
+    orbit_changed = Signal()
 
     def __init__(self, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
         self.session = session
         self.setMouseTracking(True)
         self.setMinimumSize(200, 200)
+        self.orbit_tracker = OrbitTracker()
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
@@ -494,6 +498,37 @@ class ImageView(QWidget):
         self.refresh_critical_points()   # lazily fills in traces if just turned on
         self.update()
 
+    # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
+    def refresh_orbit_staleness(self) -> None:
+        """Called at the same map/param-change points refresh_critical_points
+        is (term edits, family loads) -- clears the traced orbit the moment
+        it stops describing THIS map/parameter's dynamics (see
+        OrbitTracker.reset_if_stale's own docstring for why this is not
+        optional). Deliberately never called from a viewport change --
+        panning/zooming is the same dynamics, seen differently, and the
+        orbit should stay exactly where it was traced.
+        """
+        self.orbit_tracker.reset_if_stale(self.session.map, self.session.param)
+        self.orbit_changed.emit()
+
+    def step_orbit(self, count: int = 1) -> None:
+        self.orbit_tracker.step(self.session.map, self.session.param, count)
+        self.orbit_changed.emit()
+        self.update()
+
+    def clear_orbit(self) -> None:
+        self.orbit_tracker.clear()
+        self.orbit_changed.emit()
+        self.update()
+
+    def _seed_orbit_at(self, pixel: QPoint) -> None:
+        if self.session.render_mode in PARAMETER_PLANE_MODES:
+            return   # orbit tracking is a dynamical-plane concept, see its own module docstring
+        z0 = self._pixel_to_complex(pixel)
+        self.orbit_tracker.seed(self.session.map, self.session.param, z0)
+        self.orbit_changed.emit()
+        self.update()
+
     # ---- painting --------------------------------------------------------------
     def set_image(self, payload, buffer_viewport: cdx.Viewport) -> None:
         # Reads CURRENT session state, not whatever was active when the
@@ -525,6 +560,7 @@ class ImageView(QWidget):
             painter.setPen(pen)
             painter.drawRect(self._rubber_band_rect)
         self._paint_critical_point_overlay(painter)
+        self._paint_orbit(painter)
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -562,6 +598,42 @@ class ImageView(QWidget):
                 continue   # infinity is a valid critical point but has no finite screen position
             pixel = self._complex_to_display_pixel(w)
             painter.drawEllipse(pixel, r, r)
+
+    def _paint_orbit(self, painter: QPainter) -> None:
+        state = self.orbit_tracker.state
+        if state is None or self.session.render_mode in PARAMETER_PLANE_MODES:
+            return   # same dynamical-plane-only gating as critical points, see its own comment
+
+        def finite(w: complex) -> bool:
+            return math.isfinite(w.real) and math.isfinite(w.imag)
+
+        finite_points = [self._complex_to_display_pixel(w) for w in state.history if finite(w)]
+
+        line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from the white/black
+        line_pen.setWidth(1)                        # critical-point markers on any palette
+        painter.setPen(line_pen)
+        for a, b in zip(finite_points, finite_points[1:]):
+            painter.drawLine(a, b)
+
+        dot_pen = QPen(QColor(0, 0, 0))
+        dot_pen.setWidth(1)
+        painter.setPen(dot_pen)
+        painter.setBrush(QColor(255, 120, 0))
+        dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
+        for pixel in finite_points:                   # visually subordinate, not competing
+            painter.drawEllipse(pixel, dot_r, dot_r)
+
+        # The SEED (history[0]) gets its own larger, distinct marker -- the
+        # one point in the trace the user actually chose, not one the
+        # orbit passed through.
+        seed_pixel = self._complex_to_display_pixel(state.z0)
+        if finite(state.z0):
+            seed_pen = QPen(QColor(0, 0, 0))
+            seed_pen.setWidth(2)
+            painter.setPen(seed_pen)
+            painter.setBrush(QColor(255, 255, 0))
+            painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
+                                CRITICAL_POINT_MARKER_RADIUS)
 
     # ---- scroll zoom, cursor-anchored -------------------------------------------
     def wheelEvent(self, event) -> None:
@@ -623,11 +695,19 @@ class ImageView(QWidget):
             self.viewport_changed.emit()
         elif self._rubber_band_origin is not None:
             rect = self._rubber_band_rect
+            origin = self._rubber_band_origin
             self._rubber_band_origin = None
             self._rubber_band_rect = None
             self.update()
             if rect is not None and rect.width() > 4 and rect.height() > 4:
                 self._apply_rubber_band_zoom(rect)
+            else:
+                # A genuine CLICK, not a drag -- the one gesture that
+                # previously did nothing at all is exactly "click to seed
+                # an orbit" (P5c's own wording); no separate toggle needed
+                # since there was no prior meaning for this gesture to
+                # conflict with.
+                self._seed_orbit_at(origin)
 
     def _apply_rubber_band_zoom(self, rect: QRect) -> None:
         top_left = self._pixel_to_complex(rect.topLeft())
@@ -702,15 +782,27 @@ class SandboxWindow(QMainWindow):
     def _build_ui(self) -> None:
         self.image_view = ImageView(self.session, self)
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
+        self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
 
-        # A QTabWidget as the central widget, not the bare ImageView --
+        # The View tab holds a small container (image + the orbit-tracking
+        # strip below it), not the bare ImageView -- the orbit panel is
+        # meaningless without the image it overlays and needs to stay
+        # visible while the user clicks the image to seed a new orbit, so
+        # it belongs directly under it, not on some other tab.
+        self.view_container = QWidget(self)
+        view_layout = QVBoxLayout(self.view_container)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.addWidget(self.image_view, 1)
+        view_layout.addWidget(self.orbit_panel)
+
+        # A QTabWidget as the central widget, not the bare view container --
         # this is what makes room for the Settings tab (and whatever tab
         # comes after it) without redesigning the window. The toolbar stays
         # a QMainWindow-level toolbar, not per-tab: Reset View only means
         # anything on the View tab, but QMainWindow toolbars are independent
         # of which central-widget tab is showing either way.
         self.tabs = QTabWidget(self)
-        self.tabs.addTab(self.image_view, "View")
+        self.tabs.addTab(self.view_container, "View")
         self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
         self.tabs.addTab(self.term_editor_panel, "Terms")
         self.facts_panel = FactsPanel(self.session, self._on_center_view, self)
@@ -789,6 +881,9 @@ class SandboxWindow(QMainWindow):
         self.facts_panel.refresh()
         # Same memoization property -- see ImageView.refresh_critical_points.
         self.image_view.refresh_critical_points()
+        # An orbit traced under the PRE-edit map no longer describes this
+        # map's dynamics -- see OrbitTracker.reset_if_stale's own docstring.
+        self.image_view.refresh_orbit_staleness()
 
     # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
     def _on_tab_changed(self, index: int) -> None:
@@ -799,7 +894,7 @@ class SandboxWindow(QMainWindow):
     def _on_center_view(self, point: complex) -> None:
         vp = self.session.viewport
         self.session.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
-        self.tabs.setCurrentWidget(self.image_view)
+        self.tabs.setCurrentWidget(self.view_container)
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()
@@ -815,6 +910,7 @@ class SandboxWindow(QMainWindow):
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
         self.image_view.refresh_critical_points()
+        self.image_view.refresh_orbit_staleness()
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()

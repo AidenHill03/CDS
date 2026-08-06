@@ -22,7 +22,7 @@ import threading
 import time
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -271,6 +271,103 @@ def main() -> None:
           "changing the MAP (not just the viewport) invalidates the cache key")
     check(overlay_view._critical_points is not points_before,
           "and genuinely recomputes -- a different list object, not the stale one")
+
+    # ---- orbit tracking: click-to-seed, step/clear, painting, staleness -----------
+    print("\norbit tracking:")
+    from app.orbit_panel import OrbitPanel
+
+    orbit_session = Session()
+    orbit_session.map = cdx.RationalMap.mandelbrot()
+    orbit_session.param = -1 + 0j   # the basilica again
+    orbit_session.set_render_mode("julia")
+    orbit_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
+    orbit_view = ImageView(orbit_session)
+    orbit_view.resize(400, 400)
+    orbit_panel = OrbitPanel(orbit_session, orbit_view)
+
+    check("Click the image" in orbit_panel._readout_label.text(),
+          "the readout starts with no orbit seeded")
+    check(orbit_view.orbit_tracker.state is None, "no orbit exists before any click")
+
+    center_pixel = QPoint(200, 200)   # display-center -> complex 0, the basilica's own
+                                      # critical point, which is ALREADY on the 2-cycle
+    orbit_view._seed_orbit_at(center_pixel)
+    check(orbit_view.orbit_tracker.state is not None, "_seed_orbit_at starts a real orbit")
+    check(close(orbit_view.orbit_tracker.state.z0, complex(0, 0), 1e-2),
+          "the orbit is seeded at the CLICKED point's complex coordinate")
+    check("n = 0" in orbit_panel._readout_label.text(),
+          "the panel's readout updates via the orbit_changed signal, not manual polling")
+
+    orbit_view.step_orbit(3)
+    check(orbit_view.orbit_tracker.state.n == 3, "step_orbit(3) advances the tracker by 3")
+    check("n = 3" in orbit_panel._readout_label.text(), "the readout reflects the new n")
+    check(len(orbit_view.orbit_tracker.state.history) == 4,
+          "history has the seed plus 3 steps")
+
+    orbit_view.clear_orbit()
+    check(orbit_view.orbit_tracker.state is None, "clear_orbit removes the orbit")
+    check("Click the image" in orbit_panel._readout_label.text(),
+          "the readout reverts to the no-orbit prompt after Clear")
+
+    # Parameter-plane modes: click-to-seed is a no-op (orbit tracking is a
+    # dynamical-plane concept, same gating as the critical-point overlay).
+    orbit_session.set_render_mode("parameter")
+    orbit_view._seed_orbit_at(center_pixel)
+    check(orbit_view.orbit_tracker.state is None,
+          "clicking on the PARAMETER plane does not seed an orbit")
+    orbit_session.set_render_mode("julia")
+
+    # Staleness: survives a pan/zoom, clears on a map/param change -- the
+    # SAME property already verified directly against OrbitTracker itself
+    # in app/test_orbit_tracker.py; here we confirm ImageView's own
+    # refresh_orbit_staleness wiring actually reaches it.
+    orbit_view._seed_orbit_at(center_pixel)
+    check(orbit_view.orbit_tracker.state is not None, "sanity: an orbit exists again")
+    orbit_session.viewport = cdx.Viewport(complex(0.3, 0.3), 1.0, 400)   # pan/zoom only
+    orbit_view.refresh_orbit_staleness()
+    check(orbit_view.orbit_tracker.state is not None,
+          "a viewport-only change survives refresh_orbit_staleness -- panning/zooming is the "
+          "same dynamics, seen differently")
+
+    orbit_session.param = -0.5 + 0j   # a genuine parameter change
+    orbit_view.refresh_orbit_staleness()
+    check(orbit_view.orbit_tracker.state is None,
+          "a parameter change clears the orbit via refresh_orbit_staleness")
+
+    # ---- orbit tracking: a real click (press+release, no drag) seeds; a real drag doesn't --
+    print("\norbit tracking (mouse press/release gesture):")
+    orbit_session2 = Session()
+    orbit_session2.map = cdx.RationalMap.mandelbrot()
+    orbit_session2.set_render_mode("julia")
+    orbit_session2.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
+    gesture_view = ImageView(orbit_session2)
+    gesture_view.resize(400, 400)
+
+    class _FakeMouseEvent:
+        def __init__(self, pos: QPoint, button=Qt.MouseButton.LeftButton, modifiers=None):
+            self._pos = pos
+            self._button = button
+            self._modifiers = modifiers or Qt.KeyboardModifier.NoModifier
+        def position(self):
+            return QPointF(self._pos)
+        def button(self):
+            return self._button
+        def modifiers(self):
+            return self._modifiers
+
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))   # no movement -> a click
+    check(gesture_view.orbit_tracker.state is not None,
+          "a press+release with no movement in between seeds an orbit -- a genuine click")
+
+    gesture_view.clear_orbit()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(50, 50)))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(300, 300)))
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300)))   # a real drag
+    check(gesture_view.orbit_tracker.state is None,
+          "a real drag (rubber-band zoom) does NOT also seed an orbit at the release point")
+    check(close(gesture_view.session.viewport.center, complex(0, 0), 0.7),
+          "sanity: the drag actually did rubber-band zoom (viewport changed)")
 
     # ---- cursor-anchored zoom formula --------------------------------------------
     print("\ncursor-anchored zoom:")
@@ -697,6 +794,20 @@ def main() -> None:
           "checking it also triggers the lazy orbit-trace computation via set_trace_orbits")
     window.critical_points_checkbox.setChecked(False)
     check(window.image_view._show_critical_points is False, "unchecking turns it back off")
+
+    # ---- centre-view still switches to the View tab (regression: the View tab's ------
+    # ---- widget became a container around image_view, not image_view itself, when ----
+    # ---- the orbit-tracking strip was added below it) ---------------------------------
+    print("\ncentre-view switches to the View tab:")
+    check(window.tabs.widget(0) is window.view_container,
+          "the View tab's actual page is the container (image_view + orbit strip), not "
+          "image_view directly")
+    window.tabs.setCurrentIndex(2)   # Facts tab -- anywhere but View
+    window._on_center_view(complex(0.1, 0.1))
+    check(window.tabs.currentWidget() is window.view_container,
+          "_on_center_view actually switches to the View tab's container -- setCurrentWidget("
+          "self.image_view) would silently no-op now that image_view isn't the tab's own "
+          "page, which is exactly the regression this guards against")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
