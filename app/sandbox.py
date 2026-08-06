@@ -17,21 +17,22 @@ Entry point: `python -m app.sandbox`.
 
 from __future__ import annotations
 
+import math
 import sys
 
 import numpy as np
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QLabel, QMainWindow, QPushButton,
-                               QTabWidget, QToolBar, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QMainWindow,
+                               QPushButton, QTabWidget, QToolBar, QWidget)
 
 import cdx
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel
 from app.render_cache import RenderCache
-from app.session import RENDER_MODES, Session, render_map
+from app.session import PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map
 from app.settings import Settings, library_path, load_settings, save_settings
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
@@ -75,6 +76,16 @@ BUFFER_EDGE_FRACTION = 0.85
 # "Approaching" Renderer.precision_floor -- warn this many multiples out, so
 # the user has advance notice before the image actually degenerates.
 PRECISION_WARN_MULTIPLE = 100
+
+# Post-critical orbit trace length: enough steps to show whether an orbit
+# is heading toward a cycle/attractor without turning into unreadable
+# clutter for a map with several critical points, and cheap regardless of
+# map complexity -- a handful of RationalMap.eval() calls per critical
+# point, computed once per (map, param) and cached (see ImageView.
+# refresh_critical_points), not per paint.
+CRITICAL_ORBIT_TRACE_STEPS = 60
+
+CRITICAL_POINT_MARKER_RADIUS = 5.0
 
 
 def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
@@ -324,6 +335,22 @@ class ImageView(QWidget):
         # only comparable within this one image.
         self._last_normalized: bool | None = None
 
+        # ---- critical-point overlay (dynamical plane only) --------------------
+        self._show_critical_points = False
+        self._trace_orbits = False
+        # Memoized on (map.serialize(), param) -- see refresh_critical_points --
+        # so panning/zooming (which only ever changes session.viewport, never
+        # the map or param) never re-triggers root-finding. None until the
+        # first refresh_critical_points() call (made once by SandboxWindow
+        # right after construction, same as its other panels' initial state).
+        self._critical_points_key: tuple[str, complex] | None = None
+        self._critical_points: list[complex] = []
+        # None means "not computed for the current key yet" (distinct from
+        # an empty list, a genuinely orbit-free map) -- computed lazily,
+        # only once _trace_orbits is actually turned on, since tracing costs
+        # real RationalMap.eval() calls the marker-only display doesn't need.
+        self._orbit_traces: list[list[complex]] | None = None
+
         self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
 
@@ -350,6 +377,23 @@ class ImageView(QWidget):
         re = vp.center.real - vp.scale + rel_x * 2.0 * vp.scale
         im = vp.center.imag + vp.scale - rel_y * 2.0 * vp.scale
         return complex(re, im)
+
+    def _complex_to_display_pixel(self, w: complex) -> QPointF:
+        """The exact inverse of _pixel_to_complex, against the CURRENT
+        session.viewport (not the buffer's own, unlike
+        _complex_to_buffer_pixel below) -- what overlay drawing (critical
+        points, orbit traces) uses to place a marker at a given complex
+        point's actual on-screen position. Read-only: computing a screen
+        position from session.viewport is not the same as writing to it,
+        and nothing here ever assigns session.viewport -- see CLAUDE.md's
+        note on the MATLAB prototype's overlay-expands-the-axes bug this
+        is written to not repeat.
+        """
+        rect = self._display_rect()
+        vp = self.session.viewport
+        rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
+        rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
+        return QPointF(rect.left() + rel_x * rect.width(), rect.top() + rel_y * rect.height())
 
     # ---- overscan buffer mapping: buffer's own viewport, not the display's ------
     def _complex_to_buffer_pixel(self, w: complex) -> QPointF:
@@ -405,6 +449,51 @@ class ImageView(QWidget):
         d_im = abs(vp.center.imag - buf.center.imag) + vp.scale
         return max(d_re, d_im) / buf.scale
 
+    # ---- critical-point overlay: cached per (map, param), never re-root-found on
+    # ---- pan/zoom -- see P5c's own "cache per (map, parameter); do not re-root-find
+    # ---- on zoom or pan" requirement --------------------------------------------
+    def refresh_critical_points(self) -> None:
+        """Recomputes the critical-point set for the CURRENT session.map/
+        param, memoized on (map.serialize(), param) so this is a no-op
+        whenever neither has actually changed -- called by SandboxWindow
+        after every term edit and family load (the same points that
+        already refresh the Facts panel), NEVER from a viewport change.
+
+        Uses distinct_critical_points (deduplicated within the engine's
+        own tolerance), not the raw critical_points() -- this overlay
+        draws one MARKER per distinct location; multiplicity (already
+        shown properly in the Facts panel) has no separate visual meaning
+        here, and drawing several exactly-overlapping markers at one
+        multiplicity->2 point would add nothing but redundant painting.
+        """
+        key = (self.session.map.serialize(), self.session.param)
+        if key != self._critical_points_key:
+            self._critical_points_key = key
+            self._critical_points = list(
+                self.session.map.distinct_critical_points(self.session.param))
+            self._orbit_traces = None   # stale -- lazily recomputed below if still wanted
+        if self._trace_orbits and self._orbit_traces is None:
+            self._orbit_traces = [self._trace_orbit(z0) for z0 in self._critical_points]
+
+    def _trace_orbit(self, z0: complex) -> list[complex]:
+        points = [z0]
+        z = z0
+        for _ in range(CRITICAL_ORBIT_TRACE_STEPS):
+            if math.isinf(z.real) or math.isinf(z.imag) or math.isnan(z.real) or math.isnan(z.imag):
+                break   # infinity (or a NaN escape) has no further finite orbit to draw
+            z = self.session.map.eval(z, self.session.param)
+            points.append(z)
+        return points
+
+    def set_show_critical_points(self, show: bool) -> None:
+        self._show_critical_points = show
+        self.update()
+
+    def set_trace_orbits(self, trace: bool) -> None:
+        self._trace_orbits = trace
+        self.refresh_critical_points()   # lazily fills in traces if just turned on
+        self.update()
+
     # ---- painting --------------------------------------------------------------
     def set_image(self, payload, buffer_viewport: cdx.Viewport) -> None:
         # Reads CURRENT session state, not whatever was active when the
@@ -435,6 +524,44 @@ class ImageView(QWidget):
             pen.setWidth(1)
             painter.setPen(pen)
             painter.drawRect(self._rubber_band_rect)
+        self._paint_critical_point_overlay(painter)
+
+    def _should_draw_critical_points(self) -> bool:
+        # Critical points are objects of the DYNAMICAL plane -- a pixel on
+        # the parameter plane is a PARAMETER, not a point the map acts on,
+        # so "the map's critical point at this pixel" isn't a meaningful
+        # thing to mark there (see P5c's own spec on this exact
+        # distinction). False on those modes, not an error -- the
+        # checkboxes stay checked/available for whenever the user switches
+        # back to a dynamical-plane mode.
+        return self._show_critical_points and self.session.render_mode not in PARAMETER_PLANE_MODES
+
+    def _paint_critical_point_overlay(self, painter: QPainter) -> None:
+        if not self._should_draw_critical_points():
+            return
+
+        def finite(w: complex) -> bool:
+            return math.isfinite(w.real) and math.isfinite(w.imag)
+
+        if self._trace_orbits and self._orbit_traces:
+            trace_pen = QPen(QColor(255, 255, 255, 160))
+            trace_pen.setWidth(1)
+            painter.setPen(trace_pen)
+            for trace in self._orbit_traces:
+                finite_points = [self._complex_to_display_pixel(w) for w in trace if finite(w)]
+                for a, b in zip(finite_points, finite_points[1:]):
+                    painter.drawLine(a, b)
+
+        marker_pen = QPen(QColor(0, 0, 0))
+        marker_pen.setWidth(2)
+        painter.setPen(marker_pen)
+        painter.setBrush(QColor(255, 255, 255))
+        r = CRITICAL_POINT_MARKER_RADIUS
+        for w in self._critical_points:
+            if not finite(w):
+                continue   # infinity is a valid critical point but has no finite screen position
+            pixel = self._complex_to_display_pixel(w)
+            painter.drawEllipse(pixel, r, r)
 
     # ---- scroll zoom, cursor-anchored -------------------------------------------
     def wheelEvent(self, event) -> None:
@@ -568,6 +695,7 @@ class SandboxWindow(QMainWindow):
         self._debounce_timer.timeout.connect(self._start_render)
 
         self._build_ui()
+        self.image_view.refresh_critical_points()
         self._update_status_bar()
         self._start_render()
 
@@ -606,6 +734,14 @@ class SandboxWindow(QMainWindow):
         reset_button = QPushButton("Reset View", self)
         reset_button.clicked.connect(self._reset_view)
         toolbar.addWidget(reset_button)
+
+        self.critical_points_checkbox = QCheckBox("Critical Points", self)
+        self.critical_points_checkbox.toggled.connect(self.image_view.set_show_critical_points)
+        toolbar.addWidget(self.critical_points_checkbox)
+        self.trace_orbits_checkbox = QCheckBox("Trace Orbits", self)
+        self.trace_orbits_checkbox.toggled.connect(self.image_view.set_trace_orbits)
+        toolbar.addWidget(self.trace_orbits_checkbox)
+
         self.addToolBar(toolbar)
 
         self.statusBar().showMessage("")
@@ -651,6 +787,8 @@ class SandboxWindow(QMainWindow):
         # user next looks at the Facts tab without paying for a recompute
         # on every keystroke's worth of edits.
         self.facts_panel.refresh()
+        # Same memoization property -- see ImageView.refresh_critical_points.
+        self.image_view.refresh_critical_points()
 
     # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
     def _on_tab_changed(self, index: int) -> None:
@@ -676,6 +814,7 @@ class SandboxWindow(QMainWindow):
         # Apply already get.
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
+        self.image_view.refresh_critical_points()
         self._update_status_bar()
         self._debounce_timer.stop()
         self._start_render()

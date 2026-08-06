@@ -16,6 +16,7 @@ plugin search path):
 
 from __future__ import annotations
 
+import math
 import tempfile
 import threading
 import time
@@ -201,6 +202,75 @@ def main() -> None:
     bottom_right = view._pixel_to_complex(QPoint(400, 400))
     check(close(bottom_right, complex(1.5, -1.5), 1e-2),
           "bottom-right pixel is (center.real+scale, center.imag-scale)")
+
+    for w in (complex(0.3, -0.2), complex(-1.0, 1.0), complex(0.0, 0.0)):
+        px = view._complex_to_display_pixel(w)
+        back = view._pixel_to_complex(px)
+        check(abs(back - w) < 1e-9,
+              f"_complex_to_display_pixel/_pixel_to_complex round-trip exactly for {w}")
+
+    # ---- critical-point overlay: cache, orbit tracing, plane gating ----------------
+    print("\ncritical-point overlay:")
+    overlay_session = Session()
+    overlay_session.map = cdx.RationalMap.mandelbrot()
+    overlay_session.param = -1 + 0j   # the basilica: critical point 0, period-2 cycle 0 <-> -1
+    overlay_session.set_render_mode("julia")
+    overlay_view = ImageView(overlay_session)
+
+    check(overlay_view._should_draw_critical_points() is False,
+          "overlay is off by default even in a dynamical-plane mode")
+    overlay_view.set_show_critical_points(True)
+    check(overlay_view._should_draw_critical_points() is True,
+          "enabling the checkbox turns it on in a dynamical-plane mode")
+
+    overlay_session.set_render_mode("parameter")
+    check(overlay_view._should_draw_critical_points() is False,
+          "the overlay is suppressed on the PARAMETER plane -- critical points are dynamical-"
+          "plane objects, per P5c's own spec")
+    overlay_session.set_render_mode("parameter_greens")
+    check(overlay_view._should_draw_critical_points() is False,
+          "also suppressed on parameter_greens (the other parameter-plane mode)")
+    overlay_session.set_render_mode("basin")
+    check(overlay_view._should_draw_critical_points() is True,
+          "shown again on basin mode -- basin pixels ARE dynamical-plane initial conditions")
+    overlay_session.set_render_mode("julia")
+
+    overlay_view.refresh_critical_points()
+    check(0j in overlay_view._critical_points
+         and any(math.isinf(z.real) for z in overlay_view._critical_points),
+          "mandelbrot()'s critical points are 0 and infinity, matching cdx's own "
+          "distinct_critical_points for this map")
+    check(overlay_view._orbit_traces is None,
+          "orbit traces are NOT computed until tracing is actually turned on")
+
+    key_before = overlay_view._critical_points_key
+    points_before = overlay_view._critical_points   # SAME list object if truly memoized
+    overlay_session.viewport = cdx.Viewport(complex(0.4, 0.4), 0.2, 41)   # pan/zoom only
+    overlay_view.refresh_critical_points()
+    check(overlay_view._critical_points_key == key_before,
+          "panning/zooming (viewport only) never changes the (map, param) cache key")
+    check(overlay_view._critical_points is points_before,
+          "-- and therefore never re-root-finds: the SAME list object survives a pan/zoom-"
+          "triggered refresh call, not just an equal one")
+
+    overlay_view.set_trace_orbits(True)
+    check(overlay_view._orbit_traces is not None, "turning tracing on lazily fills in the traces")
+    zero_trace = next(t for t in overlay_view._orbit_traces if t[0] == 0j)
+    check(zero_trace[1] == -1 + 0j and zero_trace[2] == 0j,
+          "the critical point 0's orbit traces the basilica's actual period-2 cycle: 0 -> -1 -> 0")
+
+    inf_trace = next(t for t in overlay_view._orbit_traces
+                     if math.isinf(t[0].real) or math.isinf(t[0].imag))
+    check(len(inf_trace) == 1,
+          "infinity's own orbit trace stops immediately (nothing further to evaluate at "
+          "infinity) rather than crashing or looping")
+
+    overlay_session.map = cdx.RationalMap.newton_cubic()
+    overlay_view.refresh_critical_points()
+    check(overlay_view._critical_points_key != key_before,
+          "changing the MAP (not just the viewport) invalidates the cache key")
+    check(overlay_view._critical_points is not points_before,
+          "and genuinely recomputes -- a different list object, not the stale one")
 
     # ---- cursor-anchored zoom formula --------------------------------------------
     print("\ncursor-anchored zoom:")
@@ -612,6 +682,21 @@ def main() -> None:
     window._update_status_bar()
     check("overflowed" in window.statusBar().currentMessage(),
           "the status bar surfaces the unnormalized warning once the flag is actually False")
+
+    # ---- critical-point overlay toolbar checkboxes -------------------------------
+    print("\ncritical-point overlay checkboxes:")
+    check(window.image_view._show_critical_points is False,
+          "the overlay starts off, matching the unchecked checkbox")
+    window.critical_points_checkbox.setChecked(True)
+    check(window.image_view._show_critical_points is True,
+          "checking the toolbar checkbox actually reaches image_view's own flag")
+    window.trace_orbits_checkbox.setChecked(True)
+    check(window.image_view._trace_orbits is True,
+          "checking the trace-orbits checkbox reaches image_view's own flag")
+    check(window.image_view._orbit_traces is not None,
+          "checking it also triggers the lazy orbit-trace computation via set_trace_orbits")
+    window.critical_points_checkbox.setChecked(False)
+    check(window.image_view._show_critical_points is False, "unchecking turns it back off")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
