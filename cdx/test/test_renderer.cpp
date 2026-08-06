@@ -130,6 +130,90 @@ int main() {
               "three basins are near-equal in area (rotational symmetry)");
     }
 
+    // ---- basin shading: the iterations out-param -----------------------------
+    std::printf("\nrender_basin's iterations out-param (basin shading):\n");
+    {
+        std::vector<Cycle> cyc = {
+            {{{1.0, 0.0}}, 1},
+            {{{-0.5, 0.8660254037844386}}, 2},
+            {{{-0.5, -0.8660254037844386}}, 3},
+        };
+        Renderer r(Map(Family::Newton3, {0.0, 0.0}),
+                   Viewport{{0.0, 0.0}, 2.0, 201},
+                   RenderSettings{200, 2.0, 1e-6, 0});
+
+        // Passing nullptr (the default) must behave EXACTLY as before --
+        // no crash, no change to the primary result -- confirming the new
+        // parameter is opt-in, not a silent behaviour change for every
+        // existing caller that doesn't ask for it.
+        Image without = r.render_basin(cyc);
+
+        Image iters;
+        Image with = r.render_basin(cyc, &iters);
+        check(without.width == with.width && without.height == with.height,
+              "passing `iterations` doesn't change the primary result's shape");
+        bool same_primary = true;
+        for (size_t i = 0; i < without.data.size(); ++i)
+            if (without.data[i] != with.data[i]) { same_primary = false; break; }
+        check(same_primary,
+              "passing `iterations` doesn't change a single primary-result value");
+
+        check(iters.width == with.width && iters.height == with.height,
+              "iterations is sized to match the primary result");
+
+        long resolved_checked = 0;
+        bool all_positive_where_resolved = true;
+        bool all_within_budget = true;
+        for (int col = 0; col < with.width; ++col) {
+            for (int row = 0; row < with.height; ++row) {
+                const double label = with.at(col, row);
+                const double n = iters.at(col, row);
+                if (n < 1.0 || n > 200.0) all_within_budget = false;
+                if (label > 0.0) {
+                    ++resolved_checked;
+                    if (n < 1.0) all_positive_where_resolved = false;
+                }
+            }
+        }
+        check(resolved_checked > 0, "sanity: at least some pixels resolved to a basin");
+        check(all_positive_where_resolved,
+              "every RESOLVED pixel has a positive iteration count (it took at least one step)");
+        check(all_within_budget,
+              "every iteration count is within [1, max_iter] -- no runaway or zero-init leak");
+
+        // A pixel classified into a basin QUICKLY (starts already close to
+        // a root) must show a SMALLER iteration count than one that takes
+        // the scenic route -- this is what "convergence speed" in basin
+        // shading actually measures, checked directly rather than assumed
+        // from reading the loop.
+        const Cplx near_root(0.99, 0.0);     // essentially already at the root at (1,0)
+        const Cplx far_start(0.01, 0.01);    // near the (repelling) origin -- takes longer
+        auto iters_at = [&](Cplx z0) {
+            Renderer r1(Map(Family::Newton3, {0.0, 0.0}),
+                       Viewport{z0, 1e-9, 1}, RenderSettings{200, 2.0, 1e-6, 0});
+            Image it1;
+            r1.render_basin(cyc, &it1);
+            return it1.at(0, 0);
+        };
+        check(iters_at(near_root) < iters_at(far_start),
+              "a pixel starting near a root resolves in FEWER iterations than one starting "
+              "near the repelling origin -- iterations genuinely measures convergence speed, "
+              "not a constant");
+
+        // An empty cycle list is the one path that returns early, before
+        // the per-pixel loop even runs -- iterations must still come back
+        // correctly SIZED (all zeros), not left default-constructed (0x0).
+        Renderer r_empty(Map(Family::Newton3, {0.0, 0.0}),
+                         Viewport{{0.0, 0.0}, 2.0, 11}, RenderSettings{50, 2.0, 1e-6, 0});
+        Image iters_empty;
+        Image labels_empty = r_empty.render_basin({}, &iters_empty);
+        check(iters_empty.width == labels_empty.width && iters_empty.height == labels_empty.height,
+              "an empty cycle list still sizes `iterations` to match (all zeros), not left 0x0");
+        bool empty_all_zero = true;
+        for (double v : iters_empty.data) if (v != 0.0) { empty_all_zero = false; break; }
+        check(empty_all_zero, "with no cycles, every pixel's iteration count is 0 (nothing ran)");
+    }
+
     // ---- recognize_family: structural fast-path detection -------------------
     std::printf("\nrecognize_family:\n");
     {

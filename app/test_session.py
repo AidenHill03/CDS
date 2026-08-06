@@ -62,8 +62,14 @@ def main() -> None:
     s.param = -1 + 0j   # the basilica
     s.set_render_mode("basin")
     basin = s.render()
-    labels = set(basin.flatten().tolist())
-    check(len(labels) >= 2, "basin render for the basilica finds more than one region")
+    check(basin.shape == (2, 41, 41),
+          "basin render is STACKED: (2, height, width) -- labels, then iterations")
+    labels, iterations = basin[0], basin[1]
+    check(len(set(labels.flatten().tolist())) >= 2,
+          "basin render for the basilica finds more than one region")
+    check(iterations.min() >= 0, "the iterations layer is always non-negative")
+    check(iterations[labels > 0].min() >= 1,
+          "every RESOLVED pixel took at least one iteration to get there")
 
     s.set_render_mode("parameter")
     param_plane = s.render()

@@ -483,10 +483,11 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 // -----------------------------------------------------------------------------
 // Basins
 // -----------------------------------------------------------------------------
-Image Renderer::render_basin(const std::vector<Cycle>& cycles,
+Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations,
                              const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
+    if (iterations) *iterations = Image(res, res);
     if (cycles.empty()) return img;
 
     // Flatten to parallel arrays: better locality in the innermost test.
@@ -510,9 +511,11 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
             const Cplx c = view_.coord(col, row);
             double zr = c.real(), zi = c.imag();
             double label = 0.0;
+            int steps = 0;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 plan.step(zr, zi);
+                steps = n + 1;
 
                 for (int k = 0; k < nattr; ++k) {
                     if (chordal_distance(zr, zi, ar[k], ai[k]) < tol) {
@@ -524,6 +527,7 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles,
                 if (is_bad(zr) || is_bad(zi)) break;
             }
             img.at(col, row) = label;
+            if (iterations) iterations->at(col, row) = static_cast<double>(steps);
         }
     }, cancel);
     return img;

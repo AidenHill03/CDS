@@ -458,13 +458,25 @@ PYBIND11_MODULE(cdx, m) {
              [](const Renderer& r, const std::vector<Cycle>& cycles,
                 std::shared_ptr<CancelToken> cancel) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::gil_scoped_release release;
-                 Image img = r.render_basin(cycles, cp);
-                 py::gil_scoped_acquire acquire;
-                 return image_to_numpy(std::move(img));
+                 Image iterations;
+                 py::array_t<double> labels_arr, iterations_arr;
+                 {
+                     py::gil_scoped_release release;
+                     Image img = r.render_basin(cycles, &iterations, cp);
+                     py::gil_scoped_acquire acquire;
+                     labels_arr = image_to_numpy(std::move(img));
+                     iterations_arr = image_to_numpy(std::move(iterations));
+                 }
+                 return py::make_tuple(labels_arr, iterations_arr);
              },
              py::arg("cycles"), py::arg("cancel") = nullptr,
-             "Basin classification (chordal metric); 0 means unresolved.")
+             "Basin classification (chordal metric). Returns (labels, "
+             "iterations): labels is 0 for unresolved pixels, else the "
+             "cycle id; iterations is the per-pixel iteration count it "
+             "took to resolve (not a meaningful 'convergence speed' where "
+             "labels==0 -- see Renderer::render_basin's own doc comment). "
+             "For basin SHADING: hue from labels, brightness from "
+             "iterations (see app/colour.py's colour_basin).")
 
         .def("render_greens",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {

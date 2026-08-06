@@ -104,26 +104,37 @@ def array_to_qimage(array: np.ndarray, mode: str, settings: Settings, max_iter: 
 
     Dispatches to app.colour by render mode: "julia"/"parameter" are
     escape-time (colour_escape_time, using `settings`' palette/scaling/
-    period); "basin" is categorical basin colouring, FLAT for now (no
-    shading -- render_basin has no per-pixel convergence-speed output yet,
-    see P5c's basin-shading milestone). "greens" still uses the old plain
+    period); "basin" is categorical + SHADED basin colouring (hue = basin
+    id, brightness = convergence speed). "greens" still uses the old plain
     grayscale min-max stretch below, pending P5c's dedicated
     equipotential-band display for Green's-function data -- switching it
     to a real colour treatment happens there, not here, to avoid touching
     this dispatch twice with half-finished Green's-specific settings.
 
+    "basin" mode's `array` is STACKED (see render_map's own docstring):
+    shape (2, height, width), index 0 = labels, index 1 = iterations --
+    unpacked and flipped as two separate 2D layers BEFORE the generic
+    np.flipud path below, since flipud always flips axis 0, which for a
+    3D stacked array is the LAYER axis, not the row axis; flipping the
+    unpacked 2D layers individually (axis 0 IS the row axis there) is what
+    actually produces a correctly oriented image instead of silently
+    swapping labels and iterations.
+
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
     never be a cache key or trigger a re-render, only a re-paint.
     """
+    if mode == "basin":
+        labels = np.flipud(array[0])
+        iterations = np.flipud(array[1])
+        rgb = colour_basin(labels, iterations, max_iter=max_iter,
+                           period=settings.colour_period or None)
+        return _rgb_to_qimage(rgb)
     flipped = np.flipud(array)
     if mode in ("julia", "parameter"):
         rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,
                                  scaling=settings.colour_scaling,
                                  period=settings.colour_period or None)
-        return _rgb_to_qimage(rgb)
-    if mode == "basin":
-        rgb = colour_basin(flipped, iterations=None, max_iter=max_iter)
         return _rgb_to_qimage(rgb)
     return _grayscale_qimage(flipped)
 

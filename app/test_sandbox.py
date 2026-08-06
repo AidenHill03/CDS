@@ -116,15 +116,27 @@ def main() -> None:
     check(img_param.format() == QImage.Format.Format_RGB888,
           "parameter mode gets the same escape-time RGB treatment as julia mode")
 
-    basin_array = np.array([[0.0, 1.0, 2.0]])
+    # render_map's basin mode returns a STACKED (2, height, width) array --
+    # index 0 labels, index 1 the per-pixel iteration count (see
+    # session.render_map's own docstring) -- so array_to_qimage's basin
+    # branch must be fed that same shape, not a plain 2D array.
+    basin_labels = np.array([[0.0, 1.0, 1.0, 2.0]])
+    basin_iters = np.array([[0.0, 3.0, 190.0, 3.0]])
+    basin_array = np.stack([basin_labels, basin_iters])
+    check(basin_array.shape == (2, 1, 4), "sanity: the stacked test array has the expected shape")
+
     basin_img = array_to_qimage(basin_array, "basin", settings, max_iter=200)
     check(basin_img.format() == QImage.Format.Format_RGB888, "basin mode also produces RGB")
     unresolved = basin_img.pixelColor(0, 0)
     check((unresolved.red(), unresolved.green(), unresolved.blue()) == (0, 0, 0),
           "basin mode: an unresolved (label 0) pixel is flat black")
-    b1, b2 = basin_img.pixelColor(1, 0), basin_img.pixelColor(2, 0)
-    check((b1.red(), b1.green(), b1.blue()) != (b2.red(), b2.green(), b2.blue()),
+    b1, b3 = basin_img.pixelColor(1, 0), basin_img.pixelColor(3, 0)
+    check((b1.red(), b1.green(), b1.blue()) != (b3.red(), b3.green(), b3.blue()),
           "basin mode: two different basin ids get visually distinct colours")
+    fast, slow = basin_img.pixelColor(1, 0), basin_img.pixelColor(2, 0)   # same basin id (1)
+    check(fast.red() + fast.green() + fast.blue() > slow.red() + slow.green() + slow.blue(),
+          "basin mode: within the same basin, the FAST-converging pixel (iters=3) is brighter "
+          "than the slow one (iters=190) -- shading actually reaches the displayed image")
 
     greens_array = np.array([[0.5, 5.0]])
     greens_img = array_to_qimage(greens_array, "greens", settings, max_iter=200)
@@ -521,6 +533,17 @@ def main() -> None:
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "switching modes triggers an immediate re-render -- not the debounce, and the "
           "new mode actually produces a displayed image")
+
+    # Basin mode specifically, through the REAL end-to-end pipeline
+    # (RenderTask -> session.render_map's stacked (2,H,W) array ->
+    # array_to_qimage's basin branch), not just the pure-function tests
+    # above -- this is the actual new code path the P5c basin-shading
+    # milestone added, and nothing else exercises it live.
+    window.image_view._pixmap = None
+    window.mode_combo.setCurrentText("basin")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching to basin mode renders and displays successfully end-to-end, with the "
+          "new stacked labels+iterations array flowing all the way through")
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")

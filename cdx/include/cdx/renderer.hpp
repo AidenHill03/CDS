@@ -247,7 +247,21 @@ public:
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.
-    Image render_basin(const std::vector<Cycle>& cycles,
+    //
+    // If `iterations` is given, it is replaced with an Image the same size
+    // as the result, holding the iteration count (n+1, matching
+    // render_julia's own n+1 convention) each pixel took to resolve -- for
+    // BASIN SHADING (hue = basin id from the primary result, brightness =
+    // this convergence speed; see app/colour.py's colour_basin). No extra
+    // computation: the per-pixel loop already counts iterations to decide
+    // when to stop, this just retains that count instead of discarding it.
+    // For an UNRESOLVED pixel (primary result 0), the count is however many
+    // iterations were actually run (max_iter if the orbit neither resolved
+    // nor blew up, fewer if it hit is_bad first) -- not a meaningful
+    // "convergence speed" since nothing converged, callers should treat an
+    // unresolved pixel's shading as undefined and colour it by the primary
+    // result being 0 instead (exactly what colour_basin already does).
+    Image render_basin(const std::vector<Cycle>& cycles, Image* iterations = nullptr,
                        const std::atomic<bool>* cancel = nullptr) const;
 
     // Green's function (dynamical potential). Accumulates log(max(|z|,1))

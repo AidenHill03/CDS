@@ -20,6 +20,8 @@ app/sandbox.py for the actual invocation:
 
 from __future__ import annotations
 
+import numpy as np
+
 import cdx
 from app.render_cache import RenderCache, make_key
 from app.settings import Settings
@@ -108,7 +110,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     produces, so two requests differing only in thread count share a hit.
 
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
-    convention; plot with origin='lower').
+    convention; plot with origin='lower'). Every mode except "basin" returns
+    a plain 2D (height, width) array. "basin" returns a STACKED 3D array,
+    shape (2, height, width): index 0 is the label (0 = unresolved, else the
+    basin/cycle id, per cdx::Renderer::render_basin), index 1 is the
+    iteration count each pixel took to resolve -- for basin SHADING (see
+    app/colour.py's colour_basin). Stacked into one array rather than
+    returned as a tuple so RenderCache (a plain CacheKey -> np.ndarray map)
+    and RenderTask's Qt signals (already typed for a single array) need no
+    changes at all -- both already work generically off `.nbytes`/array
+    identity, with no assumption about a specific shape.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -133,7 +144,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         # key (map, param, viewport, settings) skips it entirely, same as
         # skipping render_basin itself.
         cycles = cdx.find_attractors(rational_map, param)
-        array = renderer.render_basin(cycles, cancel)
+        labels, iterations = renderer.render_basin(cycles, cancel)
+        array = np.stack([labels, iterations])
     elif mode == "greens":
         array, _normalized = renderer.render_greens(cancel=cancel)
     else:
