@@ -6,6 +6,7 @@ cmake-build-*/
 *.so
 *.dylib
 *.dll
+*.pyd
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -28,6 +29,9 @@ dist/
 
 # ---- macOS ----
 .DS_Store
+
+# ---- local tooling state (per-developer, never shared) ----
+.claude/
 
 # ---- outputs ----
 *.mp4
