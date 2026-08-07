@@ -50,20 +50,28 @@ cdx_extension = cdx_extension_candidates[0]
 
 a = Analysis(
     ["app/sandbox.py"],
-    # cdx_build_dir MUST come before repo_root here. repo_root is needed
-    # so app.* absolute imports resolve, but repo_root also contains the
-    # cdx/ C++ SOURCE tree (include/, src/, python/, test/, build/, no
-    # __init__.py) -- Python's import system treats that as a valid
-    # (empty) implicit namespace package named "cdx". With repo_root
-    # searched first, `import cdx` during Analysis resolved to that empty
-    # namespace package instead of the real compiled extension, and
-    # PyInstaller then froze in a placeholder "cdx" with none of its real
-    # attributes -- confirmed as the cause of an early packaged build's
+    # cdx_extension.parent (NOT cdx_build_dir itself) MUST come before
+    # repo_root here. repo_root is needed so app.* absolute imports
+    # resolve, but repo_root also contains the cdx/ C++ SOURCE tree
+    # (include/, src/, python/, test/, build/, no __init__.py) -- Python's
+    # import system treats that as a valid (empty) implicit namespace
+    # package named "cdx". With repo_root searched first (or with the
+    # extension's real directory missing from the path at all), `import
+    # cdx` during Analysis resolves to that empty namespace package
+    # instead of the real compiled extension, and PyInstaller then
+    # freezes in a placeholder "cdx" with none of its real attributes --
+    # confirmed as the cause of an early packaged macOS build's
     # "AttributeError: module 'cdx' has no attribute 'FamilyLibrary'"
-    # crash: cdx/build was never on pathex at all, so the .so was only
-    # ever bundled via the explicit `binaries` entry below, never actually
-    # resolved as what `import cdx` means.
-    pathex=[str(cdx_build_dir), str(repo_root)],
+    # crash (cdx_build_dir was on pathex there, but the .so lived directly
+    # under it, so that accidentally worked) and, separately, a v0.5.0-
+    # beta.1 CI failure on Windows: cdx_build_dir alone does NOT contain
+    # the extension there -- CMake's default Windows generator (Visual
+    # Studio, multi-config) puts it under cdx/build/Release/ instead, so
+    # cdx_build_dir being on pathex resolved nothing there either.
+    # cdx_extension.parent is correct on every layout because it points
+    # at wherever the file actually was FOUND (by the glob above), not
+    # wherever it was assumed to be.
+    pathex=[str(cdx_extension.parent), str(repo_root)],
     binaries=[(str(cdx_extension), ".")],
     datas=[],
     hiddenimports=[],
@@ -127,6 +135,47 @@ if _mismatch:
 else:
     print("complexdynamics.spec: Qt plugin directory looks consistent with this PySide6 "
           "install -- no substitution needed.")
+
+# ---- Linux: explicitly bundle libxcb-cursor.so.0 -------------------------
+#
+# CI observed (v0.5.0-beta.1, ubuntu-latest): the packaged app aborted at
+# launch with "qt.qpa.plugin: From 6.5.0, xcb-cursor0 or libxcb-cursor0 is
+# needed to load the Qt xcb platform plugin" / "Could not load the Qt
+# platform plugin 'xcb' ... even though it was found" -- despite the
+# system libxcb-cursor0 package being installed on the SAME runner just
+# before packaging. PyInstaller's automatic Linux dependency walk (ldd-
+# based, following direct link-time dependencies) does not pick this one
+# up, because Qt's xcb platform plugin dlopen()s it itself at runtime
+# rather than linking it directly -- the same class of "PyInstaller's
+# automatic collection misses a plugin's own runtime dependency" issue
+# the Qt-plugin substitution above exists for, just via dlopen instead of
+# a wrong bundled version. Located via ldconfig on THIS SAME build
+# machine, so the bundled copy's ABI matches every other bundled xcb-
+# family library exactly, rather than trusting whatever happens to be (or
+# not be) on an end user's system at run time.
+if sys.platform.startswith("linux"):
+    import subprocess
+    try:
+        _ldconfig_out = subprocess.run(
+            ["ldconfig", "-p"], check=True, capture_output=True, text=True).stdout
+    except Exception as _exc:
+        print(f"complexdynamics.spec: ldconfig -p failed ({_exc}); cannot bundle "
+              f"libxcb-cursor.so.0 explicitly")
+        _ldconfig_out = ""
+    _xcb_cursor_path = None
+    for _line in _ldconfig_out.splitlines():
+        if "libxcb-cursor.so.0" in _line and "=>" in _line:
+            _xcb_cursor_path = _line.split("=>", 1)[1].strip()
+            break
+    if _xcb_cursor_path and Path(_xcb_cursor_path).is_file():
+        print(f"complexdynamics.spec: bundling {_xcb_cursor_path} explicitly (Qt's "
+              f"xcb plugin dlopen()s it; PyInstaller's automatic ldd-based walk does "
+              f"not find it on its own).")
+        a.binaries.append(("libxcb-cursor.so.0", _xcb_cursor_path, "BINARY"))
+    else:
+        print("complexdynamics.spec: libxcb-cursor.so.0 not found via ldconfig -- if "
+              "the packaged app fails to load the xcb platform plugin, install "
+              "libxcb-cursor0 on the build machine first.")
 
 pyz = PYZ(a.pure, a.zipped_data)
 

@@ -88,6 +88,42 @@ jobs:
           PLUGDIR=$(python -c "import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), 'Qt', 'plugins', 'platforms'))")
           echo "path=$PLUGDIR" >> "$GITHUB_OUTPUT"
 
+      # The compiled extension's location differs by platform (v0.5.0-
+      # beta.1 CI failure, confirmed): a plain .so directly under
+      # cdx/build/ on macOS/Linux, but a .pyd under cdx/build/Release/ on
+      # Windows (CMake's default Windows generator, Visual Studio, is
+      # multi-config). A hardcoded `PYTHONPATH: cdx/build` finds nothing
+      # on Windows -- and `python -m app.X` still "succeeds" at `import
+      # cdx` anyway, because it also prepends the CURRENT WORKING
+      # DIRECTORY (the repo root) to sys.path, where the cdx/ C++ SOURCE
+      # tree (include/, src/, python/, test/, build/, no __init__.py)
+      # resolves as an empty implicit namespace package -- the exact same
+      # failure mode complexdynamics.spec's own pathex comment documents
+      # for PyInstaller's Analysis phase, just hit here via a completely
+      # different mechanism. It silently "works" until the first module
+      # that actually touches a real cdx.* symbol (app.test_complex_field,
+      # here) raises AttributeError instead of ModuleNotFoundError -- easy
+      # to misread as a missing feature rather than the wrong module
+      # entirely. Located by the SAME glob logic complexdynamics.spec
+      # itself uses, so both stay correct on the same layout without
+      # duplicating an assumption about where the build puts the file.
+      - name: Locate the built cdx extension
+        shell: bash
+        id: cdx_ext
+        run: |
+          DIR=$(python -c "
+          import glob, os, sys
+          candidates = (glob.glob('cdx/build/cdx.cpython-*.so') +
+                        glob.glob('cdx/build/cdx.cp*.pyd') +
+                        glob.glob('cdx/build/*/cdx.cpython-*.so') +
+                        glob.glob('cdx/build/*/cdx.cp*.pyd'))
+          if not candidates:
+              sys.exit('no built cdx extension found under cdx/build')
+          print(os.path.dirname(os.path.abspath(sorted(candidates)[0])))
+          ")
+          echo "found cdx extension directory: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
       # Offscreen -- this is testing APPLICATION LOGIC (every app/test_*.py
       # module), not platform-plugin packaging, so no real display is
       # needed here. QT_QPA_PLATFORM_PLUGIN_PATH is set defensively (the
@@ -100,7 +136,7 @@ jobs:
         shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
-          PYTHONPATH: cdx/build
+          PYTHONPATH: ${{ steps.cdx_ext.outputs.dir }}
         run: |
           export QT_QPA_PLATFORM_PLUGIN_PATH="${{ steps.qt_plugins.outputs.path }}"
           set -e
@@ -116,7 +152,7 @@ jobs:
       - name: Package the app (PyInstaller)
         shell: bash
         env:
-          PYTHONPATH: cdx/build
+          PYTHONPATH: ${{ steps.cdx_ext.outputs.dir }}
         run: pyinstaller complexdynamics.spec --noconfirm
 
       # THE gate: a bundle that does not open is a failed build, full
@@ -158,11 +194,18 @@ jobs:
       # version" bundling bug this project already hit once; the whole
       # point of this gate is to test what a real user's launch actually
       # does.
+      # QT_DEBUG_PLUGINS=1: if complexdynamics.spec's explicit
+      # libxcb-cursor.so.0 bundling (added after the v0.5.0-beta.1 CI
+      # failure) doesn't fully resolve the xcb platform plugin load, this
+      # makes the NEXT failure's log self-diagnosing (the same technique
+      # that found the macOS Qt-version-mismatch bug) instead of another
+      # round of guessing which library is actually missing.
       - name: Launch self-test gate (Linux, under Xvfb)
         if: runner.os == 'Linux'
         shell: bash
         env:
           CDX_VERIFY_LAUNCH_SELFTEST: "1"
+          QT_DEBUG_PLUGINS: "1"
         run: |
           set +e
           OUT=$(xvfb-run -a dist/ComplexDynamics/ComplexDynamics 2>&1)
