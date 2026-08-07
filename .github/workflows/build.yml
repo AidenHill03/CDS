@@ -47,9 +47,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xvfb zip \
-            libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
-            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
-            libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3
+            libegl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3
+      # v0.5.0-beta.2's CI run confirmed the fix above: QT_DEBUG_PLUGINS=1
+      # on the Linux self-test step (see that step below) showed the ACTUAL
+      # failure was "libxkbcommon-x11.so.0: cannot open shared object file"
+      # -- Qt's own "xcb-cursor0 or libxcb-cursor0 is needed" message is a
+      # canned fallback string it prints whenever the xcb platform
+      # integration fails to load for ANY reason, not a precise diagnosis;
+      # trusting it literally (the previous round's libxcb-cursor0
+      # installation and complexdynamics.spec's explicit bundling of
+      # libxcb-cursor.so.0) treated a symptom that wasn't actually the
+      # blocker. libxkbcommon0 (the base library, already installed) does
+      # NOT provide the separate X11-integration library Qt6's xcb plugin
+      # also needs -- libxkbcommon-x11-0 does.
 
       - name: Configure cdx
         run: cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON -DCMAKE_BUILD_TYPE=Release
