@@ -481,33 +481,31 @@ PYBIND11_MODULE(cdx, m) {
         .def("render_greens",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 bool normalized = false;
                  py::array_t<double> arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_greens(&normalized, cp);
+                     Image img = r.render_greens(cp);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
                  }
-                 return py::make_tuple(arr, normalized);
+                 return arr;
              },
              py::arg("cancel") = nullptr,
-             "Green's function. Returns (array, normalized); normalized is "
-             "False when degree^max_iter overflowed and the values are "
-             "comparable only within this image.")
+             "Green's function (dynamical escape-rate potential), "
+             "G_f(z) = lim d^-n log+|f^n(z)|, normalized at each pixel's "
+             "own escape iteration. Non-escaping pixels are exactly 0.")
 
         .def("render_parameter_greens",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 bool normalized = false;
                  py::array_t<double> arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter_greens(&normalized, cp);
+                     Image img = r.render_parameter_greens(cp);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
                  }
-                 return py::make_tuple(arr, normalized);
+                 return arr;
              },
              py::arg("cancel") = nullptr,
              "The family escape-rate function on the PARAMETER plane (G_M(c) "
@@ -515,8 +513,7 @@ PYBIND11_MODULE(cdx, m) {
              "DIFFERENT space from render_greens: the pixel is a parameter, "
              "the orbit starts at THAT parameter's critical point (like "
              "render_parameter), and the accumulated quantity is that "
-             "critical orbit's escape rate. Returns (array, normalized), "
-             "same overflow-guard semantics as render_greens.");
+             "critical orbit's escape rate.");
 
     // ---- analysis layer ------------------------------------------------------
     py::class_<FindAttractorsOptions>(m, "FindAttractorsOptions")

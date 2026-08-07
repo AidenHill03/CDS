@@ -127,16 +127,12 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         pixel took to resolve -- for basin SHADING (see app/colour.py's
         colour_basin). Stacked into one array rather than returned as a
         tuple so byte-accounting stays simple (a single array's .nbytes).
-      - "greens"/"parameter_greens" return a (array, normalized) TUPLE,
-        the same shape cdx.Renderer.render_greens/render_parameter_greens
-        themselves already return -- normalized is False when
-        degree^max_iter overflowed (see those methods' own doc comments)
-        and the app should warn rather than silently show values that are
-        comparable only within this one image. Unlike "basin" this is a
-        genuine tuple, not stacked into the array, since the second value
-        is a single bool, not a second per-pixel field -- RenderCache
-        (see its own CachedValue type) and RenderTask's Qt signals both
-        already handle "array, or (array, small metadata)" generically.
+      - "greens"/"parameter_greens" return a plain 2D array, the escape-
+        rate potential G(z) (or G_M(c) on the parameter plane) -- see
+        cdx.Renderer.render_greens/render_parameter_greens's own doc
+        comments. Normalized per-pixel at each pixel's own escape
+        iteration, so unlike the old accumulate/degree^max_iter form
+        there is no overflow case and nothing to warn about.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -164,11 +160,9 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         labels, iterations = renderer.render_basin(cycles, cancel)
         array = np.stack([labels, iterations])
     elif mode == "greens":
-        g, normalized = renderer.render_greens(cancel=cancel)
-        array = (g, normalized)
+        array = renderer.render_greens(cancel=cancel)
     elif mode == "parameter_greens":
-        g, normalized = renderer.render_parameter_greens(cancel=cancel)
-        array = (g, normalized)
+        array = renderer.render_parameter_greens(cancel=cancel)
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 

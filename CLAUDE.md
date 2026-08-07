@@ -45,9 +45,24 @@ rendering.
 - **Marker/overlay plotting expands axes limits**, silently breaking
   drag-zoom because the axes limits no longer match the rendered window. Pin
   limits after drawing any overlay.
-- **`deg^max_iter` overflows** double for even moderate `max_iter` (2^200 is
-  out of range). Green's-function normalization must detect this and report
-  unnormalized rather than silently producing Inf.
+- **Green's function must normalize at each pixel's own escape iteration,
+  not against one global `degree^max_iter`.** The original MATLAB-ported
+  form accumulated `log(max(|z|,1))` over the whole orbit and divided by
+  `degree^max_iter` once at the end. That wasn't just overflow-prone
+  (`deg^max_iter` blows past double range for even moderate `max_iter` —
+  2^200 is already out of range) — it was mathematically wrong: on
+  z²+c the accumulated sum saturates around 58 while `degree^max_iter`
+  is astronomically larger, so `G` came out ~1e-59 everywhere, a
+  constant field that renders flat gray at any colour scaling. The
+  correct escape-rate potential is `G(z) = log|z_n| / degree^n`, using
+  the pixel's OWN escape iteration `n`, not `max_iter` — non-escaping
+  pixels are exactly 0. This also removes the overflow case entirely
+  (`degree^n` is only ever evaluated at one pixel's own, usually small,
+  escape step) rather than needing to detect and report it. Verify any
+  future change here against the defining identity `G(f(z)) = degree ·
+  G(z)` for an escaping point — a much stronger check than any golden
+  image, and the one that would have caught the original formula
+  immediately.
 - **Click-vs-drag thresholds belong in screen pixels**, not data units;
   otherwise deep zoom reinterprets ordinary drags as clicks.
 - **Zoom has a real double-precision floor** (~1e-14 relative). This is

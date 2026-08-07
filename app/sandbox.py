@@ -108,15 +108,10 @@ def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
 
 
 def array_to_qimage(payload, mode: str, settings: Settings,
-                    max_iter: int) -> tuple[QImage, bool | None]:
+                    max_iter: int) -> QImage:
     """Converts a cdx render payload (see session.render_map's own
     docstring for what `payload` actually is per mode) into a displayable,
-    COLOURED QImage. Returns (image, normalized): `normalized` is only
-    meaningful for "greens"/"parameter_greens" (see render_map/
-    cdx::Renderer::render_greens's own doc comments for what the flag
-    means -- False means degree^max_iter overflowed and the values are
-    comparable only within this one image); it's None for every other
-    mode, which have no such concept.
+    COLOURED QImage.
 
     cdx render arrays have row 0 at the BOTTOM (matching Viewport::coord;
     see CLAUDE.md) but QImage has row 0 at the TOP -- flip vertically first,
@@ -146,8 +141,8 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     unpacked 2D layers individually (axis 0 IS the row axis there) is what
     actually produces a correctly oriented image instead of silently
     swapping labels and iterations. "greens"/"parameter_greens" payloads
-    are a plain (array, normalized) TUPLE, not stacked -- only the array
-    itself needs flipping.
+    are a plain 2D array like "julia"/"parameter", just with a different
+    colour treatment (see below).
 
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
@@ -158,21 +153,20 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         iterations = np.flipud(payload[1])
         rgb = colour_basin(labels, iterations, max_iter=max_iter,
                            period=settings.colour_period or None)
-        return _rgb_to_qimage(rgb), None
+        return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
-        g, normalized = payload
-        flipped = np.flipud(g)
+        flipped = np.flipud(payload)
         rgb = colour_scalar_field(flipped, palette=settings.colour_palette,
                                   band_width=settings.greens_band_width,
                                   period_bands=settings.greens_period_bands,
                                   contour=settings.greens_contour)
-        return _rgb_to_qimage(rgb), normalized
+        return _rgb_to_qimage(rgb)
     flipped = np.flipud(payload)
     if mode in ("julia", "parameter"):
         rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,
                                  scaling=settings.colour_scaling,
                                  period=settings.colour_period or None)
-        return _rgb_to_qimage(rgb), None
+        return _rgb_to_qimage(rgb)
     raise AssertionError(f"unreachable: mode={mode!r}")
 
 
@@ -335,14 +329,6 @@ class ImageView(QWidget):
         # None exactly when _pixmap is None; kept alongside it because
         # _buffer_source_rect needs both to map back onto the display.
         self._buffer_viewport: cdx.Viewport | None = None
-        # Set by set_image from array_to_qimage's own return value -- only
-        # meaningful for "greens"/"parameter_greens" (see array_to_qimage's
-        # docstring), None otherwise. SandboxWindow's status bar reads this
-        # to warn when a Green's-function render's degree^max_iter
-        # normalization overflowed (see cdx::Renderer::render_greens'
-        # own doc comment) rather than silently showing values that are
-        # only comparable within this one image.
-        self._last_normalized: bool | None = None
         # See set_image's own comment -- the raw numeric payload + mode it
         # was rendered under, for the cursor readout's sampling.
         self._buffer_payload = None
@@ -453,8 +439,6 @@ class ImageView(QWidget):
         payload = self._buffer_payload
         if mode == "basin":
             height, width = payload[0].shape
-        elif mode in ("greens", "parameter_greens"):
-            height, width = payload[0].shape
         else:
             height, width = payload.shape
 
@@ -470,7 +454,7 @@ class ImageView(QWidget):
             label = payload[0][raw_row, col]
             return "unresolved" if label == 0.0 else f"basin = {int(label)}"
         if mode in ("greens", "parameter_greens"):
-            value = payload[0][raw_row, col]
+            value = payload[raw_row, col]
             return f"potential = {value:.4g}"
         return None
 
@@ -603,11 +587,10 @@ class ImageView(QWidget):
         # the request_id check in _on_partial_ready/_on_full_ready before
         # set_image is ever called -- this can never run with a mode that
         # doesn't match what was actually rendered.
-        image, normalized = array_to_qimage(payload, self.session.render_mode, self.session.settings,
-                                            self.session.render_settings.max_iter)
+        image = array_to_qimage(payload, self.session.render_mode, self.session.settings,
+                                self.session.render_settings.max_iter)
         self._pixmap = QPixmap.fromImage(image)
         self._buffer_viewport = buffer_viewport
-        self._last_normalized = normalized
         # Raw payload + the mode it was rendered under, kept for the cursor
         # readout's mode-dependent second field (escape value / basin
         # index / potential) -- sampling needs the actual numbers, which
@@ -1094,10 +1077,6 @@ class SandboxWindow(QMainWindow):
         if request_id != self._request_id:
             return   # superseded by a newer request; discard
         self.image_view.set_image(payload, buffer_viewport)
-        # Refreshes the unnormalized-Green's-function warning as soon as a
-        # frame actually displays it, not just on the next unrelated
-        # viewport/settings change that happens to also call
-        # _update_status_bar -- see that method's own comment.
         self._update_status_bar()
 
     @Slot(int, object, object)
@@ -1138,14 +1117,6 @@ class SandboxWindow(QMainWindow):
                         "this image is degenerate")
         elif vp.scale <= floor * PRECISION_WARN_MULTIPLE:
             message += f"   ⚠ approaching the precision floor ({floor:.3e})"
-        # image_view._last_normalized is set by set_image from
-        # array_to_qimage's return value (see both docstrings) -- False
-        # only for "greens"/"parameter_greens" when degree^max_iter
-        # overflowed double range; None for every other mode, and for a
-        # greens mode before its first render has completed.
-        if self.image_view._last_normalized is False:
-            message += ("   ⚠ Green's function normalization overflowed at this max_iter -- "
-                        "values are comparable only within this image, not across renders")
         self._status_base_message = message
         self._render_status_bar()
 

@@ -225,9 +225,7 @@ int main() {
         // every single iteration.
         {
             Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{0.0, 0.0}, 0.01, 1}, s);
-            bool ok = false;
-            Image g = r.render_parameter_greens(&ok);
-            check(ok, "a small, well-behaved max_iter normalizes without overflow");
+            Image g = r.render_parameter_greens();
             check(g.at(0, 0) == 0.0, "c=0 (deep in the set) has G_M(c) exactly 0");
         }
 
@@ -272,18 +270,54 @@ int main() {
                   "viewport windows");
         }
 
-        // Overflow guard: degree^max_iter (2^2000) is far outside double
-        // range at a large max_iter -- must report unnormalized rather
-        // than silently producing Inf/NaN. Same contract as render_greens.
+        // A large max_iter (2000, where the old accumulate-then-divide-by-
+        // degree^max_iter form would have overflowed and needed a
+        // normalized=false escape hatch) must still produce a finite,
+        // well-scaled value -- per-pixel normalization at the actual
+        // (small) escape iteration never comes near that overflow.
         {
             RenderSettings s_big{2000, 2.0, 1e-6, 0};
             Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{5.0, 0.0}, 0.01, 1}, s_big);
-            bool ok = true;
-            Image g = r.render_parameter_greens(&ok);
-            check(!ok, "degree^max_iter overflowing sets normalized=false, same as render_greens");
-            check(std::isfinite(g.at(0, 0)),
-                  "the unnormalized fallback value is finite, never Inf or NaN");
+            Image g = r.render_parameter_greens();
+            check(std::isfinite(g.at(0, 0)) && g.at(0, 0) > 0.0,
+                  "a large max_iter still gives a finite, strictly positive G_M(c) for an "
+                  "escaping parameter -- no overflow escape hatch needed any more");
         }
+    }
+
+    // ---- render_greens: escape-rate potential, defining property ------------
+    // G(z) = lim d^-n log+|f^n(z)| satisfies G(f(z)) = d*G(z) for any z whose
+    // orbit escapes -- this is the actual mathematical definition, not an
+    // incidental property, so it is a far stronger check than any golden
+    // image and would have caught the original accumulate/degree^max_iter
+    // formula immediately (that formula did not satisfy this identity at
+    // all).
+    std::printf("\nrender_greens (dynamical escape-rate potential):\n");
+    {
+        RenderSettings s{100, 1e6, 1e-6, 0};
+        // z^2 (a=0): f(z)=z^2, degree 2. Pick a z that escapes quickly under
+        // the huge escape radius above so both z and f(z) resolve within
+        // max_iter with room to spare.
+        Renderer r(Map(Family::Quadratic, {0, 0}), Viewport{{0.0, 0.0}, 1.0, 1}, s);
+
+        auto greens_at = [&](Cplx z) {
+            Renderer rz(Map(Family::Quadratic, {0, 0}), Viewport{z, 1e-9, 1}, s);
+            return rz.render_greens().at(0, 0);
+        };
+
+        const Cplx z(3.0, 1.0);          // escapes immediately under R=1e6
+        const Cplx fz = z * z;           // f(z) = z^2 for a=0
+        const double gz  = greens_at(z);
+        const double gfz = greens_at(fz);
+        check(gz > 0.0 && gfz > 0.0, "both z and f(z) escape, so both G values are nonzero");
+        check(std::abs(gfz - 2.0 * gz) < 1e-6 * std::max(1.0, std::abs(gfz)),
+              "G(f(z)) == degree * G(z) for an escaping point -- the defining "
+              "functional equation of the escape-rate potential");
+
+        // The non-escaping case: 0 stays at 0 forever under z^2 -- G must be
+        // EXACTLY 0, not some vanishingly small nonzero accumulator residue.
+        check(greens_at(Cplx(0.0, 0.0)) == 0.0,
+              "a point that never escapes has G exactly 0, not just small");
     }
 
     // ---- recognize_family: structural fast-path detection -------------------

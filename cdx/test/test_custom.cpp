@@ -105,10 +105,8 @@ int main() {
         Renderer built_in(Map(Family::Quadratic, param), v, s);
         Renderer custom(Map::custom(RationalMap::mandelbrot(), param), v, s);
 
-        bool norm_a = false, norm_b = false;
-        const Image a = built_in.render_greens(&norm_a);
-        const Image b = custom.render_greens(&norm_b);
-        check(norm_a == norm_b, "both agree on whether the normalization overflowed");
+        const Image a = built_in.render_greens();
+        const Image b = custom.render_greens();
         const double frac = mismatch_fraction(a, b, 1e-6);
         std::printf("  mismatch fraction: %.6f\n", frac);
         check(frac < 0.001, "custom-path Green's function matches the built-in fast path");
@@ -146,10 +144,8 @@ int main() {
         Renderer built_in(Map(Family::Quadratic, {0, 0}), v, s);
         Renderer custom(Map::custom(RationalMap::mandelbrot(), {0, 0}), v, s);
 
-        bool norm_a = false, norm_b = false;
-        const Image a = built_in.render_parameter_greens(&norm_a);
-        const Image b = custom.render_parameter_greens(&norm_b);
-        check(norm_a == norm_b, "both agree on whether the normalization overflowed");
+        const Image a = built_in.render_parameter_greens();
+        const Image b = custom.render_parameter_greens();
         const double frac = mismatch_fraction(a, b, 1e-6);
         std::printf("  mismatch fraction: %.6f\n", frac);
         check(frac < 0.001,

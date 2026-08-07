@@ -49,30 +49,20 @@ class CacheStats:
     budget_bytes: int
 
 
-# A cached value is usually a plain ndarray, but a render mode that carries
-# extra per-render metadata alongside its pixels (e.g. "greens"/
-# "parameter_greens" pairing the array with the normalized-vs-overflowed
-# bool -- see app.session.render_map) stores a (ndarray, metadata) tuple
-# instead. Only the array actually costs bytes worth budgeting against; a
-# bool (or any other small metadata payload) is negligible, so this is the
-# ONE place that distinction matters -- every other RenderCache method
-# already treats the stored value as opaque.
-CachedValue = np.ndarray | tuple
+CachedValue = np.ndarray
 
 
 def _nbytes(value: CachedValue) -> int:
-    array = value[0] if isinstance(value, tuple) else value
-    return array.nbytes
+    return value.nbytes
 
 
 class RenderCache:
-    """Maps CacheKey -> a rendered NumPy array (or, for a mode with extra
-    metadata, an (array, metadata) tuple -- see CachedValue), evicting
-    least-recently-USED entries (not least-recently-inserted: a re-fetched
-    entry is moved to the front, same as a normal LRU) once `current_bytes`
-    would exceed `budget_bytes`. Changing the budget down evicts
-    immediately; changing it up just raises the ceiling for future inserts
-    -- existing entries are never touched by a budget change alone.
+    """Maps CacheKey -> a rendered NumPy array, evicting least-recently-USED
+    entries (not least-recently-inserted: a re-fetched entry is moved to the
+    front, same as a normal LRU) once `current_bytes` would exceed
+    `budget_bytes`. Changing the budget down evicts immediately; changing it
+    up just raises the ceiling for future inserts -- existing entries are
+    never touched by a budget change alone.
     """
 
     def __init__(self, budget_bytes: int) -> None:

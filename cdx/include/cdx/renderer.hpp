@@ -264,17 +264,17 @@ public:
     Image render_basin(const std::vector<Cycle>& cycles, Image* iterations = nullptr,
                        const std::atomic<bool>* cancel = nullptr) const;
 
-    // Green's function (dynamical potential), G_f(z). The pixel is an
-    // INITIAL CONDITION on the DYNAMICAL plane -- the orbit starts AT the
-    // pixel, under the map's own BOUND parameter map_.param() (fixed for
-    // the whole render, exactly like render_julia). Accumulates
-    // log(max(|z|,1)) over the orbit and divides by degree^max_iter.
-    //
-    // NOTE: degree^max_iter overflows double for even moderate max_iter
-    // (2^200 is far outside range). When it would overflow, the result is
-    // returned UNNORMALIZED and `normalized` is set false -- values remain
-    // comparable within one image but not across different max_iter.
-    Image render_greens(bool* normalized = nullptr, const std::atomic<bool>* cancel = nullptr) const;
+    // Green's function (dynamical potential), G_f(z) = lim_{n->inf}
+    // d^-n log+|f^n(z)|. The pixel is an INITIAL CONDITION on the
+    // DYNAMICAL plane -- the orbit starts AT the pixel, under the map's
+    // own BOUND parameter map_.param() (fixed for the whole render,
+    // exactly like render_julia). When the orbit escapes at iteration n,
+    // the result is log|z_n| / degree^n; non-escaping pixels are exactly
+    // 0. Normalizing at each pixel's OWN escape iteration (not against a
+    // single degree^max_iter for the whole image) is what makes this the
+    // actual escape-rate potential rather than a near-constant field --
+    // see the .cpp for the measured difference.
+    Image render_greens(const std::atomic<bool>* cancel = nullptr) const;
 
     // The FAMILY ESCAPE-RATE FUNCTION on the PARAMETER plane -- for the
     // quadratic family this is G_M(c), the Mandelbrot set's own Green's
@@ -294,18 +294,18 @@ public:
     //
     // Structurally: render_parameter's per-pixel critical-point/step
     // dispatch (three paths -- recognized/critical-points-fixed/general,
-    // see render_parameter's own comment) with render_greens' accumulate-
-    // and-normalize body substituted for render_parameter's escape test.
-    // NOT a call to either existing method with different arguments.
+    // see render_parameter's own comment) with render_greens' escape-rate-
+    // potential body (per-pixel normalization at its own escape iteration,
+    // see render_greens' own comment) substituted for render_parameter's
+    // escape test. NOT a call to either existing method with different
+    // arguments.
     //
-    // Same overflow guard as render_greens (`normalized` set false, values
-    // returned unnormalized) -- but degree, unlike a per-pixel critical
-    // point, is trustworthy to compute ONCE for the whole render even
-    // here: RationalMap::degree(Cplx a) is purely structural and never
-    // actually reads `a` (see its own implementation), so it cannot
-    // differ from one parameter-plane pixel to the next.
-    Image render_parameter_greens(bool* normalized = nullptr,
-                                  const std::atomic<bool>* cancel = nullptr) const;
+    // degree, unlike a per-pixel critical point, is trustworthy to
+    // compute ONCE for the whole render even here: RationalMap::degree(
+    // Cplx a) is purely structural and never actually reads `a` (see its
+    // own implementation), so it cannot differ from one parameter-plane
+    // pixel to the next.
+    Image render_parameter_greens(const std::atomic<bool>* cancel = nullptr) const;
 
     // Deepest zoom the double-precision grid can still resolve: below this
     // half-width, neighbouring pixels round to the same double and the image
