@@ -12,6 +12,7 @@
 // =============================================================================
 #include "cdx/analysis.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
