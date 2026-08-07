@@ -31,8 +31,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QMain
 import cdx
 from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
+from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel
-from app.library_panel import LibraryPanel
+from app.library_panel import LibraryPanel, default_view_for
 from app.metadata_header import MetadataHeader
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
@@ -315,6 +316,14 @@ class ImageView(QWidget):
     viewport_changed = Signal()
     orbit_changed = Signal()
     cursor_readout_changed = Signal(str)
+    # Emitted with the clicked complex value on a PARAMETER-plane click --
+    # deliberately does NOT set session.param itself (unlike _seed_orbit_at
+    # setting the orbit tracker directly): SandboxWindow._apply_new_param
+    # is the one place that assignment happens, so the plane-click and
+    # field-commit paths funnel through EXACTLY the same logic (reset
+    # viewport, refresh critical points/facts/header, sync the field,
+    # switch to a dynamical mode) rather than two divergent copies of it.
+    param_changed = Signal(complex)
 
     def __init__(self, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
@@ -567,6 +576,19 @@ class ImageView(QWidget):
         self.orbit_changed.emit()
         self.update()
 
+    def refresh_orbit_for_new_param(self) -> None:
+        """Called specifically when `a` changes via the parameter field or
+        a parameter-plane click (SandboxWindow._apply_new_param) -- the
+        counterpart to refresh_orbit_staleness's CLEAR, but recomputes
+        instead: z0 is a persistent, independently-chosen seed (P6's own
+        wording), so its orbit under the NEW map/param is exactly what
+        should be shown, not a blanked overlay. A no-op if no orbit is
+        currently seeded (see OrbitTracker.recompute_current).
+        """
+        self.orbit_tracker.recompute_current(self.session.map, self.session.param)
+        self.orbit_changed.emit()
+        self.update()
+
     def _seed_orbit_at(self, pixel: QPoint) -> None:
         if self.session.render_mode in PARAMETER_PLANE_MODES:
             return   # orbit tracking is a dynamical-plane concept, see its own module docstring
@@ -574,6 +596,11 @@ class ImageView(QWidget):
         self.orbit_tracker.seed(self.session.map, self.session.param, z0)
         self.orbit_changed.emit()
         self.update()
+
+    def _set_param_at(self, pixel: QPoint) -> None:
+        # Only emits -- see param_changed's own comment for why this
+        # doesn't touch session.param itself.
+        self.param_changed.emit(self._pixel_to_complex(pixel))
 
     # ---- painting --------------------------------------------------------------
     def set_image(self, payload, buffer_viewport: cdx.Viewport) -> None:
@@ -765,12 +792,16 @@ class ImageView(QWidget):
             if rect is not None and rect.width() > 4 and rect.height() > 4:
                 self._apply_rubber_band_zoom(rect)
             else:
-                # A genuine CLICK, not a drag -- the one gesture that
-                # previously did nothing at all is exactly "click to seed
-                # an orbit" (P5c's own wording); no separate toggle needed
-                # since there was no prior meaning for this gesture to
-                # conflict with.
-                self._seed_orbit_at(origin)
+                # A genuine CLICK, not a drag -- P6's "symmetry of input":
+                # a click on the DYNAMICAL plane seeds an orbit at z0
+                # (P5c's original "click to seed an orbit"); a click on
+                # the PARAMETER plane sets `a` instead, the gesture that
+                # previously did nothing at all there (_seed_orbit_at's
+                # own early return for PARAMETER_PLANE_MODES).
+                if self.session.render_mode in PARAMETER_PLANE_MODES:
+                    self._set_param_at(origin)
+                else:
+                    self._seed_orbit_at(origin)
 
     def _apply_rubber_band_zoom(self, rect: QRect) -> None:
         top_left = self._pixel_to_complex(rect.topLeft())
@@ -848,6 +879,19 @@ class SandboxWindow(QMainWindow):
         self.image_view = ImageView(self.session, self)
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
         self.image_view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
+        self.image_view.param_changed.connect(self._on_param_changed_by_click)
+        # Keeps the "Orbit seed z0" field showing the CURRENT z0 whenever
+        # one is seeded via a dynamical-plane click (P6's "symmetry of
+        # input": the click path must populate the field, same as the
+        # field committing a value must seed an orbit -- see
+        # _on_z0_field_committed). Also fires on step/clear, both harmless
+        # no-ops here: z0 itself never changes mid-orbit, and clear leaves
+        # state None, which this deliberately does NOT react to -- z0 is a
+        # persistent, independently-chosen seed, and Clear only stops
+        # DRAWING it, it does not retract the choice (see
+        # OrbitTracker.recompute_current's own docstring for the same
+        # principle from the other direction).
+        self.image_view.orbit_changed.connect(self._on_orbit_changed)
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
         self.metadata_header = MetadataHeader(self.session, self)
 
@@ -893,6 +937,25 @@ class SandboxWindow(QMainWindow):
         self.mode_combo.setCurrentText(self.session.render_mode)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         toolbar.addWidget(self.mode_combo)
+
+        # Two always-visible complex-number fields -- NOT buried in the
+        # Terms tab -- the typed half of P6's "symmetry of input": a and
+        # z0 are each settable by typing here OR by clicking a plane (see
+        # ImageView.mouseReleaseEvent/param_changed and _on_orbit_changed),
+        # and the two methods stay in sync through _apply_new_param and
+        # _on_z0_field_committed respectively, never diverging.
+        self.param_field = ComplexField("a =", self.session.param, self)
+        self.param_field.committed.connect(self._on_param_field_committed)
+        toolbar.addWidget(self.param_field)
+        # 0+0j is just a neutral starting DISPLAY -- it does NOT mean an
+        # orbit is seeded there; nothing is seeded until the user commits
+        # this field or clicks the dynamical plane (see _on_orbit_changed,
+        # which is what actually keeps this field truthful once a real
+        # orbit exists).
+        self.z0_field = ComplexField("z0 =", complex(0, 0), self)
+        self.z0_field.committed.connect(self._on_z0_field_committed)
+        toolbar.addWidget(self.z0_field)
+
         reset_button = QPushButton("Reset View", self)
         reset_button.clicked.connect(self._reset_view)
         toolbar.addWidget(reset_button)
@@ -927,6 +990,71 @@ class SandboxWindow(QMainWindow):
 
     def _show_about_dialog(self) -> None:
         AboutDialog(self).exec()
+
+    # ---- parameter a: field commit and parameter-plane click, kept in sync ------
+    def _on_param_field_committed(self, a: complex) -> None:
+        self._apply_new_param(a, switch_to_dynamical=False)
+
+    def _on_param_changed_by_click(self, a: complex) -> None:
+        # Per P6 section 1: a parameter-plane click also switches to the
+        # dynamical plane at that value -- the field-commit path leaves
+        # the current plane alone (typing a value while looking at the
+        # parameter plane doesn't imply "now show me the Julia set").
+        self._apply_new_param(a, switch_to_dynamical=True)
+
+    def _apply_new_param(self, a: complex, *, switch_to_dynamical: bool) -> None:
+        """The ONE place session.param is ever assigned from user input --
+        both the field and the parameter-plane click funnel through this,
+        so they cannot diverge (P6's own requirement). On any change to
+        `a`: reset the dynamical-plane viewport to this map's default (a
+        deep zoom from the PREVIOUS parameter is almost never informative
+        for a new one), refresh critical points/dynamical facts/the
+        metadata header, recompute (not clear) z0's orbit under the new
+        map, and sync the field's own display.
+        """
+        self.session.param = a
+        center, scale = default_view_for(self.session.map.name)
+        vp = self.session.viewport
+        self.session.viewport = cdx.Viewport(center, scale, vp.resolution)
+        self.image_view.refresh_critical_points()
+        self.image_view.refresh_orbit_for_new_param()
+        self.facts_panel.refresh()
+        self.metadata_header.refresh()
+        self.param_field.set_value(a)
+        if switch_to_dynamical and self.session.render_mode in PARAMETER_PLANE_MODES:
+            # Triggers _on_mode_changed, which itself renders -- so this
+            # branch does NOT also call _start_render below; doing both
+            # would fire two render requests for one user action (the
+            # second cancels the first's in-flight generation, so it
+            # would not be WRONG, just a wasted request for a plain
+            # mode-switch).
+            self.mode_combo.setCurrentText("julia")
+        else:
+            self._update_status_bar()
+            self._debounce_timer.stop()
+            self._start_render()
+
+    # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
+    def _on_z0_field_committed(self, z0: complex) -> None:
+        # Same gate _seed_orbit_at itself uses -- orbit tracking is a
+        # dynamical-plane concept; committing a z0 while looking at the
+        # parameter plane is silently a no-op, matching what clicking the
+        # (nonexistent, on that plane) orbit target would also do.
+        if self.session.render_mode in PARAMETER_PLANE_MODES:
+            return
+        self.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
+        self.image_view.orbit_changed.emit()
+        self.image_view.update()
+
+    def _on_orbit_changed(self) -> None:
+        # Keeps the z0 FIELD showing the current z0 whenever a real orbit
+        # exists -- fires on seed/step/clear alike; step leaves z0
+        # unchanged (a harmless re-set to the same value) and clear
+        # deliberately does nothing here (see this connection's own
+        # comment in _build_ui for why the field outlives Clear).
+        state = self.image_view.orbit_tracker.state
+        if state is not None:
+            self.z0_field.set_value(state.z0)
 
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, mode: str) -> None:

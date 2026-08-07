@@ -14,7 +14,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.metadata_header import MetadataHeader, format_metadata_text
+from app.metadata_header import MetadataHeader, describe_parameter_role, format_metadata_text
 from app.session import Session
 
 failures = 0
@@ -85,6 +85,50 @@ def main() -> None:
     check("scratch: 0" in format_metadata_text(empty),
           "a map with no terms shows its own genuinely correct formula, '0' -- not a blank "
           "or broken string")
+
+    # ---- describe_parameter_role: read from the terms, never hardcoded --------------
+    print("\ndescribe_parameter_role (P6 section 2 -- `a` is not assumed to be additive):")
+    check(describe_parameter_role(cdx.RationalMap.mandelbrot()) == "coefficient of z^0",
+          "mandelbrot(): a is the coefficient of z^0 (param_power=1, exponent=0), matching "
+          "the classic z^2+a reading exactly")
+    check(describe_parameter_role(cdx.RationalMap.multibrot(5)) == "coefficient of z^0",
+          "multibrot(5): same additive-constant role, different exponent on the OTHER term")
+
+    mcmullen_role = describe_parameter_role(cdx.RationalMap.mcmullen(2))
+    check("strength" in mcmullen_role and "location" not in mcmullen_role,
+          "mcmullen(2): a multiplies the pole's STRENGTH (param_power=1), never its location "
+          "-- confirmed via the actual term flags, not assumed from the family name")
+
+    check(describe_parameter_role(cdx.RationalMap.newton_cubic()) == "unused by this map",
+          "newton_cubic(): a genuinely has NO effect on this map (no term has param_power != 0 "
+          "or location_is_param) -- confirmed directly against the preset's own C++ "
+          "construction, not assumed just because it's an unusual case")
+
+    # A hand-built map exercising the ONE combination none of the built-in
+    # presets do: a pole whose LOCATION tracks `a` directly.
+    tracking = cdx.RationalMap("tracking")
+    tracking.add_pole(complex(0, 0), complex(1, 0), 1, 0, "tracker")
+    tracking.pole_terms()[0].location_is_param = True
+    check(describe_parameter_role(tracking) == "location of tracker",
+          "location_is_param produces 'location of <label>' -- the one PoleTerm combination "
+          "no built-in preset exercises, checked directly rather than left implicit")
+
+    # A pole with BOTH location_is_param AND a nonzero param_power at once --
+    # both roles must be reported, not just one silently winning.
+    both = cdx.RationalMap("both")
+    both.add_pole(complex(0, 0), complex(1, 0), 1, 2, "p")
+    both.pole_terms()[0].location_is_param = True
+    both_role = describe_parameter_role(both)
+    check("location of p" in both_role and "strength of p" in both_role,
+          "a pole term can depend on `a` in BOTH ways at once (location AND strength) -- "
+          "both are reported, neither shadows the other")
+
+    disabled = cdx.RationalMap("disabled")
+    disabled.add_poly(complex(1, 0), 0, 1, "a")
+    disabled.poly_terms()[0].enabled = False
+    check(describe_parameter_role(disabled) == "unused by this map",
+          "a DISABLED term's param dependence doesn't count -- it has no effect on the map "
+          "as actually evaluated, matching effective_coeff/RationalMap::eval's own enabled check")
 
     # ---- MetadataHeader widget: refresh() actually updates the displayed label ------
     print("\nMetadataHeader widget:")

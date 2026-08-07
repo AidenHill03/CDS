@@ -949,6 +949,87 @@ def main() -> None:
     check("precision floor" not in window.statusBar().currentMessage(),
           "no warning at an ordinary scale")
 
+    # ---- P6: parameter `a` and orbit seed `z0`, symmetry of input -------------------
+    print("\nparameter a field (typed):")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("julia")
+    param_committed = []
+    window.image_view.param_changed.connect(param_committed.append)   # sanity: NOT this path
+
+    window.param_field._line_edit.setText("2-3i")
+    window.param_field._on_editing_finished()
+    check(window.session.param == complex(2, -3),
+          "committing the field is the SAME source of truth session.param reads")
+    check(param_committed == [], "field commit does not go through the plane-click signal path")
+    check(close(window.session.viewport.center, complex(-0.5, 0.0)) and
+          abs(window.session.viewport.scale - 1.5) < 1e-9,
+          "the dynamical-plane viewport resets to this map's own default on a param change")
+    check(window.session.render_mode == "julia",
+          "committing the FIELD (not a plane click) does not switch planes on its own")
+
+    window.param_field._line_edit.setText("not a number")
+    window.param_field._on_editing_finished()
+    check(window.session.param == complex(2, -3),
+          "invalid field input leaves session.param at its last valid value, never zeroed")
+    check(window.param_field._line_edit.styleSheet() != "",
+          "invalid input marks the field itself, rather than crashing or silently doing nothing")
+    window.param_field._line_edit.setText("2-3i")   # restore a valid value for the next section
+    window.param_field._on_editing_finished()
+
+    print("\nparameter-plane click -> sets a, switches planes, populates the field:")
+    window.mode_combo.setCurrentText("parameter")
+    click_pixel = window.image_view._complex_to_display_pixel(complex(-0.1, 0.6)).toPoint()
+    window.image_view._set_param_at(click_pixel)
+    check(close(window.session.param, complex(-0.1, 0.6), 1e-2),
+          "clicking the parameter plane sets session.param to the clicked coordinate")
+    check(window.session.render_mode == "julia",
+          "a parameter-plane click switches straight to the dynamical (julia) plane")
+    check(close(window.param_field.value, window.session.param, 1e-2),
+          "the field is populated with the SAME value the click just set -- the two never diverge")
+
+    print("\ndescribe_parameter_role reaches the live metadata header:")
+    check("coefficient of z^0" in window.metadata_header._label.text(),
+          "mandelbrot()'s role text (P6 section 2) actually reaches the displayed header, "
+          "not just format_metadata_text in isolation")
+
+    print("\norbit seed z0 field (typed) mirrors a dynamical-plane click exactly:")
+    window.image_view.clear_orbit()
+    window.z0_field._line_edit.setText("0.3+0.2i")
+    window.z0_field._on_editing_finished()
+    check(window.image_view.orbit_tracker.state is not None,
+          "committing the z0 field SEEDS an orbit, exactly like a dynamical-plane click does")
+    check(close(window.image_view.orbit_tracker.state.z0, complex(0.3, 0.2), 1e-9),
+          "seeded at the typed value")
+
+    print("\ndynamical-plane click populates the z0 field:")
+    click_pixel2 = window.image_view._complex_to_display_pixel(complex(0.05, -0.05)).toPoint()
+    window.image_view._seed_orbit_at(click_pixel2)
+    check(close(window.z0_field.value, complex(0.05, -0.05), 1e-2),
+          "clicking the dynamical plane populates the z0 field with the clicked point")
+
+    print("\non a change to a: z0's orbit is RECOMPUTED, not blanked:")
+    window.image_view.step_orbit(5)
+    check(window.image_view.orbit_tracker.state.n == 5, "sanity: the orbit has advanced")
+    seeded_z0 = window.image_view.orbit_tracker.state.z0
+    window.param_field._line_edit.setText("-0.75+0i")
+    window.param_field._on_editing_finished()
+    check(window.image_view.orbit_tracker.state is not None,
+          "the orbit overlay survives a param change -- z0 is a persistent, independently "
+          "-chosen seed, not cleared the way a term edit clears it")
+    check(window.image_view.orbit_tracker.state.z0 == seeded_z0,
+          "the SAME z0 is kept across the param change")
+    check(window.image_view.orbit_tracker.state.n == 0,
+          "but its orbit restarts fresh (n=0) under the NEW map/param, not left stale at n=5")
+
+    print("\nz0 field commit while on the parameter plane is a silent no-op:")
+    window.mode_combo.setCurrentText("parameter")
+    window.image_view.clear_orbit()
+    window.z0_field._line_edit.setText("1+1i")
+    window.z0_field._on_editing_finished()
+    check(window.image_view.orbit_tracker.state is None,
+          "orbit tracking stays a dynamical-plane concept -- same gate _seed_orbit_at itself uses")
+    window.mode_combo.setCurrentText("julia")
+
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded
     # render requests" section above deliberately leaves a stale task's

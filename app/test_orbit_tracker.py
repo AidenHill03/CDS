@@ -79,6 +79,31 @@ def main() -> None:
     # about panning/zooming can even be expressed as an input to this
     # class, so it structurally cannot clear the orbit for that reason.
 
+    # ---- recompute_current: keeps z0, restarts under the new map/param ------------
+    print("\nrecompute_current (P6: a persistent, independently-chosen seed):")
+    t5 = OrbitTracker()
+    check(t5.state is None, "sanity: no orbit seeded yet")
+    t5.recompute_current(mandelbrot, -1 + 0j)
+    check(t5.state is None, "a no-op with no active orbit -- nothing to replay")
+
+    t5.seed(mandelbrot, -1 + 0j, 0.2 + 0j)
+    t5.step(mandelbrot, -1 + 0j, 4)
+    check(t5.state.n == 4, "sanity: orbit has advanced before recomputing")
+    t5.recompute_current(mandelbrot, -0.5 + 0j)   # a NEW param, same map
+    check(t5.state is not None, "recompute_current does NOT clear the orbit, unlike reset_if_stale")
+    check(t5.state.z0 == 0.2 + 0j, "the z0 itself survives the recompute unchanged")
+    check(t5.state.n == 0, "the orbit restarts from n=0 under the new param, not left at n=4")
+    check(t5.state.z == 0.2 + 0j, "z is back at z0 -- this is a fresh orbit, not a continuation")
+
+    t5.recompute_current(newton, -0.5 + 0j)   # a NEW map entirely, same z0
+    check(t5.state.z0 == 0.2 + 0j, "recompute_current also survives a MAP change, not just param")
+
+    t5.clear()
+    t5.recompute_current(mandelbrot, 0j)
+    check(t5.state is None,
+          "once cleared, recompute_current stays a no-op -- Clear means cleared, a param "
+          "change afterward must not resurrect the orbit")
+
     # ---- classification: converges to a period-2 cycle (the basilica) -------------
     print("\nclassification (basilica, period-2 cycle):")
     t4 = OrbitTracker()

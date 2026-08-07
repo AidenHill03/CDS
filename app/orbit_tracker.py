@@ -95,6 +95,21 @@ class OrbitTracker:
     def clear(self) -> None:
         self.state = None
 
+    def recompute_current(self, rational_map: cdx.RationalMap, param: complex) -> None:
+        """Keeps the CURRENT z0 (if any) but restarts its orbit under a
+        NEW map/param -- the counterpart to reset_if_stale's own CLEAR
+        behaviour, used specifically when the user explicitly changes `a`
+        via the parameter field or a parameter-plane click (P6's own
+        wording: z0 is a persistent, independently-chosen seed, so its
+        orbit under the new map is exactly what should be shown, not a
+        blanked overlay). A no-op if no orbit is currently seeded -- there
+        is no z0 to replay, and Clear should stay cleared until the user
+        picks a new seed.
+        """
+        if self.state is None:
+            return
+        self.seed(rational_map, param, self.state.z0)
+
     def step(self, rational_map: cdx.RationalMap, param: complex, count: int = 1) -> None:
         if self.state is None:
             return
