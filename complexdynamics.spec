@@ -1,18 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the ComplexDynamics macOS .app bundle.
+"""PyInstaller spec for the ComplexDynamics desktop app -- macOS .app,
+Windows onedir .exe, or Linux onedir binary, whichever platform this runs
+on. PyInstaller cannot cross-compile, so each platform's artifact must be
+built ON that platform -- see .github/workflows/build.yml, which runs
+this exact spec on macos-latest/windows-latest/ubuntu-latest separately
+to produce three genuine, native artifacts, not one file pretending to
+work everywhere.
 
 Build (from the repository root, after building cdx -- see CLAUDE.md):
 
-    cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON && cmake --build cdx/build
+    cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON && cmake --build cdx/build --config Release
     pip install pyinstaller
     pyinstaller complexdynamics.spec
 
-Produces dist/ComplexDynamics.app. This bundles the COMPILED cdx
-extension (a Mach-O .so) for the platform PyInstaller runs on -- it
-cannot cross-compile, and this bundle will only run on macOS. See
-.github/workflows/build.yml for genuine per-platform builds (each
-platform builds and packages on its own runner) and README.md for why
-this file deliberately does not attempt a Windows build from here.
+Produces dist/ComplexDynamics.app (macOS) or dist/ComplexDynamics/ (a
+onedir folder containing ComplexDynamics.exe on Windows, or the
+ComplexDynamics ELF binary on Linux, plus every DLL/.so it needs
+alongside it).
 """
 
 import sys
@@ -24,31 +28,25 @@ from app.version import AUTHOR, PRODUCT_NAME, VERSION   # noqa: E402
 import PySide6   # noqa: E402
 
 cdx_build_dir = repo_root / "cdx" / "build"
-cdx_extension_candidates = sorted(cdx_build_dir.glob("cdx.cpython-*.so"))
+# The compiled extension's suffix/location differs per platform: .so
+# directly under build/ on macOS/Linux (single-config Makefile/Ninja
+# generators), .pyd under a Release/ (or Debug/) subdirectory on Windows
+# (Visual Studio's multi-config generator, which CMake's default Windows
+# generator is) -- searching both shapes is what makes this spec work
+# unmodified on all three CI runners, not just the platform it was
+# originally written against.
+cdx_extension_candidates = sorted(
+    list(cdx_build_dir.glob("cdx.cpython-*.so")) +
+    list(cdx_build_dir.glob("cdx.cp*.pyd")) +
+    list(cdx_build_dir.glob("*/cdx.cpython-*.so")) +
+    list(cdx_build_dir.glob("*/cdx.cp*.pyd"))
+)
 if not cdx_extension_candidates:
     raise SystemExit(
         "cdx extension not found in cdx/build -- build it first:\n"
-        "  cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON && cmake --build cdx/build"
+        "  cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON && cmake --build cdx/build --config Release"
     )
 cdx_extension = cdx_extension_candidates[0]
-
-# This Anaconda-packaged PySide6 misreports its own Qt plugins directory:
-# PyInstaller.utils.hooks.qt.pyside6_library_info.location['PluginsPath']
-# resolves to /opt/anaconda3/plugins -- a completely different, Qt 5.15.2
-# install shared conda-wide by unrelated GUI packages -- rather than this
-# PySide6's own bundled Qt6 plugins under
-# <PySide6 install dir>/Qt/plugins. PyInstaller's hook-PySide6.QtGui.py
-# trusts that metadata and copies the WRONG (Qt5) .dylibs into the
-# bundle's PySide6/Qt/plugins/platforms destination, silently shadowing
-# what should have been the real Qt6 ones. Confirmed directly: the
-# packaged app's Qt debug log reported every bundled platform plugin
-# (including libqcocoa.dylib) as "uses incompatible Qt library (5.15.0)",
-# even though QT_QPA_PLATFORM_PLUGIN_PATH correctly pointed AT that exact
-# directory -- the path was right, the file's own contents were wrong.
-pyside6_dir = Path(PySide6.__file__).parent
-real_qt_plugins_dir = pyside6_dir / "Qt" / "plugins"
-if not real_qt_plugins_dir.is_dir():
-    raise SystemExit(f"expected PySide6's own Qt plugins at {real_qt_plugins_dir}")
 
 a = Analysis(
     ["app/sandbox.py"],
@@ -60,7 +58,7 @@ a = Analysis(
     # searched first, `import cdx` during Analysis resolved to that empty
     # namespace package instead of the real compiled extension, and
     # PyInstaller then froze in a placeholder "cdx" with none of its real
-    # attributes -- confirmed as the cause of the packaged app's
+    # attributes -- confirmed as the cause of an early packaged build's
     # "AttributeError: module 'cdx' has no attribute 'FamilyLibrary'"
     # crash: cdx/build was never on pathex at all, so the .so was only
     # ever bundled via the explicit `binaries` entry below, never actually
@@ -74,17 +72,61 @@ a = Analysis(
     excludes=[],
 )
 
-# Drop whatever hook-PySide6.QtGui.py collected under PySide6/Qt/plugins/
-# (the wrong Qt5 binaries, per the note above) and re-add the SAME
-# destination tree sourced from PySide6's own real Qt6 plugins directory
-# instead. This is a substitution, not a trim -- an app with no platform
-# plugin at all fails exactly as visibly as one with the wrong plugin, so
-# skip-and-hope is not an option here.
-_wrong_prefix = "PySide6/Qt/plugins/"
-a.binaries = [b for b in a.binaries if not b[0].replace("\\", "/").startswith(_wrong_prefix)]
-for _f in real_qt_plugins_dir.rglob("*.dylib"):
-    _dest = f"PySide6/Qt/plugins/{_f.relative_to(real_qt_plugins_dir).as_posix()}"
-    a.binaries.append((_dest, str(_f), "BINARY"))
+# ---- conditional Qt-plugin fix: DETECT the mismatch, don't assume it ------
+#
+# On the local macOS dev machine this was written on, PyInstaller's own
+# hook-PySide6.QtGui.py bundled the WRONG Qt platform plugins: this
+# Anaconda-packaged PySide6 misreports its own plugins directory --
+# PyInstaller.utils.hooks.qt.pyside6_library_info.location['PluginsPath']
+# resolved to /opt/anaconda3/plugins, a completely unrelated, stray Qt
+# 5.15.2 install shared conda-wide by OTHER GUI packages -- instead of
+# this PySide6's own bundled Qt6 plugins under <PySide6 dir>/Qt/plugins.
+# The hook trusted that metadata and copied the Qt5 .dylibs into the
+# bundle, silently shadowing the real Qt6 ones (confirmed via
+# QT_DEBUG_PLUGINS=1: every bundled platform plugin reported "uses
+# incompatible Qt library (5.15.0)").
+#
+# THAT IS A LOCAL ANACONDA ENVIRONMENT DEFECT, not something a clean CI
+# runner with pip-installed PySide6 has -- pip's PySide6 correctly
+# reports its OWN plugins directory. Applying the substitution
+# unconditionally would "fix" CI builds for a bug they never had (and,
+# worse, silently mask a REAL future mismatch by always overwriting
+# whatever PyInstaller collected, whether it needed it or not). So this
+# detects the mismatch first: only substitute if PyInstaller's own
+# reported PluginsPath is NOT actually inside this PySide6 install --
+# i.e. only when there is something to fix.
+pyside6_dir = Path(PySide6.__file__).parent
+real_qt_plugins_dir = pyside6_dir / "Qt" / "plugins"
+
+_reported_plugins_dir = None
+try:
+    from PyInstaller.utils.hooks.qt import pyside6_library_info
+    _reported = pyside6_library_info.location.get("PluginsPath")
+    if _reported:
+        _reported_plugins_dir = Path(_reported).resolve()
+except Exception as _exc:   # pragma: no cover -- defensive; see the print below
+    print(f"complexdynamics.spec: could not query pyside6_library_info ({_exc}); "
+          f"skipping the Qt-plugin mismatch check")
+
+_mismatch = (
+    _reported_plugins_dir is not None
+    and real_qt_plugins_dir.is_dir()
+    and not _reported_plugins_dir.is_relative_to(pyside6_dir.resolve())
+)
+
+if _mismatch:
+    print(f"complexdynamics.spec: Qt plugin mismatch DETECTED -- PyInstaller collected "
+          f"plugins from {_reported_plugins_dir}, outside this PySide6's own install at "
+          f"{pyside6_dir}. Substituting the real ones.")
+    _wrong_prefix = "PySide6/Qt/plugins/"
+    a.binaries = [b for b in a.binaries if not b[0].replace("\\", "/").startswith(_wrong_prefix)]
+    for _f in real_qt_plugins_dir.rglob("*"):
+        if _f.is_file():
+            _dest = f"PySide6/Qt/plugins/{_f.relative_to(real_qt_plugins_dir).as_posix()}"
+            a.binaries.append((_dest, str(_f), "BINARY"))
+else:
+    print("complexdynamics.spec: Qt plugin directory looks consistent with this PySide6 "
+          "install -- no substitution needed.")
 
 pyz = PYZ(a.pure, a.zipped_data)
 
@@ -110,21 +152,27 @@ coll = COLLECT(
     name=PRODUCT_NAME,
 )
 
-app = BUNDLE(
-    coll,
-    name=f"{PRODUCT_NAME}.app",
-    icon=None,
-    bundle_identifier="dev.complexdynamics.sandbox",
-    info_plist={
-        "CFBundleName": PRODUCT_NAME,
-        "CFBundleDisplayName": PRODUCT_NAME,
-        "CFBundleShortVersionString": VERSION,
-        "CFBundleVersion": VERSION,
-        "NSHumanReadableCopyright": f"© 2026 {AUTHOR}",
-        "NSHighResolutionCapable": True,
-        # UNSIGNED build (no Apple Developer ID here) -- Gatekeeper will
-        # quarantine it on first download. README.md documents the
-        # right-click -> Open workaround this requires; NOT something a
-        # plist key can fix without an actual signing identity.
-    },
-)
+# BUNDLE (a .app with Info.plist) is a macOS-only PyInstaller construct.
+# On Windows/Linux, `coll` above (a onedir folder: the .exe/binary plus
+# every DLL/.so it needs alongside it) IS the final artifact -- there is
+# no equivalent single-file bundle step to run.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name=f"{PRODUCT_NAME}.app",
+        icon=None,
+        bundle_identifier="dev.complexdynamics.sandbox",
+        info_plist={
+            "CFBundleName": PRODUCT_NAME,
+            "CFBundleDisplayName": PRODUCT_NAME,
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
+            "NSHumanReadableCopyright": f"© 2026 {AUTHOR}",
+            "NSHighResolutionCapable": True,
+            # UNSIGNED build (no Apple Developer ID here) -- Gatekeeper
+            # will quarantine it on first download. README.md documents
+            # the right-click -> Open workaround this requires; NOT
+            # something a plist key can fix without an actual signing
+            # identity.
+        },
+    )

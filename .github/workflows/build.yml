@@ -1,0 +1,219 @@
+name: build
+
+# Genuine per-platform builds -- PyInstaller cannot cross-compile, so each
+# of macos-latest/windows-latest/ubuntu-latest builds and packages ON
+# ITSELF, producing three real, native artifacts, not one file claiming
+# to work everywhere (see complexdynamics.spec's own docstring).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pybind11 pyinstaller
+
+      # Headless Qt6 on a bare Ubuntu runner needs these system libraries
+      # even to LOAD the xcb platform plugin, let alone show a window --
+      # a well-documented pitfall for Qt CI, not something to discover only
+      # once the launch self-test starts failing for an unrelated reason.
+      # xvfb provides the virtual X11 display the self-test step needs to
+      # exercise the REAL xcb plugin (see that step below) rather than the
+      # offscreen one, which would silently skip verifying the exact
+      # category of bug this project's own packaging work already hit once
+      # on macOS (a platform plugin bundled but broken).
+      - name: Install Linux headless-Qt dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb zip \
+            libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3
+
+      - name: Configure cdx
+        run: cmake -B cdx/build -S cdx -DCDX_BUILD_PYTHON=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build cdx (core + pybind11 extension)
+        run: cmake --build cdx/build --config Release --parallel
+
+      # Every C++ test binary CMakeLists.txt defines -- there is no CTest
+      # registration in this repo (see cdx/CMakeLists.txt), so each is
+      # invoked directly. MSVC's multi-config generator on Windows puts
+      # binaries under build/Release/ instead of build/ directly; searched
+      # for explicitly rather than assumed, since this is genuinely new
+      # ground the macOS-only dev history behind this workflow never
+      # exercised.
+      - name: Run the C++ test suite
+        shell: bash
+        run: |
+          set -e
+          for exe in cdx_test cdx_test_expr cdx_test_rational cdx_test_roots cdx_test_custom cdx_test_analysis; do
+            found=""
+            for candidate in "cdx/build/$exe" "cdx/build/$exe.exe" "cdx/build/Release/$exe.exe" "cdx/build/Debug/$exe.exe"; do
+              if [ -f "$candidate" ]; then found="$candidate"; break; fi
+            done
+            if [ -z "$found" ]; then
+              echo "::error::could not find the built test executable for '$exe'"
+              exit 1
+            fi
+            echo "=== $found ==="
+            "$found"
+          done
+
+      - name: Locate this PySide6's own Qt plugin directory
+        shell: bash
+        id: qt_plugins
+        run: |
+          PLUGDIR=$(python -c "import PySide6, os; print(os.path.join(os.path.dirname(PySide6.__file__), 'Qt', 'plugins', 'platforms'))")
+          echo "path=$PLUGDIR" >> "$GITHUB_OUTPUT"
+
+      # Offscreen -- this is testing APPLICATION LOGIC (every app/test_*.py
+      # module), not platform-plugin packaging, so no real display is
+      # needed here. QT_QPA_PLATFORM_PLUGIN_PATH is set defensively (the
+      # formula that fixes the LOCAL Anaconda dev machine's plugin
+      # mismatch); pip-installed PySide6 on a clean CI runner shouldn't
+      # need it, but pointing it at exactly where the plugin actually
+      # lives is harmless when the default resolution would already have
+      # worked.
+      - name: Run the Python test suite (offscreen)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: cdx/build
+        run: |
+          export QT_QPA_PLATFORM_PLUGIN_PATH="${{ steps.qt_plugins.outputs.path }}"
+          set -e
+          for mod in app.test_about_dialog app.test_colour app.test_complex_field \
+                     app.test_facts_panel app.test_library_panel app.test_metadata_header \
+                     app.test_orbit_panel app.test_orbit_tracker app.test_render_cache \
+                     app.test_sandbox app.test_session app.test_settings \
+                     app.test_settings_panel app.test_term_editor_panel; do
+            echo "=== $mod ==="
+            python -m "$mod"
+          done
+
+      - name: Package the app (PyInstaller)
+        shell: bash
+        env:
+          PYTHONPATH: cdx/build
+        run: pyinstaller complexdynamics.spec --noconfirm
+
+      # THE gate: a bundle that does not open is a failed build, full
+      # stop -- not a warning, not a "known issue," a failed CI job. Runs
+      # the packaged artifact's REAL default platform plugin (cocoa on
+      # macOS, windows on Windows -- both work unattended on GitHub-hosted
+      # runners without an extra display server), asserting the QTimer-
+      # gated LAUNCH_SELFTEST_OK line app/sandbox.py's main() prints, the
+      # same "a real window came up," not "the process didn't crash
+      # instantly" standard this whole check exists to enforce (an earlier
+      # manual check on this same macOS packaging work was fooled by
+      # exactly that shortcut once already).
+      - name: Launch self-test gate (macOS / Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          CDX_VERIFY_LAUNCH_SELFTEST: "1"
+        run: |
+          set -e
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            APP_EXE="dist/ComplexDynamics.app/Contents/MacOS/ComplexDynamics"
+          else
+            APP_EXE="dist/ComplexDynamics/ComplexDynamics.exe"
+          fi
+          set +e
+          OUT=$("$APP_EXE" 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT"
+          if [ $CODE -ne 0 ] || ! echo "$OUT" | grep -q "LAUNCH_SELFTEST_OK"; then
+            echo "::error::packaged app failed the launch self-test (exit code $CODE)"
+            exit 1
+          fi
+
+      # Linux has no display at all on a bare runner -- xvfb-run supplies
+      # one so this exercises the REAL xcb platform plugin, not the
+      # offscreen one the ordinary test suite above uses. Testing under
+      # offscreen here would never have caught the macOS "wrong Qt
+      # version" bundling bug this project already hit once; the whole
+      # point of this gate is to test what a real user's launch actually
+      # does.
+      - name: Launch self-test gate (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CDX_VERIFY_LAUNCH_SELFTEST: "1"
+        run: |
+          set +e
+          OUT=$(xvfb-run -a dist/ComplexDynamics/ComplexDynamics 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT"
+          if [ $CODE -ne 0 ] || ! echo "$OUT" | grep -q "LAUNCH_SELFTEST_OK"; then
+            echo "::error::packaged app failed the launch self-test (exit code $CODE)"
+            exit 1
+          fi
+
+      - name: Archive the artifact
+        shell: bash
+        run: |
+          set -e
+          mkdir -p out
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/ComplexDynamics.app out/ComplexDynamics-macOS.zip
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            (cd dist && 7z a -r ../out/ComplexDynamics-Windows.zip ComplexDynamics)
+          else
+            (cd dist && zip -r ../out/ComplexDynamics-Linux.zip ComplexDynamics)
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ComplexDynamics-${{ runner.os }}
+          path: out/*.zip
+          if-no-files-found: error
+
+  # Only on a version tag -- an ordinary push to main builds and gates
+  # every platform (the job above) but does not cut a release; that is a
+  # deliberate, tagged action, not an automatic side effect of merging.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten the three per-OS artifact zips
+        run: |
+          mkdir -p release
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          ls -la release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip
+          draft: false
+          prerelease: true
+          generate_release_notes: true
