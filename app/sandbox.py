@@ -35,7 +35,7 @@ from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel
 from app.library_panel import LibraryPanel, default_view_for
-from app.metadata_header import MetadataHeader
+from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
 from app.pane import Pane
@@ -706,8 +706,36 @@ class ImageView(QWidget):
         self._buffer_mode = self.pane.render_mode
         self.update()
 
+    def no_effect_parameter_message(self) -> str | None:
+        """None ordinarily. On a PARAMETER-plane pane for a map where `a`
+        has no effect on it AT ALL (describe_parameter_role reports
+        "unused by this map", confirmed directly for e.g. newton_cubic() --
+        no term has param_power != 0 or location_is_param) every pixel
+        of a render here would be identical -- a uniform field that looks
+        like a bug, not a genuine "nothing here." This is the message to
+        show INSTEAD of that render: see SandboxWindow._start_render,
+        which skips dispatching a RenderTask for a pane in this state
+        entirely (there's nothing meaningful to compute, not just nothing
+        meaningful to display), and paintEvent below, which shows this
+        text instead of the (nonexistent) buffer.
+        """
+        if self.pane.render_mode not in PARAMETER_PLANE_MODES:
+            return None
+        if describe_parameter_role(self.session.map) != "unused by this map":
+            return None
+        return (f"'a' has no effect on {self.session.map.name} -- there is nothing to show "
+                "on the parameter plane for this map")
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        message = self.no_effect_parameter_message()
+        if message is not None:
+            painter.fillRect(self.rect(), QColor(40, 40, 40))
+            painter.setPen(QColor(220, 220, 220))
+            painter.drawText(self.rect(),
+                             int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap),
+                             message)
+            return
         source_rect = self._buffer_source_rect()
         if source_rect is not None:
             painter.drawPixmap(QRectF(self._display_rect()), self._pixmap, source_rect)
@@ -1343,15 +1371,26 @@ class SandboxWindow(QMainWindow):
             self._do_save_experiment(path)
 
     def _do_save_experiment(self, path: str) -> None:
-        # Still self.pane specifically (not the focused pane, not both
-        # panes) -- extending the .cdsx format to cover layout/both
-        # panes/focus/marker is explicitly Stage 4's job, not this one's.
+        # EVERY pane (Stage 4): layout (coupled flag, which pane is
+        # focused) plus each pane's own (viewport, render_mode). The
+        # orbit, if any, belongs to whichever pane orbit_panel currently
+        # follows (_current_dynamical_pane) -- orbit tracking is
+        # per-pane, so a plain (z0, n) alone would be ambiguous about
+        # WHICH pane it came from; see Session.snapshot_to_dict's own
+        # docstring for the (pane_index, z0, n) shape this becomes.
         if not path.endswith(".cdsx"):
             path += ".cdsx"
-        state = self.image_view.orbit_tracker.state
-        orbit = None if state is None else (state.z0, state.n)
+        panes = [(p.viewport, p.render_mode) for p in self.panes]
+        focused_index = self.panes.index(self._focused_pane)
+        coupled = self.coupled_checkbox.isChecked()
+        orbit_pane = self._current_dynamical_pane()
+        orbit = None
+        if orbit_pane is not None:
+            state = orbit_pane.image_view.orbit_tracker.state
+            if state is not None:
+                orbit = (self.panes.index(orbit_pane), state.z0, state.n)
         try:
-            self.session.save_snapshot(path, self.pane.viewport, self.pane.render_mode, orbit)
+            self.session.save_snapshot(path, panes, focused_index, coupled, orbit)
         except OSError as exc:
             QMessageBox.critical(self, "Save Experiment failed", str(exc))
 
@@ -1365,52 +1404,65 @@ class SandboxWindow(QMainWindow):
         # session.load_snapshot fully validates and parses BEFORE mutating
         # anything (see restore_from_snapshot's own docstring) -- on
         # failure the live session is untouched, so there is nothing here
-        # to roll back, just an error to surface. Unlike before Stage 1,
-        # Session has no viewport/render_mode of its own to apply, so the
-        # restored (viewport, mode, orbit) come back explicitly for THIS
-        # pane to apply itself.
+        # to roll back, just an error to surface. Session has no panes,
+        # viewport, or render_mode of its own, so the restored
+        # (panes, focused_index, coupled, orbit) come back explicitly for
+        # THIS window to apply to its own panes/layout/tracker.
         try:
-            viewport, mode, orbit = self.session.load_snapshot(path)
+            panes_data, focused_index, coupled, orbit = self.session.load_snapshot(path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Open Experiment failed", str(exc))
             return
 
-        # Apply viewport + mode to the pane BEFORE touching the orbit, so
-        # the dynamical-plane-only gate just below sees the RESTORED mode,
-        # not whatever was showing before this load (the ordering this
-        # whole method exists to get right: restore the mode, THEN the
-        # orbit, never the other way around).
-        self.pane.viewport = viewport
-        self.pane.set_render_mode(mode)   # already validated by load_snapshot; re-validated here
-                                          # for free, not re-checked for its own sake
-        self.mode_combo.setCurrentText(self.pane.render_mode)
+        # Apply viewport + mode to EVERY pane BEFORE touching any orbit, so
+        # the dynamical-plane-only gate below sees each pane's RESTORED
+        # mode, not whatever was showing before this load (the ordering
+        # this whole method exists to get right: restore the modes, THEN
+        # the orbit, never the other way around). A file with fewer panes
+        # than this window has (can't happen from this app's own Save, but
+        # a hand-edited file could) reuses that file's LAST pane entry for
+        # any pane it doesn't cover, rather than crashing on a short list.
+        for i, pane in enumerate(self.panes):
+            viewport, mode = panes_data[min(i, len(panes_data) - 1)]
+            pane.viewport = viewport
+            pane.set_render_mode(mode)   # already validated by load_snapshot; re-validated here
+                                         # for free, not re-checked for its own sake
+            self._mode_combos[pane].setCurrentText(pane.render_mode)
+
+        self.coupled_checkbox.setChecked(coupled)
+        self._set_focused_pane(self.panes[min(focused_index, len(self.panes) - 1)])
         self.param_field.set_value(self.session.param)
 
         # Orbit reconstruction goes through the tracker's REAL seed()/step()
         # API, not a shortcut -- z and history regenerate through the exact
-        # same code path a live, click-seeded orbit does. clear_orbit()
-        # covers both "the snapshot had no orbit" and "it did, but we're
-        # on the parameter plane" (orbit tracking is a dynamical-plane
-        # concept, same gate _seed_orbit_at itself uses).
-        if orbit is None or self.pane.render_mode in PARAMETER_PLANE_MODES:
-            self.image_view.clear_orbit()
-        else:
-            z0, n = orbit
-            self.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
-            self.image_view.step_orbit(n)
+        # same code path a live, click-seeded orbit does. Every OTHER pane
+        # (no saved orbit, or a parameter-plane mode after restore) gets
+        # clear_orbit() -- the same gate _seed_orbit_at itself uses (orbit
+        # tracking is a dynamical-plane concept).
+        for i, pane in enumerate(self.panes):
+            if (orbit is not None and orbit[0] == i
+                    and pane.render_mode not in PARAMETER_PLANE_MODES):
+                _, z0, n = orbit
+                pane.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
+                pane.image_view.step_orbit(n)
+            else:
+                pane.image_view.clear_orbit()
 
         # The same full resync _on_family_loaded already does for a
         # wholesale map replacement -- a snapshot changes just as much at
-        # once (map AND param AND viewport AND mode AND settings), so
-        # every panel that caches a view of the old state needs the same
-        # treatment, not a partial refresh.
+        # once (map AND param AND every pane's viewport/mode AND settings),
+        # so every panel that caches a view of the old state needs the
+        # same treatment, not a partial refresh.
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.image_view.refresh_critical_points()
         self.metadata_header.refresh()
-        self._update_status_bar()
-        self._debounce_timers[self.pane].stop()
-        self._start_render(self.pane)
+        for pane in self.panes:
+            pane.image_view.refresh_critical_points()
+            if pane is self._focused_pane:
+                self._update_status_bar()
+            self._debounce_timers[pane].stop()
+            self._start_render(pane)
+        self._sync_orbit_panel()
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
     def _on_param_field_committed(self, a: complex) -> None:
@@ -1705,6 +1757,15 @@ class SandboxWindow(QMainWindow):
                 del pane.pending_tasks[stale_id]
             else:
                 stale_task.cancel.cancel()
+
+        if pane.image_view.no_effect_parameter_message() is not None:
+            # A parameter-plane pane for a map where `a` has no effect at
+            # all -- every pixel would render identically, so there is
+            # nothing meaningful to COMPUTE, not just nothing meaningful
+            # to display. Skip dispatching a RenderTask entirely; just
+            # repaint the in-pane message (see ImageView.paintEvent).
+            pane.image_view.update()
+            return
 
         pane.request_id += 1
         request_id = pane.request_id

@@ -404,51 +404,60 @@ def main() -> None:
     check(n_2cycle == 1, "basilica: one attracting 2-cycle")
     check(n_finite_fixed_attracting == 0, "basilica: zero finite attracting fixed points")
 
-    # ---- experiment snapshots: round-trip (map/param/view/mode/settings/orbit) -----
+    # ---- experiment snapshots: round-trip (map/param/layout/settings/orbit) --------
     print("\nexperiment snapshots (snapshot_to_dict/restore_from_snapshot):")
 
     # A non-trivial, custom (not-a-preset) map -- to_formula() is the
     # cleanest thing to compare on, since RationalMap has no __eq__.
-    # viewport/render_mode are no longer Session's own (see app.pane.Pane)
-    # -- snapshot_to_dict/restore_from_snapshot now take/return them
-    # explicitly, the same way a real Pane would supply/receive them.
+    # Neither a viewport/render_mode NOR a notion of "panes" is Session's
+    # own (see app.pane.Pane) -- snapshot_to_dict/restore_from_snapshot
+    # now take/return a full LAYOUT (one (viewport, render_mode) pair per
+    # pane, which pane is focused, coupled/single) explicitly, the same
+    # way a real SandboxWindow would supply/receive it (Stage 4).
     src = Session()
     custom_map = cdx.RationalMap("scratch")
     custom_map.add_poly(complex(1, 0), 3, 0, "z^3")
     custom_map.add_pole(complex(0.5, -0.5), complex(1, 0), 2, 1, "pole")
     src.map = custom_map
     src.param = complex(0.123, -0.456)
-    src_viewport = cdx.Viewport(complex(0.01, -0.02), 1e-4, 333)   # a genuinely zoomed view
-    src_mode = "basin"
+    src_pane_a = (cdx.Viewport(complex(0.01, -0.02), 1e-4, 333), "basin")   # a genuinely zoomed view
+    src_pane_b = (cdx.Viewport(complex(-0.5, 0.0), 1.5, 400), "julia")
+    src_panes = [src_pane_a, src_pane_b]
+    src_focused_index = 1
+    src_coupled = False
     src.render_settings = cdx.RenderSettings(321, 3.5, 1e-8, 2)
 
     z0 = complex(0.3, -0.1)
-    d = src.snapshot_to_dict(src_viewport, src_mode, orbit=(z0, 4))
+    d = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled, orbit=(1, z0, 4))
     dst = Session()
-    dst_viewport, dst_mode, orbit = dst.restore_from_snapshot(d)
+    dst_panes, dst_focused_index, dst_coupled, orbit = dst.restore_from_snapshot(d)
 
     check(dst.map.to_formula() == src.map.to_formula(), "round-trip: map formula matches")
     check(dst.param == src.param, "round-trip: param matches")
-    check(dst_viewport.center == src_viewport.center and
-          dst_viewport.scale == src_viewport.scale and
-          dst_viewport.resolution == src_viewport.resolution,
-          "round-trip: viewport (center/scale/resolution) matches")
-    check(dst_mode == src_mode, "round-trip: render_mode matches")
+    check(len(dst_panes) == 2, "round-trip: both panes survive, not just one")
+    for i, (src_vp, src_mode) in enumerate(src_panes):
+        dst_vp, dst_mode = dst_panes[i]
+        check(dst_vp.center == src_vp.center and dst_vp.scale == src_vp.scale and
+              dst_vp.resolution == src_vp.resolution,
+              f"round-trip: pane {i}'s viewport (center/scale/resolution) matches")
+        check(dst_mode == src_mode, f"round-trip: pane {i}'s render_mode matches")
+    check(dst_focused_index == src_focused_index, "round-trip: which pane is focused matches")
+    check(dst_coupled == src_coupled, "round-trip: coupled/single layout flag matches")
     check(dst.render_settings.max_iter == src.render_settings.max_iter and
           dst.render_settings.escape_radius == src.render_settings.escape_radius and
           dst.render_settings.tol == src.render_settings.tol and
           dst.render_settings.threads == src.render_settings.threads,
           "round-trip: render_settings (all four fields) matches")
-    check(orbit is not None and orbit[0] == z0 and orbit[1] == 4,
-          "round-trip: orbit z0 and n both survive")
+    check(orbit is not None and orbit[0] == 1 and orbit[1] == z0 and orbit[2] == 4,
+          "round-trip: orbit's owning pane index, z0, and n all survive")
 
     # z/history are DERIVED, not stored -- reconstruct via the tracker's
     # REAL API (exactly what app/sandbox.py's Open Experiment does) and
     # confirm the regenerated orbit matches what stepping the ORIGINAL
     # map/param the same way would have produced.
     restored_tracker = OrbitTracker()
-    restored_tracker.seed(dst.map, dst.param, orbit[0])
-    restored_tracker.step(dst.map, dst.param, orbit[1])
+    restored_tracker.seed(dst.map, dst.param, orbit[1])
+    restored_tracker.step(dst.map, dst.param, orbit[2])
     reference_tracker = OrbitTracker()
     reference_tracker.seed(src.map, src.param, z0)
     reference_tracker.step(src.map, src.param, 4)
@@ -461,28 +470,31 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "test.cdsx")
-        src.save_snapshot(path, src_viewport, src_mode, orbit=(z0, 4))
+        src.save_snapshot(path, src_panes, src_focused_index, src_coupled, orbit=(1, z0, 4))
         dst_file = Session()
-        viewport_file, mode_file, orbit_file = dst_file.load_snapshot(path)
+        panes_file, focused_index_file, coupled_file, orbit_file = dst_file.load_snapshot(path)
         check(dst_file.map.to_formula() == src.map.to_formula() and dst_file.param == src.param
-              and mode_file == src_mode and orbit_file == (z0, 4),
+              and focused_index_file == src_focused_index and coupled_file == src_coupled
+              and panes_file[0][1] == src_pane_a[1] and panes_file[1][1] == src_pane_b[1]
+              and orbit_file == (1, z0, 4),
               "save_snapshot/load_snapshot round-trips through an ACTUAL JSON file, not just "
               "the in-memory dict -- the float encode/decode step is lossless too")
 
     # ---- orbit-null round-trip -------------------------------------------------------
-    d_null = src.snapshot_to_dict(src_viewport, src_mode, orbit=None)
+    d_null = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled, orbit=None)
     dst_null = Session()
-    _vp_null, _mode_null, orbit_null = dst_null.restore_from_snapshot(d_null)
+    _panes_null, _focus_null, _coupled_null, orbit_null = dst_null.restore_from_snapshot(d_null)
     check(orbit_null is None, "orbit-null round-trip: no active orbit survives as no orbit")
 
     # ---- parameter-plane mode with no orbit -------------------------------------------
     param_plane_session = Session()
     param_plane_session.map = cdx.RationalMap.mandelbrot()
-    d_pp = param_plane_session.snapshot_to_dict(src_viewport, "parameter", orbit=None)
+    d_pp = param_plane_session.snapshot_to_dict(
+        [(src_pane_a[0], "parameter"), src_pane_b], 0, True, orbit=None)
     dst_pp = Session()
-    _vp_pp, mode_pp, orbit_pp = dst_pp.restore_from_snapshot(d_pp)
-    check(orbit_pp is None and mode_pp == "parameter",
-          "a snapshot taken in a parameter-plane mode with no orbit restores cleanly, with "
+    panes_pp, _focus_pp, _coupled_pp, orbit_pp = dst_pp.restore_from_snapshot(d_pp)
+    check(orbit_pp is None and panes_pp[0][1] == "parameter",
+          "a snapshot taken with a parameter-plane pane and no orbit restores cleanly, with "
           "nothing to seed")
 
     # ---- malformed / wrong-version input: raises, changes NOTHING --------------------
@@ -495,19 +507,38 @@ def main() -> None:
     before_max_iter = guard_session.render_settings.max_iter
 
     valid_map_text = guard_session.map.serialize()
+    valid_layout = {"coupled": True, "focused_index": 0,
+                    "panes": [{"render_mode": "julia",
+                               "viewport": {"center": [0, 0], "scale": 1, "resolution": 10}}]}
     bad_snapshots = [
         {},                                   # missing schema_version entirely
         {"schema_version": 999},              # wrong version
+        {"schema_version": 1, "map": valid_map_text, "param": [0, 0],   # the OLD (Stage 1) shape,
+         "viewport": {"center": [0, 0], "scale": 1, "resolution": 10},  # rejected by version, not
+         "render_mode": "julia",                                        # migrated -- see
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0}},  # SNAPSHOT_SCHEMA_VERSION's own comment
         "not even a dict",
         None,
-        {"schema_version": 1, "map": "not a real serialized map", "param": [0, 0],
-         "viewport": {"center": [0, 0], "scale": 1, "resolution": 10},
-         "render_mode": "julia",
-         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0}},
-        {"schema_version": 1, "map": valid_map_text, "param": [0, 0],
-         "viewport": {"center": [0, 0], "scale": 1, "resolution": 10},
-         "render_mode": "not_a_real_mode",
-         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0}},
+        {"schema_version": 2, "map": "not a real serialized map", "param": [0, 0],
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0},
+         "layout": valid_layout},
+        {"schema_version": 2, "map": valid_map_text, "param": [0, 0],
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0},
+         "layout": {"coupled": True, "focused_index": 0,
+                    "panes": [{"render_mode": "not_a_real_mode",
+                               "viewport": {"center": [0, 0], "scale": 1, "resolution": 10}}]}},
+        {"schema_version": 2, "map": valid_map_text, "param": [0, 0],   # focused_index out of range
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0},
+         "layout": {"coupled": True, "focused_index": 5,
+                    "panes": [{"render_mode": "julia",
+                               "viewport": {"center": [0, 0], "scale": 1, "resolution": 10}}]}},
+        {"schema_version": 2, "map": valid_map_text, "param": [0, 0],   # layout.panes empty
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0},
+         "layout": {"coupled": True, "focused_index": 0, "panes": []}},
+        {"schema_version": 2, "map": valid_map_text, "param": [0, 0],   # orbit pane_index out of range
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0},
+         "layout": valid_layout,
+         "orbit": {"pane_index": 9, "z0": [0, 0], "n": 0}},
     ]
     for bad in bad_snapshots:
         try:

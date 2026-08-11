@@ -53,7 +53,18 @@ PRESET_FAMILY_NAMES = frozenset(cdx.FamilyLibrary.with_defaults().names())
 # restore_from_snapshot, before touching any other field, so a snapshot
 # from an incompatible future (or unrelated) version is rejected cleanly
 # rather than half-parsed.
-SNAPSHOT_SCHEMA_VERSION = 1
+#
+# 1 -> 2 (coupled viewer Stage 4): a single top-level viewport/render_mode
+# became a "layout" section (coupled flag, focused pane index, one
+# viewport+render_mode per pane) -- an old version-1 file has neither the
+# shape restore_from_snapshot now expects nor any way to guess a second
+# pane's mode/viewport that never existed, so it is REJECTED by the
+# version check below, not migrated. A straight reject also matches every
+# other malformed-input case restore_from_snapshot already gives (raise,
+# leave the session untouched) -- migrating in place would be the one
+# exception to that rule, for a format only ever shipped internally
+# between P7 and Stage 4, never in a tagged release.
+SNAPSHOT_SCHEMA_VERSION = 2
 
 # Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
 # Julia set, not the origin (which gives the plain filled unit disc --
@@ -469,16 +480,26 @@ class Session:
     # library above (save_to_library/FamilyLibrary), which stores named maps
     # only and has read-only presets; a snapshot restores the map alongside
     # everything else, but never touches the library itself.
-    def snapshot_to_dict(self, viewport: cdx.Viewport, render_mode: str,
-                         orbit: tuple[complex, int] | None = None) -> dict:
+    def snapshot_to_dict(self, panes: list[tuple[cdx.Viewport, str]], focused_index: int,
+                         coupled: bool,
+                         orbit: tuple[int, complex, int] | None = None) -> dict:
         """Assembles a JSON-serializable dict capturing everything needed to
-        reconstruct exactly what is currently on screen. `viewport` and
-        `render_mode` are the CALLER's own -- typically one Pane's (see
-        app.pane.Pane) -- since this class no longer owns either (see this
-        class's own docstring for why). `orbit`, if given, is (z0, n) --
-        OrbitState's own two independent fields; z and history are DERIVED
-        from stepping z0 n times (see restore_from_snapshot), so storing
-        more than that would just be redundant, recomputable state.
+        reconstruct exactly what is currently on screen -- EVERY pane, not
+        just one (Stage 4). `panes` is one (viewport, render_mode) pair per
+        pane, in the SAME order the caller also uses to interpret
+        `focused_index` and orbit's own pane index -- this class owns
+        neither a viewport, a render_mode, nor a notion of "panes" itself
+        (see app.pane.Pane), so all of it is the caller's own state handed
+        in explicitly. `orbit`, if given, is (pane_index, z0, n) -- WHICH
+        pane the orbit belongs to (orbit tracking is per-pane -- see
+        app.sandbox.ImageView.orbit_tracker -- so this is the one place a
+        plain (z0, n) pair alone would be ambiguous), plus OrbitState's own
+        two independent fields; z and history are DERIVED from stepping z0
+        n times (see restore_from_snapshot), so storing more would just be
+        redundant, recomputable state. The param MARKER isn't stored at
+        all: it's just session.param drawn on whichever panes are
+        currently parameter-plane (see ImageView._param_marker_pixel), and
+        param is already captured below -- nothing else to keep in sync.
         """
         rs = self.render_settings
         return {
@@ -486,40 +507,56 @@ class Session:
             "app_version": VERSION,
             "map": self.map.serialize(),
             "param": [self.param.real, self.param.imag],
-            "viewport": {
-                "center": [viewport.center.real, viewport.center.imag],
-                "scale": viewport.scale,
-                "resolution": viewport.resolution,
-            },
-            "render_mode": render_mode,
             "render_settings": {
                 "max_iter": rs.max_iter,
                 "escape_radius": rs.escape_radius,
                 "tol": rs.tol,
                 "threads": rs.threads,
             },
-            "orbit": None if orbit is None else {"z0": [orbit[0].real, orbit[0].imag],
-                                                 "n": orbit[1]},
+            "layout": {
+                "coupled": coupled,
+                "focused_index": focused_index,
+                "panes": [
+                    {
+                        "render_mode": mode,
+                        "viewport": {
+                            "center": [vp.center.real, vp.center.imag],
+                            "scale": vp.scale,
+                            "resolution": vp.resolution,
+                        },
+                    }
+                    for vp, mode in panes
+                ],
+            },
+            "orbit": None if orbit is None else {
+                "pane_index": orbit[0],
+                "z0": [orbit[1].real, orbit[1].imag],
+                "n": orbit[2],
+            },
         }
 
-    def restore_from_snapshot(self, data: dict) -> tuple[cdx.Viewport, str,
-                                                          tuple[complex, int] | None]:
+    def restore_from_snapshot(self, data: dict) -> tuple[list[tuple[cdx.Viewport, str]], int, bool,
+                                                          tuple[int, complex, int] | None]:
         """The inverse of snapshot_to_dict. Fully validates and parses
-        EVERY field before mutating any live state -- a malformed or
-        wrong-version snapshot raises ValueError and leaves this Session
-        byte-for-byte unchanged, the same raise-don't-swallow treatment
-        load_library_file already gives an explicit-path load (as opposed
-        to load_user_library's silent-degrade treatment for the merge-at-
-        startup path, which this is not).
+        EVERY field -- every pane's own viewport/render_mode included --
+        before mutating any live state -- a malformed or wrong-version
+        snapshot raises ValueError and leaves this Session byte-for-byte
+        unchanged, the same raise-don't-swallow treatment load_library_file
+        already gives an explicit-path load (as opposed to
+        load_user_library's silent-degrade treatment for the merge-at-
+        startup path, which this is not). A version-1 (pre-Stage-4,
+        single-pane) snapshot is REJECTED here, not migrated -- see
+        SNAPSHOT_SCHEMA_VERSION's own comment for why.
 
         Only map/param/render_settings are actually SET on this Session --
-        it has no viewport/render_mode of its own to assign, and no
-        OrbitTracker to seed. Returns (viewport, render_mode, orbit) for
-        the caller to apply to its own pane (viewport/render_mode) and
-        tracker (orbit, as (z0, n) or None): reconstructing an orbit needs
-        to go through the tracker's own seed()/step() so z/history
-        regenerate through the exact same code path a live orbit does, not
-        a Session-level shortcut around it.
+        it has no panes, viewport, render_mode, or OrbitTracker of its own
+        to assign/seed. Returns (panes, focused_index, coupled, orbit) for
+        the caller to rebuild its own panes (viewport/render_mode each),
+        layout (coupled flag, which pane is focused), and tracker (orbit,
+        as (pane_index, z0, n) or None): reconstructing an orbit needs to
+        go through the tracker's own seed()/step() so z/history regenerate
+        through the exact same code path a live orbit does, not a
+        Session-level shortcut around it.
         """
         if not isinstance(data, dict):
             raise ValueError("experiment snapshot must be a JSON object")
@@ -530,19 +567,39 @@ class Session:
         try:
             rational_map = cdx.RationalMap.deserialize(data["map"])
             param = complex(*data["param"])
-            vp_data = data["viewport"]
-            viewport = cdx.Viewport(complex(*vp_data["center"]), float(vp_data["scale"]),
-                                    int(vp_data["resolution"]))
-            mode = data["render_mode"]
-            if mode not in RENDER_MODES:
-                raise ValueError(f"unknown render_mode {mode!r}")
             rs_data = data["render_settings"]
             render_settings = cdx.RenderSettings(int(rs_data["max_iter"]),
                                                  float(rs_data["escape_radius"]),
                                                  float(rs_data["tol"]), int(rs_data["threads"]))
+
+            layout = data["layout"]
+            coupled = bool(layout["coupled"])
+            focused_index = int(layout["focused_index"])
+            panes_data = layout["panes"]
+            if not isinstance(panes_data, list) or len(panes_data) == 0:
+                raise ValueError("layout.panes must be a non-empty list")
+            panes: list[tuple[cdx.Viewport, str]] = []
+            for pane_data in panes_data:
+                mode = pane_data["render_mode"]
+                if mode not in RENDER_MODES:
+                    raise ValueError(f"unknown render_mode {mode!r}")
+                vp_data = pane_data["viewport"]
+                viewport = cdx.Viewport(complex(*vp_data["center"]), float(vp_data["scale"]),
+                                        int(vp_data["resolution"]))
+                panes.append((viewport, mode))
+            if not (0 <= focused_index < len(panes)):
+                raise ValueError(
+                    f"focused_index {focused_index} out of range for {len(panes)} panes")
+
             orbit_data = data.get("orbit")
-            orbit = None if orbit_data is None else (complex(*orbit_data["z0"]),
-                                                      int(orbit_data["n"]))
+            if orbit_data is None:
+                orbit = None
+            else:
+                orbit_pane_index = int(orbit_data["pane_index"])
+                if not (0 <= orbit_pane_index < len(panes)):
+                    raise ValueError(
+                        f"orbit pane_index {orbit_pane_index} out of range for {len(panes)} panes")
+                orbit = (orbit_pane_index, complex(*orbit_data["z0"]), int(orbit_data["n"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"malformed experiment snapshot: {exc}") from exc
 
@@ -553,15 +610,16 @@ class Session:
         self.map = rational_map
         self.param = param
         self.render_settings = render_settings
-        return viewport, mode, orbit
+        return panes, focused_index, coupled, orbit
 
-    def save_snapshot(self, path: str, viewport: cdx.Viewport, render_mode: str,
-                      orbit: tuple[complex, int] | None = None) -> None:
+    def save_snapshot(self, path: str, panes: list[tuple[cdx.Viewport, str]], focused_index: int,
+                      coupled: bool, orbit: tuple[int, complex, int] | None = None) -> None:
         with open(path, "w") as f:
-            json.dump(self.snapshot_to_dict(viewport, render_mode, orbit), f, indent=2)
+            json.dump(self.snapshot_to_dict(panes, focused_index, coupled, orbit), f, indent=2)
             f.write("\n")
 
-    def load_snapshot(self, path: str) -> tuple[cdx.Viewport, str, tuple[complex, int] | None]:
+    def load_snapshot(self, path: str) -> tuple[list[tuple[cdx.Viewport, str]], int, bool,
+                                                 tuple[int, complex, int] | None]:
         """Raises ValueError for a missing/unreadable file (OSError is NOT
         caught here -- unlike load_user_library's silent-degrade startup
         path, an explicit Open Experiment... action that fails should tell

@@ -1329,19 +1329,25 @@ def main() -> None:
     # ---- experiment snapshots: File > Save/Open Experiment, through the REAL window --
     # Session-level round-trip correctness is already covered directly in
     # app/test_session.py; this is the one thing only a live SandboxWindow
-    # can confirm -- that _do_open_experiment's UI-facing glue (the mode
-    # combo box, the param field, and ImageView.orbit_tracker's actual
-    # seed()/step() reconstruction) all genuinely happen, not just
-    # session.restore_from_snapshot's own dict-level fields.
+    # can confirm -- that _do_open_experiment's UI-facing glue (BOTH mode
+    # combo boxes, the param field, layout/focus, and each pane's
+    # ImageView.orbit_tracker actual seed()/step() reconstruction) all
+    # genuinely happen, not just session.restore_from_snapshot's own
+    # dict-level fields.
     print("\nexperiment snapshots (File > Save/Open Experiment, via the real window):")
     window.session.map = cdx.RationalMap.mandelbrot()
     window.session.param = complex(0.111, -0.222)
     window.pane.viewport = cdx.Viewport(complex(0.01, 0.02), 0.05, 200)
     window.mode_combo.setCurrentText("julia")
+    window.pane2.viewport = cdx.Viewport(complex(-0.3, 0.4), 0.8, 150)
+    window.mode_combo2.setCurrentText("parameter")
+    window.coupled_checkbox.setChecked(False)
+    window._set_focused_pane(window.pane2)
     saved_z0 = complex(0.05, -0.05)
     window.image_view.orbit_tracker.seed(window.session.map, window.session.param, saved_z0)
     window.image_view.step_orbit(3)
     saved_history = list(window.image_view.orbit_tracker.state.history)
+    window.image_view2.clear_orbit()   # pane2 is parameter-plane anyway; sanity, not load-bearing
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "roundtrip.cdsx")
@@ -1354,7 +1360,11 @@ def main() -> None:
         window.session.map = cdx.RationalMap.newton_cubic()
         window.session.param = complex(9, 9)
         window.pane.viewport = cdx.Viewport(complex(9, 9), 9.0, 50)
+        window.pane2.viewport = cdx.Viewport(complex(8, 8), 8.0, 50)
         window.mode_combo.setCurrentText("parameter")
+        window.mode_combo2.setCurrentText("julia")
+        window.coupled_checkbox.setChecked(True)
+        window._set_focused_pane(window.pane)
         window.image_view.clear_orbit()
 
         window._do_open_experiment(path)
@@ -1364,20 +1374,98 @@ def main() -> None:
         check(window.session.param == complex(0.111, -0.222), "Open Experiment restores param")
         check(window.pane.viewport.center == complex(0.01, 0.02) and
               window.pane.viewport.scale == 0.05,
-              "Open Experiment restores the viewport")
+              "Open Experiment restores pane A's viewport")
+        check(window.pane2.viewport.center == complex(-0.3, 0.4) and
+              window.pane2.viewport.scale == 0.8,
+              "Open Experiment restores pane2's viewport too, not just pane A's")
         check(window.mode_combo.currentText() == "julia",
-              "Open Experiment syncs the mode combo box to the restored render_mode, not "
-              "just session.render_mode underneath it")
+              "Open Experiment syncs pane A's mode combo box to its restored render_mode, not "
+              "just the pane's own render_mode underneath it")
+        check(window.mode_combo2.currentText() == "parameter",
+              "...and pane2's mode combo box to ITS restored render_mode")
         check(close(window.param_field.value, complex(0.111, -0.222), 1e-9),
               "Open Experiment syncs the 'Parameter a' field's displayed value too")
+        check(not window.coupled_checkbox.isChecked(),
+              "Open Experiment restores the single/coupled layout flag")
+        check(window._focused_pane is window.pane2,
+              "Open Experiment restores which pane was focused")
 
         state = window.image_view.orbit_tracker.state
         check(state is not None and state.z0 == saved_z0,
-              "Open Experiment reconstructs the orbit at the SAVED z0")
+              "Open Experiment reconstructs the orbit at the SAVED z0, on the SAME pane it "
+              "was saved from")
         check(state.n == 3, "...stepped the saved number of times")
         check(list(state.history) == saved_history,
               "...through the tracker's real seed()/step() API, regenerating the exact same "
               "history a live orbit would have")
+        check(window.image_view2.orbit_tracker.state is None,
+              "the OTHER pane (parameter-plane, no saved orbit) gets no orbit reconstructed")
+
+    # ---- malformed / wrong-version .cdsx: rejected, window left untouched ----------
+    print("\nexperiment snapshots (Open Experiment rejects malformed/wrong-version files):")
+    before_map_formula = window.session.map.to_formula()
+    before_param = window.session.param
+    before_pane_center = window.pane.viewport.center
+    before_pane2_center = window.pane2.viewport.center
+    before_coupled = window.coupled_checkbox.isChecked()
+    before_focused = window._focused_pane
+
+    # QMessageBox.critical() is a REAL modal -- .exec() starts a nested
+    # event loop and blocks waiting for a click that will never come
+    # under QT_QPA_PLATFORM=offscreen, hanging the whole test process.
+    # Stubbed out for just this one call, the same "can't touch a real
+    # blocking dialog" constraint _do_save_experiment/_do_open_experiment's
+    # own module docstring already documents for QFileDialog.
+    critical_calls = []
+    original_critical = sandbox_module.QMessageBox.critical
+    sandbox_module.QMessageBox.critical = staticmethod(
+        lambda *args, **kwargs: critical_calls.append(args))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_path = os.path.join(tmp, "bad.cdsx")
+            with open(bad_path, "w") as f:
+                f.write('{"schema_version": 1, "not": "a real stage-4 snapshot"}')
+            window._do_open_experiment(bad_path)
+    finally:
+        sandbox_module.QMessageBox.critical = original_critical
+    check(len(critical_calls) == 1,
+          "a malformed/wrong-version Open Experiment shows exactly one error dialog")
+
+    check(window.session.map.to_formula() == before_map_formula and
+          window.session.param == before_param,
+          "a malformed/wrong-version file leaves the session's map/param completely untouched")
+    check(window.pane.viewport.center == before_pane_center and
+          window.pane2.viewport.center == before_pane2_center,
+          "...and both panes' viewports too -- rejected before anything is mutated")
+    check(window.coupled_checkbox.isChecked() == before_coupled and
+          window._focused_pane is before_focused,
+          "...and the layout (coupled flag, focused pane) as well")
+
+    # ---- no-effect-parameter guard: newton_cubic on the parameter plane -------------
+    print("\nno-effect-parameter guard (a parameter-plane pane for a map `a` doesn't affect):")
+    window.session.map = cdx.RationalMap.newton_cubic()
+    window.mode_combo.setCurrentText("parameter")
+    check(window.image_view.no_effect_parameter_message() is not None,
+          "newton_cubic() on the parameter plane reports a no-effect message -- `a` genuinely "
+          "has no term depending on it")
+    check("no effect" in window.image_view.no_effect_parameter_message() or
+          "has no" in window.image_view.no_effect_parameter_message(),
+          "the message actually explains why, not just a blank/generic string")
+
+    rid_before_guard = window.pane.request_id
+    window._start_render(window.pane)
+    check(window.pane.request_id == rid_before_guard,
+          "_start_render does not dispatch a RenderTask for a no-effect parameter-plane pane "
+          "-- there is nothing meaningful to compute, not just nothing meaningful to show")
+
+    window.mode_combo.setCurrentText("julia")
+    check(window.image_view.no_effect_parameter_message() is None,
+          "the SAME map's dynamical plane has no such guard -- newton's iteration itself "
+          "obviously does depend on z, just not on `a`")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("parameter")
+    check(window.image_view.no_effect_parameter_message() is None,
+          "and mandelbrot()'s parameter plane (where `a` is the whole point) has no guard either")
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded
