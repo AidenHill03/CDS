@@ -31,6 +31,7 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
+from app.library_panel import default_view_for
 from app.pane import Pane
 from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
                          drawable_polyline_segments)
@@ -1108,6 +1109,10 @@ def main() -> None:
     window.term_editor_panel._notify_edit()   # the real path _on_term_edited fires from
     check("renamed-live" in window.metadata_header._label.text(),
           "a term edit refreshes the header's map name/formula")
+    check(window._debounce_timers[window.pane].isActive() and
+          window._debounce_timers[window.pane2].isActive(),
+          "cache asymmetry (Stage 3): session.map is shared, so a term edit debounces BOTH "
+          "panes' renders, not just the focused one")
 
     # ---- cursor readout reaches the actual status bar ------------------------------
     print("\ncursor readout (live status bar):")
@@ -1134,8 +1139,7 @@ def main() -> None:
     # bug), it would land on DEFAULT_PARAMETER_VIEW_CENTER/SCALE instead of
     # this fallback, so this distinguishes "family default" from "frozen
     # snapshot" instead of the two coincidentally agreeing.
-    from app.library_panel import default_view_for as _default_view_for
-    expected_center, expected_scale = _default_view_for(window.session.map.name)
+    expected_center, expected_scale = default_view_for(window.session.map.name)
     check(expected_center == complex(0, 0) and expected_scale == 2.0,
           "sanity: 'renamed-live' isn't a recognized family name, so default_view_for "
           "falls back to the generic view")
@@ -1208,16 +1212,76 @@ def main() -> None:
     window.param_field._line_edit.setText("2-3i")   # restore a valid value for the next section
     window.param_field._on_editing_finished()
 
-    print("\nparameter-plane click -> sets a, switches planes, populates the field:")
+    print("\nparameter-plane click (coupled): drives the PARTNER pane, not the clicked one:")
     window.mode_combo.setCurrentText("parameter")
+    window._set_focused_pane(window.pane)
+    check(window.coupled_checkbox.isChecked(), "sanity: still in coupled mode for this test")
+    check(window.pane2.render_mode == "julia", "sanity: pane2 is the dynamical partner here")
+    pane_a_viewport_before = window.pane.viewport
+    # Deliberately perturbed to something the click's own reset couldn't
+    # coincidentally already match, so the "genuinely changed" check below
+    # actually proves the click drove it, not just that it was already there.
+    window.pane2.viewport = cdx.Viewport(complex(9, 9), 0.001, window.pane2.viewport.resolution)
+    pane2_viewport_before = window.pane2.viewport
+
     click_pixel = window.image_view._complex_to_display_pixel(complex(-0.1, 0.6)).toPoint()
     window.image_view._set_param_at(click_pixel)
     check(close(window.session.param, complex(-0.1, 0.6), 1e-2),
           "clicking the parameter plane sets session.param to the clicked coordinate")
-    check(window.pane.render_mode == "julia",
-          "a parameter-plane click switches straight to the dynamical (julia) plane")
+    check(window.pane.render_mode == "parameter",
+          "COUPLED: the CLICKED pane does not switch plane -- Stage 3's whole point is driving "
+          "the partner instead of the clicked pane")
+    check(window.pane.viewport.center == pane_a_viewport_before.center and
+          window.pane.viewport.scale == pane_a_viewport_before.scale,
+          "COUPLED: the clicked (parameter) pane's own viewport is left completely untouched")
     check(close(window.param_field.value, window.session.param, 1e-2),
           "the field is populated with the SAME value the click just set -- the two never diverge")
+
+    expected_center, expected_scale = default_view_for(window.session.map.name)
+    check(close(window.pane2.viewport.center, expected_center) and
+          abs(window.pane2.viewport.scale - expected_scale) < 1e-9,
+          "the PARTNER dynamical pane's viewport resets to this map's own default framing")
+    check(window.pane2.viewport.center != pane2_viewport_before.center or
+          abs(window.pane2.viewport.scale - pane2_viewport_before.scale) > 1e-15,
+          "sanity: the partner's viewport genuinely changed, not coincidentally already there")
+
+    print("\npersistent param marker: derived from session.param, parameter-plane panes only:")
+    marker_a = window.image_view._param_marker_pixel()
+    marker_2 = window.image_view2._param_marker_pixel()
+    check(marker_a is not None,
+          "the clicked (still parameter-plane) pane shows a marker at session.param")
+    check(marker_2 is None,
+          "the partner (dynamical-plane) pane shows no param marker -- that's a dynamical-plane "
+          "concept it doesn't have")
+    expected_pixel = window.image_view._complex_to_display_pixel(window.session.param)
+    check(close(complex(marker_a.x(), marker_a.y()), complex(expected_pixel.x(), expected_pixel.y()),
+               1e-6),
+          "the marker sits exactly at session.param's own pixel position")
+
+    # No separate marker state to fall out of sync -- a typed field commit
+    # moves it exactly the same way a click does.
+    window.param_field._line_edit.setText("0.3-0.2i")
+    window.param_field._on_editing_finished()
+    marker_after_field = window.image_view._param_marker_pixel()
+    expected_pixel2 = window.image_view._complex_to_display_pixel(window.session.param)
+    check(close(complex(marker_after_field.x(), marker_after_field.y()),
+               complex(expected_pixel2.x(), expected_pixel2.y()), 1e-6),
+          "the marker moves with a field commit too, not just a plane click")
+
+    print("\nsingle-view fallback: click still switches the one visible pane (legacy behavior):")
+    window.coupled_checkbox.setChecked(False)
+    window._set_focused_pane(window.pane)
+    check(window.pane_column.isVisible() and not window.pane_column2.isVisible(),
+          "sanity: single-view, pane A is the one visible pane")
+    single_click_point = complex(-0.6, 0.15)
+    click_pixel_sv = window.image_view._complex_to_display_pixel(single_click_point).toPoint()
+    window.image_view._set_param_at(click_pixel_sv)
+    check(close(window.session.param, single_click_point, 1e-2),
+          "single-view: clicking still sets session.param to the clicked coordinate")
+    check(window.pane.render_mode == "julia",
+          "single-view fallback: the one visible pane still switches straight to julia, matching "
+          "today's pre-Stage-3 behavior -- there is no partner to drive instead")
+    window.coupled_checkbox.setChecked(True)   # restore coupled view for the rest of the suite
 
     print("\ndescribe_parameter_role reaches the live metadata header:")
     check("coefficient of z^0" in window.metadata_header._label.text(),

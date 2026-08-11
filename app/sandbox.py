@@ -376,11 +376,11 @@ class ImageView(QWidget):
     pane_activated = Signal()
     # Emitted with the clicked complex value on a PARAMETER-plane click --
     # deliberately does NOT set session.param itself (unlike _seed_orbit_at
-    # setting the orbit tracker directly): SandboxWindow._apply_new_param
-    # is the one place that assignment happens, so the plane-click and
-    # field-commit paths funnel through EXACTLY the same logic (reset
-    # viewport, refresh critical points/facts/header, sync the field,
-    # switch to a dynamical mode) rather than two divergent copies of it.
+    # setting the orbit tracker directly): SandboxWindow._apply_param_change
+    # is the one place that assignment happens (via _on_param_changed_by_click
+    # or _on_param_field_committed), so the plane-click and field-commit
+    # paths funnel through EXACTLY the same underlying invalidation logic
+    # rather than two divergent copies of it.
     param_changed = Signal(complex)
 
     def __init__(self, pane: Pane, session: Session, parent: QWidget | None = None):
@@ -654,7 +654,7 @@ class ImageView(QWidget):
 
     def refresh_orbit_for_new_param(self) -> None:
         """Called specifically when `a` changes via the parameter field or
-        a parameter-plane click (SandboxWindow._apply_new_param) -- the
+        a parameter-plane click (SandboxWindow._apply_param_change) -- the
         counterpart to refresh_orbit_staleness's CLEAR, but recomputes
         instead: z0 is a persistent, independently-chosen seed (P6's own
         wording), so its orbit under the NEW map/param is exactly what
@@ -719,6 +719,7 @@ class ImageView(QWidget):
             painter.drawRect(self._rubber_band_rect)
         self._paint_critical_point_overlay(painter)
         self._paint_orbit(painter)
+        self._paint_param_marker(painter)
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -820,6 +821,41 @@ class ImageView(QWidget):
             painter.setBrush(QColor(255, 255, 0))
             painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
                                 CRITICAL_POINT_MARKER_RADIUS)
+
+    def _param_marker_pixel(self) -> QPointF | None:
+        """The screen pixel for session.param's crosshair marker on a
+        PARAMETER-plane pane, or None if nothing should be drawn (a
+        dynamical-plane mode, a non-finite param, or off the visible
+        rect) -- factored out of _paint_param_marker so this is directly
+        testable without a real QPainter/paint event, the same reason
+        _orbit_line_segments exists.
+
+        Deliberately derived from self.session.param at paint time, not
+        separate marker state stored anywhere -- Stage 3's "keep the
+        marker in sync with the typed field and with param set any other
+        way" is then true BY CONSTRUCTION: there is nothing that could
+        fall out of sync, because there is nothing else to keep in sync.
+        """
+        if self.pane.render_mode not in PARAMETER_PLANE_MODES:
+            return None
+        a = self.session.param
+        if not (math.isfinite(a.real) and math.isfinite(a.imag)):
+            return None
+        pixel = self._complex_to_display_pixel(a)
+        if not QRectF(self.rect()).contains(pixel):
+            return None
+        return pixel
+
+    def _paint_param_marker(self, painter: QPainter) -> None:
+        pixel = self._param_marker_pixel()
+        if pixel is None:
+            return
+        r = CRITICAL_POINT_MARKER_RADIUS
+        pen = QPen(QColor(255, 0, 0))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
+        painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
 
     # ---- scroll zoom, cursor-anchored -------------------------------------------
     def wheelEvent(self, event) -> None:
@@ -1040,7 +1076,7 @@ class SandboxWindow(QMainWindow):
             # always emits pane_activated (moving focus) BEFORE a release
             # can ever emit param_changed, so by the time this fires,
             # self._focused_pane is already the clicked pane; see
-            # _apply_new_param, which acts on the focused pane.
+            # _on_param_changed_by_click, which reads it as "the clicked pane."
             view.param_changed.connect(self._on_param_changed_by_click)
             # Keeps the "Orbit seed z0" field showing the CURRENT z0
             # whenever one is seeded via a dynamical-plane click (P6's
@@ -1147,7 +1183,7 @@ class SandboxWindow(QMainWindow):
         # Terms tab -- the typed half of P6's "symmetry of input": a and
         # z0 are each settable by typing here OR by clicking a plane (see
         # ImageView.mouseReleaseEvent/param_changed and _on_orbit_changed),
-        # and the two methods stay in sync through _apply_new_param and
+        # and the two methods stay in sync through _apply_param_change and
         # _on_z0_field_committed respectively, never diverging.
         self.param_field = ComplexField("a =", self.session.param, self)
         self.param_field.committed.connect(self._on_param_field_committed)
@@ -1378,49 +1414,85 @@ class SandboxWindow(QMainWindow):
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
     def _on_param_field_committed(self, a: complex) -> None:
-        self._apply_new_param(a, switch_to_dynamical=False)
+        # A typed field commit never switches or targets any ONE pane --
+        # session.param is shared, so it invalidates every DYNAMICAL pane
+        # (see the shared _apply_param_change below) and leaves every
+        # parameter-plane pane's own plane/viewport alone, exactly the
+        # field-commit behavior Stage 1/2 already had, just no longer
+        # limited to the single (then-only) pane.
+        self._apply_param_change(a)
 
     def _on_param_changed_by_click(self, a: complex) -> None:
-        # Per P6 section 1: a parameter-plane click also switches to the
-        # dynamical plane at that value -- the field-commit path leaves
-        # the current plane alone (typing a value while looking at the
-        # parameter plane doesn't imply "now show me the Julia set").
-        self._apply_new_param(a, switch_to_dynamical=True)
+        # mousePressEvent already emitted pane_activated before this can
+        # ever fire (see _build_ui's own comment), so self._focused_pane
+        # is the CLICKED pane.
+        clicked_pane = self._focused_pane
+        if not self.coupled_checkbox.isChecked():
+            # SINGLE-VIEW fallback: only one pane is actually visible, so
+            # there is no "partner" to drive -- keep today's pre-Stage-3
+            # behavior exactly, the same as a P6 parameter-plane click
+            # always had: set a AND switch the one visible pane straight
+            # to the dynamical (julia) plane.
+            self.session.param = a
+            self.param_field.set_value(a)
+            self.facts_panel.refresh()
+            self.metadata_header.refresh()
+            if clicked_pane.render_mode in PARAMETER_PLANE_MODES:
+                # Triggers _on_mode_changed, which itself renders -- so
+                # this does NOT also call _start_render below; doing both
+                # would fire two render requests for one user action.
+                self._mode_combos[clicked_pane].setCurrentText("julia")
+            else:
+                self._apply_param_change(a)   # already dynamical: just the ordinary invalidation
+            return
 
-    def _apply_new_param(self, a: complex, *, switch_to_dynamical: bool) -> None:
+        # COUPLED: this is what makes it an instrument rather than two
+        # windows. The CLICKED pane does NOT switch plane and does NOT
+        # reset its own viewport (its marker just moves, via the ordinary
+        # repaint _apply_param_change already triggers for every
+        # parameter-plane pane) -- only the PARTNER pane, if it's
+        # currently dynamical, gets its viewport reset to this map's
+        # default and re-rendered. See _apply_param_change's own
+        # docstring for why this is exactly the same underlying
+        # invalidation a plain field commit also does.
+        self._apply_param_change(a)
+
+    def _apply_param_change(self, a: complex) -> None:
         """The ONE place session.param is ever assigned from user input --
-        both the field and a parameter-plane click funnel through this, so
-        they cannot diverge (P6's own requirement). Acts on the FOCUSED
-        pane: reset ITS viewport to this map's default (a deep zoom from
-        the PREVIOUS parameter is almost never informative for a new one),
-        refresh critical points/dynamical facts/the metadata header,
-        recompute (not clear) z0's orbit under the new map, and sync the
-        field's own display. session.param itself is shared, so the OTHER
-        pane's rendered pixels are now stale if it's a dynamical mode --
-        re-rendering it too, and doing so ONLY when it actually needs it
-        (see the cache asymmetry: a parameter-plane pane ignores param
-        entirely), is Stage 3's coupling job, not this one's.
+        the field commit and every parameter-plane click (coupled or
+        single-view-already-dynamical) funnel through here, so they
+        cannot diverge (P6's own requirement, extended to N panes).
+
+        CACHE ASYMMETRY (Stage 3): render_parameter ignores the bound
+        param entirely -- every pixel there IS a parameter -- so a param
+        change must invalidate/re-render ONLY panes currently in a
+        DYNAMICAL mode: their viewport resets to this map's default (a
+        deep zoom from the PREVIOUS parameter is almost never informative
+        for a new one) and they re-render. A parameter-plane pane's
+        pixels don't need to change at all -- it only needs an .update()
+        repaint so its marker (see ImageView._param_marker_pixel, derived
+        from session.param at paint time) moves to the new value. Neither
+        the clicked pane (if this came from a click) nor any other
+        parameter-plane pane has its OWN viewport touched or plane
+        switched here -- that is exactly Stage 3's "do NOT reset the
+        clicked (parameter) pane's own viewport" requirement, and it
+        falls out for free by just... not touching it.
         """
         self.session.param = a
-        pane = self._focused_pane
-        center, scale = default_view_for(self.session.map.name)
-        vp = pane.viewport
-        pane.viewport = cdx.Viewport(center, scale, vp.resolution)
-        pane.image_view.refresh_critical_points()
-        pane.image_view.refresh_orbit_for_new_param()
+        self.param_field.set_value(a)
         self.facts_panel.refresh()
         self.metadata_header.refresh()
-        self.param_field.set_value(a)
-        if switch_to_dynamical and pane.render_mode in PARAMETER_PLANE_MODES:
-            # Triggers _on_mode_changed, which itself renders -- so this
-            # branch does NOT also call _start_render below; doing both
-            # would fire two render requests for one user action (the
-            # second cancels the first's in-flight generation, so it
-            # would not be WRONG, just a wasted request for a plain
-            # mode-switch).
-            self._mode_combos[pane].setCurrentText("julia")
-        else:
-            self._update_status_bar()
+        for pane in self.panes:
+            if pane.render_mode in PARAMETER_PLANE_MODES:
+                pane.image_view.update()   # move its marker; nothing else about it changed
+                continue
+            center, scale = default_view_for(self.session.map.name)
+            vp = pane.viewport
+            pane.viewport = cdx.Viewport(center, scale, vp.resolution)
+            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_orbit_for_new_param()
+            if pane is self._focused_pane:
+                self._update_status_bar()
             self._debounce_timers[pane].stop()
             self._start_render(pane)
 
@@ -1500,27 +1572,26 @@ class SandboxWindow(QMainWindow):
         # applied the edit to self.session.map by the time this is called;
         # this only has to trigger the render side.
         #
-        # session.map is SHARED, so a term edit really invalidates BOTH
-        # panes, not just the focused one -- re-rendering only the focused
-        # pane here (and leaving the other visibly stale until its own
-        # trigger) is a known, deliberate Stage 2 gap: "a MAP or term edit
-        # invalidates BOTH panes" is explicitly Stage 3's cache-asymmetry
-        # job, alongside the equivalent gap for a plain param-field commit
-        # (see _apply_new_param's own docstring).
-        pane = self._focused_pane
+        # session.map is SHARED and UNCONDITIONALLY affects every pane's
+        # pixels regardless of mode (unlike a param change, which a
+        # parameter-plane pane ignores entirely -- see
+        # _apply_param_change's own cache-asymmetry docstring) -- so this
+        # debounces BOTH panes, not just the focused one.
         self._update_status_bar()
-        self._debounce_timers[pane].start()
         self.metadata_header.refresh()   # name/formula depend directly on the edited map
         # Cheap: refresh() only recomputes when (map, param) actually
         # changed since its last call, so this stays fresh for whenever the
         # user next looks at the Facts tab without paying for a recompute
         # on every keystroke's worth of edits.
         self.facts_panel.refresh()
-        # Same memoization property -- see ImageView.refresh_critical_points.
-        pane.image_view.refresh_critical_points()
-        # An orbit traced under the PRE-edit map no longer describes this
-        # map's dynamics -- see OrbitTracker.reset_if_stale's own docstring.
-        pane.image_view.refresh_orbit_staleness()
+        for pane in self.panes:
+            self._debounce_timers[pane].start()
+            # Same memoization property -- see ImageView.refresh_critical_points.
+            pane.image_view.refresh_critical_points()
+            # An orbit traced under the PRE-edit map no longer describes
+            # this map's dynamics -- see OrbitTracker.reset_if_stale's own
+            # docstring.
+            pane.image_view.refresh_orbit_staleness()
 
     # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
     def _on_tab_changed(self, index: int) -> None:
@@ -1542,26 +1613,27 @@ class SandboxWindow(QMainWindow):
         # LibraryPanel has already replaced self.session.map by the time
         # this fires (see its _load_selected) but no longer touches any
         # viewport itself (Session has none to touch -- see app.pane.Pane)
-        # -- resetting the FOCUSED pane's viewport to the new map's
-        # default is this method's own job now, before resyncing every
-        # OTHER panel that caches a view of the old map, then rendering
-        # right away, the same "deliberate action, not a debounce-worthy
-        # burst" treatment Reset View and Settings' Apply already get.
-        # session.map is SHARED, so this leaves the OTHER (unfocused)
-        # pane showing the OLD map until its own trigger -- the same
-        # known, deliberate Stage 2 gap _on_term_edited's docstring notes
-        # (Stage 3's cache-asymmetry job, not this one's).
-        pane = self._focused_pane
-        center, scale = default_view_for(self.session.map.name)
-        pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
+        # -- resetting EVERY pane's viewport to the new map's default is
+        # this method's own job now, before resyncing every OTHER panel
+        # that caches a view of the old map, then rendering right away,
+        # the same "deliberate action, not a debounce-worthy burst"
+        # treatment Reset View and Settings' Apply already get. Every
+        # pane, not just the focused one -- session.map is SHARED and
+        # UNCONDITIONALLY affects every pane regardless of mode (see
+        # _apply_param_change's own cache-asymmetry docstring for the
+        # contrast with a plain param change).
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
-        pane.image_view.refresh_critical_points()
-        pane.image_view.refresh_orbit_staleness()
         self.metadata_header.refresh()   # name/formula/param all just changed wholesale
-        self._update_status_bar()
-        self._debounce_timers[pane].stop()
-        self._start_render(pane)
+        for pane in self.panes:
+            center, scale = default_view_for(self.session.map.name)
+            pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
+            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_orbit_staleness()
+            if pane is self._focused_pane:
+                self._update_status_bar()
+            self._debounce_timers[pane].stop()
+            self._start_render(pane)
 
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
@@ -1596,7 +1668,7 @@ class SandboxWindow(QMainWindow):
         # doubles as "the parameter plane's legible region" (see
         # DEFAULT_PARAMETER_VIEW_CENTER/SCALE, which is exactly
         # default_view_for("mandelbrot")) and "the dynamical plane's"
-        # (_apply_new_param uses the identical call for exactly that
+        # (_apply_param_change uses the identical call for exactly that
         # purpose) -- NOT a frozen startup snapshot, which is what this
         # used to restore and was the bug Stage 2 was asked to fix (a
         # deep zoom from a PREVIOUS session/param is never what "reset"
