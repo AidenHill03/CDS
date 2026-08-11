@@ -42,27 +42,22 @@ def main() -> None:
     check(s.map.name == "mandelbrot", "starts on the mandelbrot preset")
     check(s.param == complex(-0.7269, 0.1889),
           "starts with the dendritic Julia parameter, for whenever the user switches to it")
-    check(s.render_mode == "parameter", "starts in parameter-plane render mode (the Mandelbrot set)")
     check(len(s.library) >= 6, "library starts populated (with_defaults)")
+    # Session no longer owns a render_mode or a viewport at all (see
+    # app.pane.Pane -- both moved there in the coupled-viewer refactor);
+    # RENDER_MODES/PARAMETER_PLANE_MODES/mode-string validation are now
+    # exercised against Pane directly, in app/test_pane.py.
 
-    # ---- render mode ------------------------------------------------------------
-    print("\nrender mode:")
-    try:
-        s.set_render_mode("nonsense")
-        check(False, "invalid render mode raises")
-    except ValueError:
-        check(True, "invalid render mode raises ValueError")
-
-    s.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    # ---- render mode dispatch: render() takes viewport/mode explicitly ----------
+    print("\nrender mode (Session.render(viewport, mode) dispatch):")
+    vp = cdx.Viewport(complex(0, 0), 1.5, 41)
     s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
 
-    s.set_render_mode("julia")
-    julia = s.render()
+    julia = s.render(vp, "julia")
     check(julia.shape == (41, 41), "julia render matches viewport resolution")
 
     s.param = -1 + 0j   # the basilica
-    s.set_render_mode("basin")
-    basin = s.render()
+    basin = s.render(vp, "basin")
     check(basin.shape == (2, 41, 41),
           "basin render is STACKED: (2, height, width) -- labels, then iterations")
     labels, iterations = basin[0], basin[1]
@@ -72,16 +67,13 @@ def main() -> None:
     check(iterations[labels > 0].min() >= 1,
           "every RESOLVED pixel took at least one iteration to get there")
 
-    s.set_render_mode("parameter")
-    param_plane = s.render()
+    param_plane = s.render(vp, "parameter")
     check(param_plane.shape == (41, 41), "parameter-plane render matches viewport resolution")
 
-    s.set_render_mode("greens")
-    greens_array = s.render()
+    greens_array = s.render(vp, "greens")
     check(greens_array.shape == (41, 41), "greens render matches viewport resolution")
 
-    s.set_render_mode("parameter_greens")
-    pgreens_array = s.render()
+    pgreens_array = s.render(vp, "parameter_greens")
     check(pgreens_array.shape == (41, 41),
           "parameter_greens render also matches viewport resolution")
 
@@ -89,18 +81,17 @@ def main() -> None:
     print("\nrender cache:")
     s.map = cdx.RationalMap.mandelbrot()
     s.param = 0j
-    s.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    vp = cdx.Viewport(complex(0, 0), 1.5, 41)
     s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
-    s.set_render_mode("julia")
     s.cache.clear()
 
     before = s.cache.stats
-    first = s.render()
+    first = s.render(vp, "julia")
     after_first = s.cache.stats
     check(after_first.misses == before.misses + 1 and after_first.entry_count == 1,
           "Session.render() populates the cache on a miss")
 
-    second = s.render()
+    second = s.render(vp, "julia")
     after_second = s.cache.stats
     check(after_second.hits == after_first.hits + 1 and after_second.misses == after_first.misses,
           "an identical Session.render() call is a cache hit, not a second render")
@@ -108,13 +99,13 @@ def main() -> None:
 
     s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 2)   # only threads differs
     after_threads = s.cache.stats
-    s.render()
+    s.render(vp, "julia")
     check(s.cache.stats.hits == after_threads.hits + 1,
           "threads is not part of the cache key -- changing only thread count still hits")
 
-    s.viewport = cdx.Viewport(complex(0, 0), 1.5, 43)   # a real, output-affecting change
+    vp = cdx.Viewport(complex(0, 0), 1.5, 43)   # a real, output-affecting change
     misses_before_res_change = s.cache.stats.misses
-    s.render()
+    s.render(vp, "julia")
     check(s.cache.stats.misses == misses_before_res_change + 1,
           "changing resolution is a cache miss (a different key), not a stale hit")
 
@@ -126,12 +117,12 @@ def main() -> None:
     # here rather than just asserted, since a cache key silently missing a
     # real input is exactly the kind of bug that only shows up as a stale
     # image, not an exception.
-    s.render()   # re-establish a hit baseline at the CURRENT (43-res) key
+    s.render(vp, "julia")   # re-establish a hit baseline at the CURRENT (43-res) key
     hits_before_edit = s.cache.stats.hits
     misses_before_edit = s.cache.stats.misses
     entries_before_edit = s.cache.stats.entry_count
     s.map.poly_terms()[0].coeff = 3 + 0j   # mandelbrot's z^2 term, live-mutated in place
-    s.render()
+    s.render(vp, "julia")
     check(s.cache.stats.misses == misses_before_edit + 1 and s.cache.stats.hits == hits_before_edit,
           "editing a term is a cache miss, not a stale hit -- even though viewport/settings/mode "
           "are all unchanged and s.map is the SAME Python object (mutated in place, not reassigned)")
@@ -141,7 +132,7 @@ def main() -> None:
 
     misses_before_param = s.cache.stats.misses
     s.param = s.param + 0.01
-    s.render()
+    s.render(vp, "julia")
     check(s.cache.stats.misses == misses_before_param + 1,
           "changing the parameter is also a cache miss, not a stale hit -- param is part of "
           "the key even though it isn't part of map.serialize() at all")
@@ -418,28 +409,31 @@ def main() -> None:
 
     # A non-trivial, custom (not-a-preset) map -- to_formula() is the
     # cleanest thing to compare on, since RationalMap has no __eq__.
+    # viewport/render_mode are no longer Session's own (see app.pane.Pane)
+    # -- snapshot_to_dict/restore_from_snapshot now take/return them
+    # explicitly, the same way a real Pane would supply/receive them.
     src = Session()
     custom_map = cdx.RationalMap("scratch")
     custom_map.add_poly(complex(1, 0), 3, 0, "z^3")
     custom_map.add_pole(complex(0.5, -0.5), complex(1, 0), 2, 1, "pole")
     src.map = custom_map
     src.param = complex(0.123, -0.456)
-    src.viewport = cdx.Viewport(complex(0.01, -0.02), 1e-4, 333)   # a genuinely zoomed view
-    src.set_render_mode("basin")
+    src_viewport = cdx.Viewport(complex(0.01, -0.02), 1e-4, 333)   # a genuinely zoomed view
+    src_mode = "basin"
     src.render_settings = cdx.RenderSettings(321, 3.5, 1e-8, 2)
 
     z0 = complex(0.3, -0.1)
-    d = src.snapshot_to_dict(orbit=(z0, 4))
+    d = src.snapshot_to_dict(src_viewport, src_mode, orbit=(z0, 4))
     dst = Session()
-    orbit = dst.restore_from_snapshot(d)
+    dst_viewport, dst_mode, orbit = dst.restore_from_snapshot(d)
 
     check(dst.map.to_formula() == src.map.to_formula(), "round-trip: map formula matches")
     check(dst.param == src.param, "round-trip: param matches")
-    check(dst.viewport.center == src.viewport.center and
-          dst.viewport.scale == src.viewport.scale and
-          dst.viewport.resolution == src.viewport.resolution,
+    check(dst_viewport.center == src_viewport.center and
+          dst_viewport.scale == src_viewport.scale and
+          dst_viewport.resolution == src_viewport.resolution,
           "round-trip: viewport (center/scale/resolution) matches")
-    check(dst.render_mode == src.render_mode, "round-trip: render_mode matches")
+    check(dst_mode == src_mode, "round-trip: render_mode matches")
     check(dst.render_settings.max_iter == src.render_settings.max_iter and
           dst.render_settings.escape_radius == src.render_settings.escape_radius and
           dst.render_settings.tol == src.render_settings.tol and
@@ -467,28 +461,27 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "test.cdsx")
-        src.save_snapshot(path, orbit=(z0, 4))
+        src.save_snapshot(path, src_viewport, src_mode, orbit=(z0, 4))
         dst_file = Session()
-        orbit_file = dst_file.load_snapshot(path)
+        viewport_file, mode_file, orbit_file = dst_file.load_snapshot(path)
         check(dst_file.map.to_formula() == src.map.to_formula() and dst_file.param == src.param
-              and orbit_file == (z0, 4),
+              and mode_file == src_mode and orbit_file == (z0, 4),
               "save_snapshot/load_snapshot round-trips through an ACTUAL JSON file, not just "
               "the in-memory dict -- the float encode/decode step is lossless too")
 
     # ---- orbit-null round-trip -------------------------------------------------------
-    d_null = src.snapshot_to_dict(orbit=None)
+    d_null = src.snapshot_to_dict(src_viewport, src_mode, orbit=None)
     dst_null = Session()
-    orbit_null = dst_null.restore_from_snapshot(d_null)
+    _vp_null, _mode_null, orbit_null = dst_null.restore_from_snapshot(d_null)
     check(orbit_null is None, "orbit-null round-trip: no active orbit survives as no orbit")
 
     # ---- parameter-plane mode with no orbit -------------------------------------------
     param_plane_session = Session()
     param_plane_session.map = cdx.RationalMap.mandelbrot()
-    param_plane_session.set_render_mode("parameter")
-    d_pp = param_plane_session.snapshot_to_dict(orbit=None)
+    d_pp = param_plane_session.snapshot_to_dict(src_viewport, "parameter", orbit=None)
     dst_pp = Session()
-    orbit_pp = dst_pp.restore_from_snapshot(d_pp)
-    check(orbit_pp is None and dst_pp.render_mode == "parameter",
+    _vp_pp, mode_pp, orbit_pp = dst_pp.restore_from_snapshot(d_pp)
+    check(orbit_pp is None and mode_pp == "parameter",
           "a snapshot taken in a parameter-plane mode with no orbit restores cleanly, with "
           "nothing to seed")
 
@@ -499,7 +492,7 @@ def main() -> None:
     guard_session.param = complex(-0.7269, 0.1889)
     before_map = guard_session.map.serialize()   # pre-captured, compared byte-for-byte after
     before_param = guard_session.param
-    before_mode = guard_session.render_mode
+    before_max_iter = guard_session.render_settings.max_iter
 
     valid_map_text = guard_session.map.serialize()
     bad_snapshots = [
@@ -525,8 +518,9 @@ def main() -> None:
 
     check(guard_session.map.serialize() == before_map,
           "the live session's map is BYTE-FOR-BYTE unchanged after every rejected load")
-    check(guard_session.param == before_param and guard_session.render_mode == before_mode,
-          "...and so is everything else -- no half-applied load")
+    check(guard_session.param == before_param and
+          guard_session.render_settings.max_iter == before_max_iter,
+          "...and so is everything else Session still owns -- no half-applied load")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

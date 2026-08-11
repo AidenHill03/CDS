@@ -120,18 +120,18 @@ def main() -> None:
     check("my-family-renamed" in session.library.names(),
           "the entry keeps its original name after the rejected rename")
 
-    # ---- load: replaces session.map, resets the viewport ---------------------------
+    # ---- load: replaces session.map; on_load's own handler resets the viewport ------
+    # LibraryPanel itself no longer touches any viewport (Session has none
+    # of its own to touch -- see app.pane.Pane); that reset is on_load's
+    # job now (app/sandbox.py's _on_family_loaded, covered in
+    # app/test_sandbox.py against a real Pane) -- here, only what this
+    # panel itself is actually responsible for.
     print("\nload:")
-    session.viewport = cdx.Viewport(complex(9, 9), 0.001, 100)
     loads.clear()
     panel._select_by_name("my-family-renamed")
     panel._load_selected()
     check(session.map.name == "my-family-renamed", "Load makes the selected entry the current map")
     check(len(loads) == 1, "a successful load calls on_load")
-    expected_center, expected_scale = default_view_for("my-family-renamed")   # unlisted -> fallback
-    check(session.viewport.center == expected_center and session.viewport.scale == expected_scale,
-          "loading resets the viewport to that family's default (fallback, since it's not "
-          "one of the six built-ins) -- not left at wherever the user had scrolled to")
 
     # ---- delete -------------------------------------------------------------------------
     print("\ndelete:")

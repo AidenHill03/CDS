@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 import cdx
 from app.orbit_panel import OrbitPanel
+from app.pane import Pane
 from app.sandbox import ImageView
 from app.session import Session
 
@@ -53,8 +54,9 @@ def main() -> None:
     session = Session()
     session.map = cdx.RationalMap.mandelbrot()
     session.param = -1 + 0j   # the basilica
-    session.set_render_mode("julia")
-    view = ImageView(session)
+    pane = Pane(cdx.Viewport(complex(0, 0), 2.0, 400), "julia")
+    view = ImageView(pane, session)
+    pane.image_view = view
     panel = OrbitPanel(session, view)
 
     check("Click the image" in panel._readout_label.text(),

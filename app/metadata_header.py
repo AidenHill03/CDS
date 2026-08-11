@@ -60,8 +60,10 @@ def describe_parameter_role(rational_map) -> str:
     return "; ".join(roles)
 
 
-def format_metadata_text(session) -> str:
-    is_parameter_plane = session.render_mode in PARAMETER_PLANE_MODES
+def format_metadata_text(session, render_mode: str) -> str:
+    # render_mode is the CALLER's own -- typically one Pane's (see
+    # app.pane.Pane) -- since Session no longer owns a render_mode itself.
+    is_parameter_plane = render_mode in PARAMETER_PLANE_MODES
     domain = "Parameter plane" if is_parameter_plane else "Dynamical plane"
     role = describe_parameter_role(session.map)
     # On the parameter plane the bound parameter is IGNORED by the render
@@ -75,13 +77,14 @@ def format_metadata_text(session) -> str:
                  else f"a = {_format_complex(session.param)} [{role}]")
     formula = session.map.to_formula() or "(empty map)"
     return (f"{session.map.name}: {formula}   |   {domain}   |   {param_part}   |   "
-            f"mode: {session.render_mode}")
+            f"mode: {render_mode}")
 
 
 class MetadataHeader(QWidget):
-    def __init__(self, session, parent: QWidget | None = None):
+    def __init__(self, session, pane, parent: QWidget | None = None):
         super().__init__(parent)
         self.session = session
+        self.pane = pane
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -93,4 +96,4 @@ class MetadataHeader(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        self._label.setText(format_metadata_text(self.session))
+        self._label.setText(format_metadata_text(self.session, self.pane.render_mode))

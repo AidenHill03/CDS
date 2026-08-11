@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 import cdx
 from app.metadata_header import MetadataHeader, describe_parameter_role, format_metadata_text
+from app.pane import Pane
 from app.session import Session
 
 failures = 0
@@ -33,12 +34,14 @@ def main() -> None:
     print("=== app.metadata_header tests ===")
 
     # ---- format_metadata_text: dynamical plane -------------------------------------
+    # render_mode is the CALLER's own now (see app.pane.Pane) -- passed to
+    # format_metadata_text directly as a plain string; MetadataHeader
+    # itself (below) takes a real Pane, the same as app/sandbox.py does.
     print("\nformat_metadata_text (dynamical plane):")
     session = Session()
     session.map = cdx.RationalMap.mandelbrot()
     session.param = complex(-0.7269, 0.1889)
-    session.set_render_mode("julia")
-    text = format_metadata_text(session)
+    text = format_metadata_text(session, "julia")
 
     check("mandelbrot" in text, "the map's own name appears")
     check("z^2 + a" in text, "the map's to_formula() output appears")
@@ -50,8 +53,7 @@ def main() -> None:
 
     # ---- format_metadata_text: parameter plane --------------------------------------
     print("\nformat_metadata_text (parameter plane):")
-    session.set_render_mode("parameter")
-    text_param = format_metadata_text(session)
+    text_param = format_metadata_text(session, "parameter")
     check("Parameter plane" in text_param, "parameter mode is reported as the parameter plane")
     check("Dynamical plane" not in text_param, "and NOT also as the dynamical plane")
     check("-0.7269" not in text_param,
@@ -61,15 +63,14 @@ def main() -> None:
           "the text explains explicitly that the bound parameter has no effect here, "
           "not just silently omitting it without explanation")
 
-    session.set_render_mode("parameter_greens")
-    check("Parameter plane" in format_metadata_text(session),
+    check("Parameter plane" in format_metadata_text(session, "parameter_greens"),
           "parameter_greens is also reported as the parameter plane (the other of the two "
           "PARAMETER_PLANE_MODES)")
 
     # ---- format_metadata_text: name/formula track the CURRENT map, not a stale one --
     print("\nformat_metadata_text tracks the current map:")
     session.map = cdx.RationalMap.newton_cubic()
-    text_newton = format_metadata_text(session)
+    text_newton = format_metadata_text(session, "julia")
     check("newton3" in text_newton, "renaming/replacing the map is reflected immediately")
     check("mandelbrot" not in text_newton, "the OLD map's name is gone, not left stale")
 
@@ -82,7 +83,7 @@ def main() -> None:
     # for what ACTUALLY happens, not for the unreachable fallback text.
     empty = Session()
     empty.map = cdx.RationalMap("scratch")
-    check("scratch: 0" in format_metadata_text(empty),
+    check("scratch: 0" in format_metadata_text(empty, "julia"),
           "a map with no terms shows its own genuinely correct formula, '0' -- not a blank "
           "or broken string")
 
@@ -134,9 +135,9 @@ def main() -> None:
     print("\nMetadataHeader widget:")
     session2 = Session()
     session2.map = cdx.RationalMap.mandelbrot()
-    session2.set_render_mode("julia")
-    header = MetadataHeader(session2)
-    check(header._label.text() == format_metadata_text(session2),
+    pane2 = Pane(cdx.Viewport(complex(0, 0), 1.5, 100), "julia")
+    header = MetadataHeader(session2, pane2)
+    check(header._label.text() == format_metadata_text(session2, pane2.render_mode),
           "the widget's initial text matches format_metadata_text on construction")
 
     session2.map = cdx.RationalMap.newton_cubic()
@@ -147,6 +148,12 @@ def main() -> None:
     header.refresh()
     check("newton3" in header._label.text() and "mandelbrot" not in header._label.text(),
           "calling refresh() picks up the new map")
+
+    pane2.render_mode = "parameter"
+    header.refresh()
+    check("Parameter plane" in header._label.text(),
+          "refresh() also picks up a render_mode change on the SAME pane object -- the "
+          "header reads pane.render_mode live, not a value captured once at construction")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

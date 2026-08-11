@@ -28,11 +28,15 @@ what keeps it constructible standalone in tests without ever touching a
 real ~/.complexdynamics/library.txt (see app/test_settings_panel.py's own
 note on the identical concern for Settings).
 
-LOADING RESETS THE VIEWPORT to a per-family default (_DEFAULT_VIEWS below)
--- hand-picked framings for the six built-in shapes' most legible region,
-falling back to a generic default for anything else (a user-saved family).
-It does not touch render_mode or the parameter; loading a family has no
-informed opinion about either.
+LOADING resets each visible pane's VIEWPORT to a per-family default
+(_DEFAULT_VIEWS below, via default_view_for) -- hand-picked framings for
+the six built-in shapes' most legible region, falling back to a generic
+default for anything else (a user-saved family). That reset itself now
+happens in on_load's own handler (app/sandbox.py's _on_family_loaded),
+not here: this panel no longer touches any pane's viewport directly (see
+app.pane.Pane -- Session itself has no single viewport to reset anymore).
+Loading a family does not touch render_mode or the parameter either;
+loading has no informed opinion about either one.
 """
 
 from __future__ import annotations
@@ -43,7 +47,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
 
-import cdx
 from app.session import PRESET_FAMILY_NAMES
 
 # Hand-picked (center, scale) for each built-in preset's most legible
@@ -174,8 +177,14 @@ class LibraryPanel(QWidget):
         self._error_label.setText("")
         self._on_change()
 
-    # ---- load: replaces session.map, resets the viewport to a sensible default ---------
+    # ---- load: replaces session.map; the CALLER resets its own pane's viewport --------
     def _load_selected(self) -> None:
+        # Viewport reset to this family's default used to happen HERE, but
+        # session no longer owns a viewport (see app.pane.Pane) -- on_load
+        # (app/sandbox.py's _on_family_loaded) does it now, for whichever
+        # pane(s) it owns, via default_view_for(self.session.map.name)
+        # (equivalent to default_view_for(name) here, since load_from_
+        # library just set session.map to this same name's map).
         name = self._selected_name()
         if name is None:
             return
@@ -185,9 +194,6 @@ class LibraryPanel(QWidget):
             self._error_label.setText(str(e))
             return
         self._error_label.setText("")
-        center, scale = default_view_for(name)
-        vp = self.session.viewport
-        self.session.viewport = cdx.Viewport(center, scale, vp.resolution)
         self._on_load()
 
     # ---- save current map as a new (or updated) library entry --------------------------

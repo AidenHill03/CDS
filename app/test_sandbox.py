@@ -31,10 +31,26 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
+from app.pane import Pane
 from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
                          drawable_polyline_segments)
 from app.session import Session, render_map
 from app.settings import Settings
+
+
+def _pane_view(session: Session, center: complex = 0j, scale: float = 1.5,
+              resolution: int = 400, render_mode: str = "julia"):
+    """A Pane + its ImageView, wired together the same way SandboxWindow._build_ui
+    does (pane constructed first with a real viewport/mode, then ImageView(pane,
+    session) reads its initial state from it, then pane.image_view is set back)
+    -- the standalone-widget-test equivalent of a real window's single pane,
+    used throughout this file wherever a test needs an ImageView without a
+    full SandboxWindow.
+    """
+    pane = Pane(cdx.Viewport(center, scale, resolution), render_mode)
+    view = ImageView(pane, session)
+    pane.image_view = view
+    return pane, view
 
 failures = 0
 
@@ -195,8 +211,7 @@ def main() -> None:
     # ---- pixel <-> complex coordinate mapping -----------------------------------
     print("\npixel <-> complex mapping:")
     session = Session()
-    session.viewport = cdx.Viewport(complex(0, 0), 1.5, 400)
-    view = ImageView(session)
+    pane, view = _pane_view(session, complex(0, 0), 1.5, 400)
     view.resize(400, 400)
 
     center_pixel = QPoint(200, 200)
@@ -224,8 +239,7 @@ def main() -> None:
     overlay_session = Session()
     overlay_session.map = cdx.RationalMap.mandelbrot()
     overlay_session.param = -1 + 0j   # the basilica: critical point 0, period-2 cycle 0 <-> -1
-    overlay_session.set_render_mode("julia")
-    overlay_view = ImageView(overlay_session)
+    overlay_pane, overlay_view = _pane_view(overlay_session, render_mode="julia")
 
     check(overlay_view._should_draw_critical_points() is False,
           "overlay is off by default even in a dynamical-plane mode")
@@ -233,17 +247,17 @@ def main() -> None:
     check(overlay_view._should_draw_critical_points() is True,
           "enabling the checkbox turns it on in a dynamical-plane mode")
 
-    overlay_session.set_render_mode("parameter")
+    overlay_pane.set_render_mode("parameter")
     check(overlay_view._should_draw_critical_points() is False,
           "the overlay is suppressed on the PARAMETER plane -- critical points are dynamical-"
           "plane objects, per P5c's own spec")
-    overlay_session.set_render_mode("parameter_greens")
+    overlay_pane.set_render_mode("parameter_greens")
     check(overlay_view._should_draw_critical_points() is False,
           "also suppressed on parameter_greens (the other parameter-plane mode)")
-    overlay_session.set_render_mode("basin")
+    overlay_pane.set_render_mode("basin")
     check(overlay_view._should_draw_critical_points() is True,
           "shown again on basin mode -- basin pixels ARE dynamical-plane initial conditions")
-    overlay_session.set_render_mode("julia")
+    overlay_pane.set_render_mode("julia")
 
     overlay_view.refresh_critical_points()
     check(0j in overlay_view._critical_points
@@ -255,7 +269,7 @@ def main() -> None:
 
     key_before = overlay_view._critical_points_key
     points_before = overlay_view._critical_points   # SAME list object if truly memoized
-    overlay_session.viewport = cdx.Viewport(complex(0.4, 0.4), 0.2, 41)   # pan/zoom only
+    overlay_pane.viewport = cdx.Viewport(complex(0.4, 0.4), 0.2, 41)   # pan/zoom only
     overlay_view.refresh_critical_points()
     check(overlay_view._critical_points_key == key_before,
           "panning/zooming (viewport only) never changes the (map, param) cache key")
@@ -289,9 +303,7 @@ def main() -> None:
     orbit_session = Session()
     orbit_session.map = cdx.RationalMap.mandelbrot()
     orbit_session.param = -1 + 0j   # the basilica again
-    orbit_session.set_render_mode("julia")
-    orbit_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
-    orbit_view = ImageView(orbit_session)
+    orbit_pane, orbit_view = _pane_view(orbit_session, complex(0, 0), 2.0, 400, "julia")
     orbit_view.resize(400, 400)
     orbit_panel = OrbitPanel(orbit_session, orbit_view)
 
@@ -321,11 +333,11 @@ def main() -> None:
 
     # Parameter-plane modes: click-to-seed is a no-op (orbit tracking is a
     # dynamical-plane concept, same gating as the critical-point overlay).
-    orbit_session.set_render_mode("parameter")
+    orbit_pane.set_render_mode("parameter")
     orbit_view._seed_orbit_at(center_pixel)
     check(orbit_view.orbit_tracker.state is None,
           "clicking on the PARAMETER plane does not seed an orbit")
-    orbit_session.set_render_mode("julia")
+    orbit_pane.set_render_mode("julia")
 
     # Staleness: survives a pan/zoom, clears on a map/param change -- the
     # SAME property already verified directly against OrbitTracker itself
@@ -333,7 +345,7 @@ def main() -> None:
     # refresh_orbit_staleness wiring actually reaches it.
     orbit_view._seed_orbit_at(center_pixel)
     check(orbit_view.orbit_tracker.state is not None, "sanity: an orbit exists again")
-    orbit_session.viewport = cdx.Viewport(complex(0.3, 0.3), 1.0, 400)   # pan/zoom only
+    orbit_pane.viewport = cdx.Viewport(complex(0.3, 0.3), 1.0, 400)   # pan/zoom only
     orbit_view.refresh_orbit_staleness()
     check(orbit_view.orbit_tracker.state is not None,
           "a viewport-only change survives refresh_orbit_staleness -- panning/zooming is the "
@@ -348,9 +360,7 @@ def main() -> None:
     print("\norbit tracking (mouse press/release gesture):")
     orbit_session2 = Session()
     orbit_session2.map = cdx.RationalMap.mandelbrot()
-    orbit_session2.set_render_mode("julia")
-    orbit_session2.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
-    gesture_view = ImageView(orbit_session2)
+    gesture_pane, gesture_view = _pane_view(orbit_session2, complex(0, 0), 2.0, 400, "julia")
     gesture_view.resize(400, 400)
 
     class _FakeMouseEvent:
@@ -376,7 +386,7 @@ def main() -> None:
     gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300)))   # a real drag
     check(gesture_view.orbit_tracker.state is None,
           "a real drag (rubber-band zoom) does NOT also seed an orbit at the release point")
-    check(close(gesture_view.session.viewport.center, complex(0, 0), 0.7),
+    check(close(gesture_view.pane.viewport.center, complex(0, 0), 0.7),
           "sanity: the drag actually did rubber-band zoom (viewport changed)")
 
     # ---- orbit trace: drawable_polyline_segments (pure geometry, no painter needed) --
@@ -424,9 +434,7 @@ def main() -> None:
     toggle_session = Session()
     toggle_session.map = cdx.RationalMap.mandelbrot()
     toggle_session.param = -1 + 0j   # the basilica
-    toggle_session.set_render_mode("julia")
-    toggle_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
-    toggle_view = ImageView(toggle_session)
+    toggle_pane, toggle_view = _pane_view(toggle_session, complex(0, 0), 2.0, 400, "julia")
     toggle_view.resize(400, 400)
     toggle_view.orbit_tracker.seed(toggle_session.map, toggle_session.param, complex(0.3, 0.2))
     toggle_view.step_orbit(3)
@@ -460,17 +468,15 @@ def main() -> None:
     readout_session = Session()
     readout_session.map = cdx.RationalMap.mandelbrot()
     readout_session.param = -1 + 0j
-    readout_session.set_render_mode("julia")
-    readout_session.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
-    readout_view = ImageView(readout_session)
+    readout_pane, readout_view = _pane_view(readout_session, complex(0, 0), 1.5, 41, "julia")
     readout_view.resize(400, 400)
 
     check(readout_view.cursor_readout_text(QPoint(200, 200)) == "z = 0.0000+0.0000j",
           "with no buffer rendered yet, the readout is JUST the coordinate -- no sampled value")
 
-    real_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+    real_array = render_map(readout_session.map, readout_session.param, readout_pane.viewport,
                             readout_session.render_settings, "julia")
-    readout_view.set_image(real_array, readout_session.viewport)
+    readout_view.set_image(real_array, readout_pane.viewport)
     center_text = readout_view.cursor_readout_text(QPoint(200, 200))
     check("never escaped" in center_text,
           "the basilica's own critical point (screen center here) never escapes -- sampled "
@@ -482,12 +488,12 @@ def main() -> None:
     # Precision scales with zoom depth -- four decimals is useless at
     # scale 1e-9 (P5c's own wording), checked directly, not assumed from
     # reading the formula.
-    readout_session.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
+    readout_pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 41)
     normal_text = readout_view.cursor_readout_text(QPoint(200, 200))
     normal_decimals = len(normal_text.split("z = ")[1].split("+")[0].split(".")[1])
     check(normal_decimals == 4, "at an ordinary zoom level, the coordinate shows 4 decimals")
 
-    readout_session.viewport = cdx.Viewport(complex(0, 0), 1e-9, 41)
+    readout_pane.viewport = cdx.Viewport(complex(0, 0), 1e-9, 41)
     deep_text = readout_view.cursor_readout_text(QPoint(200, 200))
     deep_decimals = len(deep_text.split("z = ")[1].split("+")[0].split(".")[1])
     check(deep_decimals > normal_decimals,
@@ -501,19 +507,19 @@ def main() -> None:
 
     # ---- cursor readout: mode-dependent second field (basin, greens) --------------
     print("\ncursor readout (basin / greens sampling):")
-    readout_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 41)
-    readout_session.set_render_mode("basin")
-    basin_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+    readout_pane.viewport = cdx.Viewport(complex(0, 0), 2.0, 41)
+    readout_pane.set_render_mode("basin")
+    basin_array = render_map(readout_session.map, readout_session.param, readout_pane.viewport,
                              readout_session.render_settings, "basin")
-    readout_view.set_image(basin_array, readout_session.viewport)
+    readout_view.set_image(basin_array, readout_pane.viewport)
     basin_text = readout_view.cursor_readout_text(QPoint(200, 200))
     check("basin = " in basin_text or "unresolved" in basin_text,
           "basin mode's cursor readout samples the label layer, not the escape-time format")
 
-    readout_session.set_render_mode("greens")
-    greens_array = render_map(readout_session.map, readout_session.param, readout_session.viewport,
+    readout_pane.set_render_mode("greens")
+    greens_array = render_map(readout_session.map, readout_session.param, readout_pane.viewport,
                               readout_session.render_settings, "greens")
-    readout_view.set_image(greens_array, readout_session.viewport)
+    readout_view.set_image(greens_array, readout_pane.viewport)
     greens_text = readout_view.cursor_readout_text(QPoint(200, 200))
     check("potential = " in greens_text,
           "greens mode's cursor readout samples the potential, not escape/basin formatting")
@@ -528,39 +534,37 @@ def main() -> None:
     # ---- cursor-anchored zoom formula --------------------------------------------
     print("\ncursor-anchored zoom:")
     session2 = Session()
-    session2.viewport = cdx.Viewport(complex(0.2, -0.3), 1.0, 400)
-    view2 = ImageView(session2)
+    pane2, view2 = _pane_view(session2, complex(0.2, -0.3), 1.0, 400)
     view2.resize(400, 400)
 
     cursor = QPoint(300, 120)   # off-center, deliberately
     w_before = view2._pixel_to_complex(cursor)
 
-    vp = session2.viewport
+    vp = pane2.viewport
     factor = 1.15 ** 3   # simulate 3 notches, matching wheelEvent's math directly
     new_center = w_before - (w_before - vp.center) / factor
     new_scale = vp.scale / factor
-    session2.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
+    pane2.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
 
     w_after = view2._pixel_to_complex(cursor)
     check(close(w_before, w_after, 1e-9),
           "the complex point under the cursor is unchanged by a cursor-anchored zoom")
-    check(session2.viewport.scale < 1.0, "zooming in (factor>1) shrinks scale")
+    check(pane2.viewport.scale < 1.0, "zooming in (factor>1) shrinks scale")
 
     # ---- pan anchor invariant ------------------------------------------------------
     print("\npan anchor invariant:")
     session3 = Session()
-    session3.viewport = cdx.Viewport(complex(0, 0), 1.5, 400)
-    view3 = ImageView(session3)
+    pane3, view3 = _pane_view(session3, complex(0, 0), 1.5, 400)
     view3.resize(400, 400)
 
     anchor_pixel = QPoint(150, 100)
     anchor_complex = view3._pixel_to_complex(anchor_pixel)
     drag_to_pixel = QPoint(250, 260)   # dragged elsewhere
 
-    vp3 = session3.viewport
+    vp3 = pane3.viewport
     current_point = view3._pixel_to_complex(drag_to_pixel)
     new_center = vp3.center + (anchor_complex - current_point)
-    session3.viewport = cdx.Viewport(new_center, vp3.scale, vp3.resolution)
+    pane3.viewport = cdx.Viewport(new_center, vp3.scale, vp3.resolution)
 
     anchor_after = view3._pixel_to_complex(drag_to_pixel)
     check(close(anchor_complex, anchor_after, 1e-9),
@@ -575,14 +579,13 @@ def main() -> None:
     # back onto the display must use the buffer's OWN stored viewport, not
     # assume the buffer matches the display exactly.
     session5 = Session()
-    session5.viewport = cdx.Viewport(complex(0.3, -0.2), 1.0, 400)
-    view5 = ImageView(session5)
+    pane5, view5 = _pane_view(session5, complex(0.3, -0.2), 1.0, 400)
     view5.resize(400, 400)
 
     overscan_factor = 1.3
     buffer_res = round(400 * overscan_factor)   # 520, exactly -- no rounding noise
-    buffer_viewport = cdx.Viewport(session5.viewport.center,
-                                   session5.viewport.scale * overscan_factor, buffer_res)
+    buffer_viewport = cdx.Viewport(pane5.viewport.center,
+                                   pane5.viewport.scale * overscan_factor, buffer_res)
     view5.set_image(np.zeros((buffer_res, buffer_res)), buffer_viewport)
 
     # Cross-check against a fully independent hand computation -- not
@@ -592,7 +595,7 @@ def main() -> None:
     # really does determine every point, as the affine argument in
     # ImageView's docstring claims.
     probe_pixel = QPoint(310, 120)
-    disp_vp = session5.viewport
+    disp_vp = pane5.viewport
     rel_x = probe_pixel.x() / 400.0
     rel_y = probe_pixel.y() / 400.0
     probe_complex = complex(disp_vp.center.real - disp_vp.scale + rel_x * 2.0 * disp_vp.scale,
@@ -628,11 +631,11 @@ def main() -> None:
     check(abs(view5.buffer_edge_fraction() - 1.0 / overscan_factor) < 1e-9,
           "buffer_edge_fraction right after a render is exactly 1/overscan_factor")
 
-    session5.viewport = cdx.Viewport(disp_vp.center, disp_vp.scale * 1.25, disp_vp.resolution)
+    pane5.viewport = cdx.Viewport(disp_vp.center, disp_vp.scale * 1.25, disp_vp.resolution)
     check(view5.buffer_edge_fraction() > 1.0 / overscan_factor,
           "zooming out grows the buffer edge fraction")
 
-    fresh_view = ImageView(Session())
+    _fresh_pane, fresh_view = _pane_view(Session())
     check(fresh_view.buffer_edge_fraction() == 1.0,
           "an ImageView with no buffer yet is always due for a render")
 
@@ -649,7 +652,7 @@ def main() -> None:
     # the real app ever changes render_mode except through the combo box
     # itself -- see the dedicated "mode selector" section further down for
     # that actual UI path).
-    check(window.mode_combo.currentText() == window.session.render_mode,
+    check(window.mode_combo.currentText() == window.pane.render_mode,
           "the combo box starts on the session's actual startup render mode")
 
     # ---- window title / About dialog -----------------------------------------------
@@ -691,12 +694,12 @@ def main() -> None:
     print("\nrendering off the GUI thread:")
     window.session.map = cdx.RationalMap.mandelbrot()
     window.session.param = complex(-0.7269, 0.1889)
-    window.session.render_mode = "julia"   # Session now starts in "parameter"; this test needs julia
-    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
+    window.pane.set_render_mode("julia")   # Session/pane now start in "parameter"; this test needs julia
+    window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
     window.session.render_settings = cdx.RenderSettings(400, 2.0, 1e-6, 1)   # single-threaded, slow
 
     t0 = time.perf_counter()
-    window._start_render()
+    window._start_render(window.pane)
     dispatch_time = time.perf_counter() - t0
     check(dispatch_time < 0.2,
           f"starting a render returns immediately ({dispatch_time * 1000:.1f} ms), "
@@ -776,20 +779,20 @@ def main() -> None:
 
     # Now the same scenario through the real dispatch path: starting a new
     # render immediately cancels the superseded one's token.
-    window.session.viewport = slow_viewport
-    window._start_render()
-    stale_task = window._pending_tasks[window._request_id]
-    window._start_render()   # supersedes the task started above
+    window.pane.viewport = slow_viewport
+    window._start_render(window.pane)
+    stale_task = window.pane.pending_tasks[window.pane.request_id]
+    window._start_render(window.pane)   # supersedes the task started above
     check(stale_task.cancel.is_cancelled,
           "starting a new render immediately cancels the superseded one's token")
 
     # Rapid-fire many supersessions (simulating a fast scroll burst, each
     # notch calling _start_render once the debounce settles) --
-    # _pending_tasks must not accumulate one stale entry per call.
-    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 80)
+    # pending_tasks must not accumulate one stale entry per call.
+    window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 80)
     for _ in range(15):
-        window._start_render()
-    ok = wait_for(lambda: len(window._pending_tasks) <= 1, timeout_ms=10000)
+        window._start_render(window.pane)
+    ok = wait_for(lambda: len(window.pane.pending_tasks) <= 1, timeout_ms=10000)
     check(ok, "15 rapid supersessions leave at most the current task pending, not 15 stale ones")
 
     # closeEvent cancels and returns immediately rather than draining the
@@ -799,10 +802,10 @@ def main() -> None:
     w2 = SandboxWindow()
     w2.session.map = cdx.RationalMap.mandelbrot()
     w2.session.param = complex(-0.7269, 0.1889)
-    w2.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
+    w2.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 1800)
     w2.session.render_settings = cdx.RenderSettings(400, 2.0, 1e-6, 1)
-    w2._start_render()
-    pending_before_close = list(w2._pending_tasks.values())
+    w2._start_render(w2.pane)
+    pending_before_close = list(w2.pane.pending_tasks.values())
 
     t0 = time.perf_counter()
     w2.close()
@@ -828,9 +831,9 @@ def main() -> None:
         original_set_image(array, buffer_viewport)
 
     window.image_view.set_image = tracking_set_image
-    window.session.viewport = cdx.Viewport(complex(0.1, 0.1), 1.8, 800)
+    window.pane.viewport = cdx.Viewport(complex(0.1, 0.1), 1.8, 800)
     window.session.render_settings = cdx.RenderSettings(500, 2.0, 1e-6, 1)
-    window._start_render()
+    window._start_render(window.pane)
     ok = wait_for(lambda: len(seen_sizes) >= 2, timeout_ms=15000)
     window.image_view.set_image = original_set_image
 
@@ -848,16 +851,16 @@ def main() -> None:
 
     # ---- render cache: RenderTask actually shares and hits session.cache ----------
     print("\nrender cache integration:")
-    window.session.viewport = cdx.Viewport(complex(0.05, -0.05), 1.3, 60)
+    window.pane.viewport = cdx.Viewport(complex(0.05, -0.05), 1.3, 60)
     window.session.render_settings = cdx.RenderSettings(60, 2.0, 1e-6, 1)
 
-    window._start_render()
-    ok = wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+    window._start_render(window.pane)
+    ok = wait_for(lambda: window.pane.request_id not in window.pane.pending_tasks, timeout_ms=10000)
     check(ok, "first render (cache cold for this viewport/settings) completes")
     stats_after_first = window.session.cache.stats
 
-    window._start_render()   # identical viewport/settings -- both stages should now hit
-    ok = wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+    window._start_render(window.pane)   # identical viewport/settings -- both stages should now hit
+    ok = wait_for(lambda: window.pane.request_id not in window.pane.pending_tasks, timeout_ms=10000)
     check(ok, "second, identical render completes")
     stats_after_second = window.session.cache.stats
     check(stats_after_second.hits >= stats_after_first.hits + 2,
@@ -868,15 +871,15 @@ def main() -> None:
 
     # ---- superseded requests are discarded ------------------------------------------
     print("\nsuperseded render requests:")
-    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
-    window._start_render()
-    stale_id = window._request_id
-    window._start_render()   # supersedes the previous request before it can complete
-    current_id = window._request_id
+    window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
+    window._start_render(window.pane)
+    stale_id = window.pane.request_id
+    window._start_render(window.pane)   # supersedes the previous request before it can complete
+    current_id = window.pane.request_id
     check(current_id != stale_id, "a new request gets a new id")
 
     window.image_view._pixmap = None
-    window._on_full_ready(stale_id, np.zeros((10, 10)), cdx.Viewport())
+    window._on_full_ready(window.pane, stale_id, np.zeros((10, 10)), cdx.Viewport())
     check(window.image_view._pixmap is None,
           "a result tagged with a superseded request id is discarded, not displayed")
 
@@ -898,17 +901,17 @@ def main() -> None:
     check(window.tabs.widget(4) is window.settings_panel,
           "the Settings tab holds the actual SettingsPanel instance")
 
-    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
-    window._start_render()
-    wait_for(lambda: window._request_id not in window._pending_tasks, timeout_ms=10000)
+    window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
+    window._start_render(window.pane)
+    wait_for(lambda: window.pane.request_id not in window.pane.pending_tasks, timeout_ms=10000)
 
     new_resolution = 250   # above the resolution widget's own 200 floor -- see FIELD_SPECS
     window.settings_panel._widgets["resolution"].setValue(new_resolution)
     window.settings_panel._widgets["threads"].setValue(1)
     window.settings_panel._apply()
 
-    check(window.session.viewport.resolution == new_resolution,
-          "Apply updates the session's viewport resolution")
+    check(window.pane.viewport.resolution == new_resolution,
+          "Apply updates the pane's viewport resolution")
     check(window.session.render_settings.threads == 1,
           "Apply updates the session's render_settings too, not just resolution")
 
@@ -926,8 +929,8 @@ def main() -> None:
 
     window.image_view._pixmap = None   # so wait_for below can't see a stale hit from above
     window.mode_combo.setCurrentText("julia")
-    check(window.session.render_mode == "julia",
-          "selecting a mode in the combo box updates session.render_mode")
+    check(window.pane.render_mode == "julia",
+          "selecting a mode in the combo box updates the pane's render_mode")
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "switching modes triggers an immediate re-render -- not the debounce, and the "
           "new mode actually produces a displayed image")
@@ -966,7 +969,7 @@ def main() -> None:
     # not just untested.
     window.session.render_settings = cdx.RenderSettings(2000, 2.0, 1e-6, 0)
     window.image_view._pixmap = None
-    window._start_render()
+    window._start_render(window.pane)
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "a render completes fine at a max_iter that used to force the overflow path")
     window._update_status_bar()
@@ -1014,7 +1017,8 @@ def main() -> None:
     # ---- metadata header: reflects mode/map changes live ------------------------------
     print("\nmetadata header:")
     from app.metadata_header import format_metadata_text
-    check(window.metadata_header._label.text() == format_metadata_text(window.session),
+    check(window.metadata_header._label.text()
+          == format_metadata_text(window.session, window.pane.render_mode),
           "the header's displayed text matches the session's actual current state")
 
     window.mode_combo.setCurrentText("parameter")
@@ -1049,9 +1053,9 @@ def main() -> None:
     # Resolution stays at new_resolution (from the Settings Apply above) --
     # only center/scale are thrown away here, to isolate what Reset View
     # itself is being tested against.
-    window.session.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
+    window.pane.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
     window._reset_view()
-    vp = window.session.viewport
+    vp = window.pane.viewport
     check(close(vp.center, initial.center) and abs(vp.scale - initial.scale) < 1e-12,
           "Reset View restores exactly the viewport captured at startup")
     check(vp.resolution == new_resolution,
@@ -1061,14 +1065,14 @@ def main() -> None:
     # ---- precision floor warning ---------------------------------------------------
     print("\nprecision floor warning:")
     renderer = cdx.Renderer(map=cdx.Map.custom(window.session.map, window.session.param),
-                            viewport=window.session.viewport, settings=window.session.render_settings)
+                            viewport=window.pane.viewport, settings=window.session.render_settings)
     tiny_scale = renderer.precision_floor / 10.0
-    window.session.viewport = cdx.Viewport(complex(0, 0), tiny_scale, 60)
+    window.pane.viewport = cdx.Viewport(complex(0, 0), tiny_scale, 60)
     window._update_status_bar()
     check("precision floor" in window.statusBar().currentMessage(),
           "the status bar warns when scale is at/below the precision floor")
 
-    window.session.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
+    window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
     window._update_status_bar()
     check("precision floor" not in window.statusBar().currentMessage(),
           "no warning at an ordinary scale")
@@ -1085,10 +1089,10 @@ def main() -> None:
     check(window.session.param == complex(2, -3),
           "committing the field is the SAME source of truth session.param reads")
     check(param_committed == [], "field commit does not go through the plane-click signal path")
-    check(close(window.session.viewport.center, complex(-0.5, 0.0)) and
-          abs(window.session.viewport.scale - 1.5) < 1e-9,
+    check(close(window.pane.viewport.center, complex(-0.5, 0.0)) and
+          abs(window.pane.viewport.scale - 1.5) < 1e-9,
           "the dynamical-plane viewport resets to this map's own default on a param change")
-    check(window.session.render_mode == "julia",
+    check(window.pane.render_mode == "julia",
           "committing the FIELD (not a plane click) does not switch planes on its own")
 
     window.param_field._line_edit.setText("not a number")
@@ -1106,7 +1110,7 @@ def main() -> None:
     window.image_view._set_param_at(click_pixel)
     check(close(window.session.param, complex(-0.1, 0.6), 1e-2),
           "clicking the parameter plane sets session.param to the clicked coordinate")
-    check(window.session.render_mode == "julia",
+    check(window.pane.render_mode == "julia",
           "a parameter-plane click switches straight to the dynamical (julia) plane")
     check(close(window.param_field.value, window.session.param, 1e-2),
           "the field is populated with the SAME value the click just set -- the two never diverge")
@@ -1164,7 +1168,7 @@ def main() -> None:
     print("\nexperiment snapshots (File > Save/Open Experiment, via the real window):")
     window.session.map = cdx.RationalMap.mandelbrot()
     window.session.param = complex(0.111, -0.222)
-    window.session.viewport = cdx.Viewport(complex(0.01, 0.02), 0.05, 200)
+    window.pane.viewport = cdx.Viewport(complex(0.01, 0.02), 0.05, 200)
     window.mode_combo.setCurrentText("julia")
     saved_z0 = complex(0.05, -0.05)
     window.image_view.orbit_tracker.seed(window.session.map, window.session.param, saved_z0)
@@ -1181,7 +1185,7 @@ def main() -> None:
         # already correct by coincidence.
         window.session.map = cdx.RationalMap.newton_cubic()
         window.session.param = complex(9, 9)
-        window.session.viewport = cdx.Viewport(complex(9, 9), 9.0, 50)
+        window.pane.viewport = cdx.Viewport(complex(9, 9), 9.0, 50)
         window.mode_combo.setCurrentText("parameter")
         window.image_view.clear_orbit()
 
@@ -1190,8 +1194,8 @@ def main() -> None:
         check(window.session.map.to_formula() == cdx.RationalMap.mandelbrot().to_formula(),
               "Open Experiment restores the map")
         check(window.session.param == complex(0.111, -0.222), "Open Experiment restores param")
-        check(window.session.viewport.center == complex(0.01, 0.02) and
-              window.session.viewport.scale == 0.05,
+        check(window.pane.viewport.center == complex(0.01, 0.02) and
+              window.pane.viewport.scale == 0.05,
               "Open Experiment restores the viewport")
         check(window.mode_combo.currentText() == "julia",
               "Open Experiment syncs the mode combo box to the restored render_mode, not "

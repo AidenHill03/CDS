@@ -38,8 +38,10 @@ from app.library_panel import LibraryPanel, default_view_for
 from app.metadata_header import MetadataHeader
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
+from app.pane import Pane
 from app.render_cache import RenderCache
-from app.session import PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map
+from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
+                         PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map)
 from app.settings import Settings, library_path, load_settings, save_settings
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
@@ -326,7 +328,7 @@ class ImageView(QWidget):
     "axes must match Viewport exactly" requirement and the cursor-anchored
     zoom math below (which assumes one uniform scale).
 
-    INSTANT FEEDBACK. session.viewport updates immediately on every wheel
+    INSTANT FEEDBACK. pane.viewport updates immediately on every wheel
     or pan event, but the real re-render is debounced (see SandboxWindow).
     In between, the widget keeps showing the last PAINTED buffer -- but
     that buffer is OVERSCANNED (rendered wider than the viewport it was
@@ -334,12 +336,12 @@ class ImageView(QWidget):
     has real pixels covering the new, moved viewport. set_image() stores
     the buffer's own viewport alongside its pixmap (_buffer_viewport);
     paintEvent recomputes, on every paint, exactly which sub-rect of that
-    buffer the CURRENT session.viewport corresponds to (_buffer_source_rect)
+    buffer the CURRENT pane.viewport corresponds to (_buffer_source_rect)
     and draws only that sub-rect stretched to fill the display. Because
     this is recomputed fresh from the two known viewports every time rather
     than accumulated incrementally across events, five wheel notches or a
     long drag before the debounce fires need no special composition step --
-    session.viewport already reflects all of them, and the mapping from it
+    pane.viewport already reflects all of them, and the mapping from it
     back onto the buffer is exact by construction, not an approximation
     that could drift.
 
@@ -373,8 +375,12 @@ class ImageView(QWidget):
     # switch to a dynamical mode) rather than two divergent copies of it.
     param_changed = Signal(complex)
 
-    def __init__(self, session: Session, parent: QWidget | None = None):
+    def __init__(self, pane: Pane, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
+        # pane: viewport + render_mode, per-pane state (see app.pane.Pane).
+        # session: map/param/render_settings/settings/cache -- SHARED across
+        # every pane looking at the same experiment.
+        self.pane = pane
         self.session = session
         self.setMouseTracking(True)
         self.setMinimumSize(200, 200)
@@ -386,7 +392,7 @@ class ImageView(QWidget):
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
-        # session.viewport by the overscan factor -- see _overscanned).
+        # pane.viewport by the overscan factor -- see _overscanned).
         # None exactly when _pixmap is None; kept alongside it because
         # _buffer_source_rect needs both to map back onto the display.
         self._buffer_viewport: cdx.Viewport | None = None
@@ -399,7 +405,7 @@ class ImageView(QWidget):
         self._show_critical_points = False
         self._trace_orbits = False
         # Memoized on (map.serialize(), param) -- see refresh_critical_points --
-        # so panning/zooming (which only ever changes session.viewport, never
+        # so panning/zooming (which only ever changes pane.viewport, never
         # the map or param) never re-triggers root-finding. None until the
         # first refresh_critical_points() call (made once by SandboxWindow
         # right after construction, same as its other panels' initial state).
@@ -426,7 +432,7 @@ class ImageView(QWidget):
 
     def _pixel_to_complex(self, pixel: QPoint | QPointF) -> complex:
         rect = self._display_rect()
-        vp = self.session.viewport
+        vp = self.pane.viewport
         if rect.width() <= 0 or rect.height() <= 0:
             return vp.center
         rel_x = (pixel.x() - rect.left()) / rect.width()
@@ -440,17 +446,17 @@ class ImageView(QWidget):
 
     def _complex_to_display_pixel(self, w: complex) -> QPointF:
         """The exact inverse of _pixel_to_complex, against the CURRENT
-        session.viewport (not the buffer's own, unlike
+        pane.viewport (not the buffer's own, unlike
         _complex_to_buffer_pixel below) -- what overlay drawing (critical
         points, orbit traces) uses to place a marker at a given complex
         point's actual on-screen position. Read-only: computing a screen
-        position from session.viewport is not the same as writing to it,
-        and nothing here ever assigns session.viewport -- see CLAUDE.md's
+        position from pane.viewport is not the same as writing to it,
+        and nothing here ever assigns pane.viewport -- see CLAUDE.md's
         note on the MATLAB prototype's overlay-expands-the-axes bug this
         is written to not repeat.
         """
         rect = self._display_rect()
-        vp = self.session.viewport
+        vp = self.pane.viewport
         rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
         rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
         return QPointF(rect.left() + rel_x * rect.width(), rect.top() + rel_y * rect.height())
@@ -479,7 +485,7 @@ class ImageView(QWidget):
         basin index for basin, potential for greens/parameter_greens.
         """
         w = self._pixel_to_complex(pixel)
-        vp = self.session.viewport
+        vp = self.pane.viewport
         pixel_step = (2.0 * vp.scale) / max(vp.resolution, 1)
         if pixel_step > 0 and math.isfinite(pixel_step):
             decimals = max(4, int(math.ceil(-math.log10(pixel_step))) + 1)
@@ -521,7 +527,7 @@ class ImageView(QWidget):
 
     def _buffer_source_rect(self) -> QRectF | None:
         """The sub-rect of the last-painted buffer (in its own pixel space)
-        that the CURRENT session.viewport corresponds to -- computed fresh
+        that the CURRENT pane.viewport corresponds to -- computed fresh
         from the two known viewports every call, not accumulated across
         events, so it is always exact regardless of how many wheel/pan
         events have landed since the buffer was rendered. See the class
@@ -554,7 +560,7 @@ class ImageView(QWidget):
         """
         if self._buffer_viewport is None or self._buffer_viewport.scale <= 0:
             return 1.0
-        vp = self.session.viewport
+        vp = self.pane.viewport
         buf = self._buffer_viewport
         d_re = abs(vp.center.real - buf.center.real) + vp.scale
         d_im = abs(vp.center.imag - buf.center.imag) + vp.scale
@@ -652,7 +658,7 @@ class ImageView(QWidget):
         self.update()
 
     def _seed_orbit_at(self, pixel: QPoint) -> None:
-        if self.session.render_mode in PARAMETER_PLANE_MODES:
+        if self.pane.render_mode in PARAMETER_PLANE_MODES:
             return   # orbit tracking is a dynamical-plane concept, see its own module docstring
         z0 = self._pixel_to_complex(pixel)
         self.orbit_tracker.seed(self.session.map, self.session.param, z0)
@@ -676,7 +682,7 @@ class ImageView(QWidget):
         # the request_id check in _on_partial_ready/_on_full_ready before
         # set_image is ever called -- this can never run with a mode that
         # doesn't match what was actually rendered.
-        image = array_to_qimage(payload, self.session.render_mode, self.session.settings,
+        image = array_to_qimage(payload, self.pane.render_mode, self.session.settings,
                                 self.session.render_settings.max_iter)
         self._pixmap = QPixmap.fromImage(image)
         self._buffer_viewport = buffer_viewport
@@ -684,12 +690,12 @@ class ImageView(QWidget):
         # readout's mode-dependent second field (escape value / basin
         # index / potential) -- sampling needs the actual numbers, which
         # array_to_qimage's RGB output has already discarded. Capturing
-        # session.render_mode HERE (not re-reading it later, e.g. from
+        # pane.render_mode HERE (not re-reading it later, e.g. from
         # mouseMoveEvent) is what keeps this correct even mid-mode-switch:
-        # see the comment above on why session.render_mode is guaranteed
+        # see the comment above on why pane.render_mode is guaranteed
         # to match `payload` at this exact point.
         self._buffer_payload = payload
-        self._buffer_mode = self.session.render_mode
+        self._buffer_mode = self.pane.render_mode
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -714,7 +720,7 @@ class ImageView(QWidget):
         # distinction). False on those modes, not an error -- the
         # checkboxes stay checked/available for whenever the user switches
         # back to a dynamical-plane mode.
-        return self._show_critical_points and self.session.render_mode not in PARAMETER_PLANE_MODES
+        return self._show_critical_points and self.pane.render_mode not in PARAMETER_PLANE_MODES
 
     def _paint_critical_point_overlay(self, painter: QPainter) -> None:
         if not self._should_draw_critical_points():
@@ -755,7 +761,7 @@ class ImageView(QWidget):
         parameter-plane mode, or the toggle off.
         """
         state = self.orbit_tracker.state
-        if (state is None or self.session.render_mode in PARAMETER_PLANE_MODES
+        if (state is None or self.pane.render_mode in PARAMETER_PLANE_MODES
                 or not self._orbit_connect_lines):
             return []
         inflated_rect = QRectF(self.rect()).adjusted(
@@ -766,7 +772,7 @@ class ImageView(QWidget):
 
     def _paint_orbit(self, painter: QPainter) -> None:
         state = self.orbit_tracker.state
-        if state is None or self.session.render_mode in PARAMETER_PLANE_MODES:
+        if state is None or self.pane.render_mode in PARAMETER_PLANE_MODES:
             return   # same dynamical-plane-only gating as critical points, see its own comment
 
         def finite(w: complex) -> bool:
@@ -817,10 +823,10 @@ class ImageView(QWidget):
 
         cursor_pos = event.position().toPoint()
         w = self._pixel_to_complex(cursor_pos)
-        vp = self.session.viewport
+        vp = self.pane.viewport
         new_center = w - (w - vp.center) / factor
         new_scale = vp.scale / factor
-        self.session.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
+        self.pane.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
 
         # Instant feedback: repainting now re-derives the buffer source
         # rect from the viewport just set above -- see _buffer_source_rect.
@@ -846,13 +852,13 @@ class ImageView(QWidget):
     def mouseMoveEvent(self, event) -> None:
         pos = event.position().toPoint()
         if self._panning:
-            vp = self.session.viewport
+            vp = self.pane.viewport
             current_point = self._pixel_to_complex(pos)
             # Shift the center so the point that was under the cursor at
             # drag start is again under the cursor now -- see the module
             # test suite for the derivation this formula comes from.
             new_center = vp.center + (self._pan_anchor_complex - current_point)
-            self.session.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
+            self.pane.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
             self.update()
 
             self.viewport_changed.emit()
@@ -888,7 +894,7 @@ class ImageView(QWidget):
                 # the PARAMETER plane sets `a` instead, the gesture that
                 # previously did nothing at all there (_seed_orbit_at's
                 # own early return for PARAMETER_PLANE_MODES).
-                if self.session.render_mode in PARAMETER_PLANE_MODES:
+                if self.pane.render_mode in PARAMETER_PLANE_MODES:
                     self._set_param_at(origin)
                 else:
                     self._seed_orbit_at(origin)
@@ -903,8 +909,8 @@ class ImageView(QWidget):
         new_scale = max(half_re, half_im)
         if new_scale <= 0:
             return
-        vp = self.session.viewport
-        self.session.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
+        vp = self.pane.viewport
+        self.pane.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
         self.viewport_changed.emit()
 
 
@@ -927,17 +933,39 @@ class SandboxWindow(QMainWindow):
         # replace) -- degrades the same way load_settings() does if the
         # file is missing (nothing saved yet) or malformed.
         self.session.load_user_library(library_path())
-        # Captured once, independent of session.viewport (a fresh Viewport,
-        # not a reference to it) -- Reset View must restore exactly this
-        # regardless of anything that has happened since, undo history or
-        # not (there is no undo yet, but the point is this does not need one).
-        vp0 = self.session.viewport
+
+        # The Pane this single-view window builds -- see app.pane.Pane's
+        # own docstring for what it owns (viewport + render_mode + this
+        # pane's own render-supersession state) versus what stays on
+        # Session (map/param/render_settings/cache, shared across every
+        # pane). Constructed BEFORE _build_ui() -- ImageView's own
+        # constructor reads an initial viewport/mode from it, so the pane
+        # must already exist with real values.
+        self.pane = Pane(cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
+                                      self.session.settings.resolution),
+                         "parameter")
+        # Every pane this window owns -- just the one for now. Iterated by
+        # closeEvent (cancel every pane's in-flight renders) and
+        # _on_settings_applied (a resolution change touches every pane's
+        # viewport, not just one) rather than hardcoding self.pane in
+        # those two places, so Stage 2's second pane needs no changes
+        # there when it's added.
+        self.panes: list[Pane] = [self.pane]
+
+        # Captured once, independent of self.pane.viewport (a fresh
+        # Viewport, not a reference to it) -- Reset View must restore
+        # exactly this regardless of anything that has happened since,
+        # undo history or not (there is no undo yet, but the point is this
+        # does not need one).
+        vp0 = self.pane.viewport
         self._initial_viewport = cdx.Viewport(vp0.center, vp0.scale, vp0.resolution)
 
-        self._request_id = 0
         # A dedicated pool, not QThreadPool.globalInstance(): keeps this
         # app's renders independent of anything else in the process that
-        # might use the global pool.
+        # might use the global pool. SHARED across every pane -- panes
+        # only need their OWN request-id/pending-task bookkeeping (see
+        # app.pane.Pane) to keep results from crossing between them; the
+        # pool executing the work is one app-wide resource regardless.
         self._thread_pool = QThreadPool()
         # RenderTask (and the RenderSignals QObject it owns) has no other
         # Python-side strong reference once _start_render() returns -- the
@@ -948,25 +976,32 @@ class SandboxWindow(QMainWindow):
         # running and about to emit through it. Entries for a task that
         # completes (or fails) normally are removed when its final signal
         # fires. A CANCELLED task emits nothing at all (see RenderTask.run),
-        # so its entry is instead swept on the NEXT _start_render() call,
-        # once cancellation (which per-column checking bounds to roughly one
-        # column's worth of work, not the full render) has had a full round
-        # to actually finish -- the same "good enough, not provably instant"
-        # tradeoff closeEvent below makes explicitly for the same reason.
-        self._pending_tasks: dict[int, RenderTask] = {}
+        # so its entry is instead swept on the NEXT _start_render() call for
+        # THAT PANE, once cancellation (which per-column checking bounds to
+        # roughly one column's worth of work, not the full render) has had
+        # a full round to actually finish -- the same "good enough, not
+        # provably instant" tradeoff closeEvent below makes explicitly for
+        # the same reason. Lives on each Pane now (pane.pending_tasks), not
+        # here -- see this whole comment's own point: results must never
+        # cross between panes, and neither should their bookkeeping.
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(RENDER_DEBOUNCE_MS)
-        self._debounce_timer.timeout.connect(self._start_render)
+        # Stage 1 has exactly one pane, so one shared debounce timer always
+        # re-rendering THAT pane is unambiguous; a debounce timer per pane
+        # (so an edit affecting only one pane doesn't re-render the other)
+        # is a Stage 2 concern, once a second pane actually exists.
+        self._debounce_timer.timeout.connect(lambda: self._start_render(self.pane))
 
         self._build_ui()
         self.image_view.refresh_critical_points()
         self._update_status_bar()
-        self._start_render()
+        self._start_render(self.pane)
 
     def _build_ui(self) -> None:
-        self.image_view = ImageView(self.session, self)
+        self.image_view = ImageView(self.pane, self.session, self)
+        self.pane.image_view = self.image_view
         self.image_view.viewport_changed.connect(self._on_viewport_changed)
         self.image_view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
         self.image_view.param_changed.connect(self._on_param_changed_by_click)
@@ -983,7 +1018,7 @@ class SandboxWindow(QMainWindow):
         # principle from the other direction).
         self.image_view.orbit_changed.connect(self._on_orbit_changed)
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
-        self.metadata_header = MetadataHeader(self.session, self)
+        self.metadata_header = MetadataHeader(self.session, self.pane, self)
 
         # The View tab holds a small container -- the metadata header
         # above the image, the orbit-tracking strip below it -- not the
@@ -1024,7 +1059,7 @@ class SandboxWindow(QMainWindow):
         toolbar.addWidget(QLabel("Mode:", self))
         self.mode_combo = QComboBox(self)
         self.mode_combo.addItems(RENDER_MODES)
-        self.mode_combo.setCurrentText(self.session.render_mode)
+        self.mode_combo.setCurrentText(self.pane.render_mode)
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         toolbar.addWidget(self.mode_combo)
 
@@ -1119,7 +1154,7 @@ class SandboxWindow(QMainWindow):
         state = self.image_view.orbit_tracker.state
         orbit = None if state is None else (state.z0, state.n)
         try:
-            self.session.save_snapshot(path, orbit)
+            self.session.save_snapshot(path, self.pane.viewport, self.pane.render_mode, orbit)
         except OSError as exc:
             QMessageBox.critical(self, "Save Experiment failed", str(exc))
 
@@ -1133,20 +1168,25 @@ class SandboxWindow(QMainWindow):
         # session.load_snapshot fully validates and parses BEFORE mutating
         # anything (see restore_from_snapshot's own docstring) -- on
         # failure the live session is untouched, so there is nothing here
-        # to roll back, just an error to surface.
+        # to roll back, just an error to surface. Unlike before Stage 1,
+        # Session has no viewport/render_mode of its own to apply, so the
+        # restored (viewport, mode, orbit) come back explicitly for THIS
+        # pane to apply itself.
         try:
-            orbit = self.session.load_snapshot(path)
+            viewport, mode, orbit = self.session.load_snapshot(path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Open Experiment failed", str(exc))
             return
 
-        # session.render_mode (step 4) is already applied by load_snapshot
-        # -- sync the toolbar combo box to match BEFORE touching the orbit,
-        # so the dynamical-plane-only gate just below sees the RESTORED
-        # mode, not whatever was showing before this load (the ordering
-        # this whole method exists to get right: restore the mode, THEN
-        # the orbit, never the other way around).
-        self.mode_combo.setCurrentText(self.session.render_mode)
+        # Apply viewport + mode to the pane BEFORE touching the orbit, so
+        # the dynamical-plane-only gate just below sees the RESTORED mode,
+        # not whatever was showing before this load (the ordering this
+        # whole method exists to get right: restore the mode, THEN the
+        # orbit, never the other way around).
+        self.pane.viewport = viewport
+        self.pane.set_render_mode(mode)   # already validated by load_snapshot; re-validated here
+                                          # for free, not re-checked for its own sake
+        self.mode_combo.setCurrentText(self.pane.render_mode)
         self.param_field.set_value(self.session.param)
 
         # Orbit reconstruction goes through the tracker's REAL seed()/step()
@@ -1155,7 +1195,7 @@ class SandboxWindow(QMainWindow):
         # covers both "the snapshot had no orbit" and "it did, but we're
         # on the parameter plane" (orbit tracking is a dynamical-plane
         # concept, same gate _seed_orbit_at itself uses).
-        if orbit is None or self.session.render_mode in PARAMETER_PLANE_MODES:
+        if orbit is None or self.pane.render_mode in PARAMETER_PLANE_MODES:
             self.image_view.clear_orbit()
         else:
             z0, n = orbit
@@ -1173,7 +1213,7 @@ class SandboxWindow(QMainWindow):
         self.metadata_header.refresh()
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        self._start_render(self.pane)
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
     def _on_param_field_committed(self, a: complex) -> None:
@@ -1198,14 +1238,14 @@ class SandboxWindow(QMainWindow):
         """
         self.session.param = a
         center, scale = default_view_for(self.session.map.name)
-        vp = self.session.viewport
-        self.session.viewport = cdx.Viewport(center, scale, vp.resolution)
+        vp = self.pane.viewport
+        self.pane.viewport = cdx.Viewport(center, scale, vp.resolution)
         self.image_view.refresh_critical_points()
         self.image_view.refresh_orbit_for_new_param()
         self.facts_panel.refresh()
         self.metadata_header.refresh()
         self.param_field.set_value(a)
-        if switch_to_dynamical and self.session.render_mode in PARAMETER_PLANE_MODES:
+        if switch_to_dynamical and self.pane.render_mode in PARAMETER_PLANE_MODES:
             # Triggers _on_mode_changed, which itself renders -- so this
             # branch does NOT also call _start_render below; doing both
             # would fire two render requests for one user action (the
@@ -1216,7 +1256,7 @@ class SandboxWindow(QMainWindow):
         else:
             self._update_status_bar()
             self._debounce_timer.stop()
-            self._start_render()
+            self._start_render(self.pane)
 
     # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
     def _on_z0_field_committed(self, z0: complex) -> None:
@@ -1224,7 +1264,7 @@ class SandboxWindow(QMainWindow):
         # dynamical-plane concept; committing a z0 while looking at the
         # parameter plane is silently a no-op, matching what clicking the
         # (nonexistent, on that plane) orbit target would also do.
-        if self.session.render_mode in PARAMETER_PLANE_MODES:
+        if self.pane.render_mode in PARAMETER_PLANE_MODES:
             return
         self.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
         self.image_view.orbit_changed.emit()
@@ -1242,27 +1282,37 @@ class SandboxWindow(QMainWindow):
 
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, mode: str) -> None:
-        self.session.set_render_mode(mode)
+        self.pane.set_render_mode(mode)
         self.metadata_header.refresh()   # domain/mode text depends on the mode itself
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        self._start_render(self.pane)
 
     # ---- settings: apply on demand, from the Settings tab -----------------------
     def _on_settings_applied(self, new_settings: Settings) -> None:
         # Already validated by SettingsPanel before this is ever called
         # (see its _apply) -- this just carries the effects: update the
-        # live session (viewport.resolution/render_settings/cache budget --
-        # see Session.apply_settings), persist for next launch, and render
+        # live session (render_settings/cache budget -- see
+        # Session.apply_settings), persist for next launch, and render
         # right away rather than waiting for the ordinary debounce. An
         # explicit Apply click is exactly the kind of deliberate action the
         # debounce (meant to coalesce rapid, ambient events like scrolling)
         # isn't for.
+        #
+        # Resolution is a per-pane viewport field now (session no longer
+        # owns a viewport at all -- see app.pane.Pane), so THIS loop is
+        # what actually applies a resolution change to every visible pane,
+        # keeping each one's own center/scale untouched -- Settings does
+        # not own WHERE the user is looking, only how it's rendered.
         self.session.apply_settings(new_settings)
+        for pane in self.panes:
+            vp = pane.viewport
+            pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        for pane in self.panes:
+            self._start_render(pane)
 
     # ---- term edits: live but debounced, reusing the viewport-change path -------
     def _on_term_edited(self) -> None:
@@ -1296,21 +1346,25 @@ class SandboxWindow(QMainWindow):
 
     # ---- facts tab: clicking a listed point centres the view on it --------------
     def _on_center_view(self, point: complex) -> None:
-        vp = self.session.viewport
-        self.session.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
+        vp = self.pane.viewport
+        self.pane.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
         self.tabs.setCurrentWidget(self.view_container)
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        self._start_render(self.pane)
 
     # ---- library tab: loading a family replaces session.map wholesale -----------
     def _on_family_loaded(self) -> None:
-        # LibraryPanel has already replaced self.session.map and reset the
-        # viewport to that family's default (see its _load_selected) by the
-        # time this fires -- resync every OTHER panel that caches a view of
-        # the old map, then render right away, the same "deliberate action,
-        # not a debounce-worthy burst" treatment Reset View and Settings'
-        # Apply already get.
+        # LibraryPanel has already replaced self.session.map by the time
+        # this fires (see its _load_selected) but no longer touches any
+        # viewport itself (Session has none to touch -- see app.pane.Pane)
+        # -- resetting THIS pane's viewport to the new map's default is
+        # this method's own job now, before resyncing every OTHER panel
+        # that caches a view of the old map, then rendering right away,
+        # the same "deliberate action, not a debounce-worthy burst"
+        # treatment Reset View and Settings' Apply already get.
+        center, scale = default_view_for(self.session.map.name)
+        self.pane.viewport = cdx.Viewport(center, scale, self.pane.viewport.resolution)
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
         self.image_view.refresh_critical_points()
@@ -1318,7 +1372,7 @@ class SandboxWindow(QMainWindow):
         self.metadata_header.refresh()   # name/formula/param all just changed wholesale
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        self._start_render(self.pane)
 
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
@@ -1335,7 +1389,7 @@ class SandboxWindow(QMainWindow):
         # debounce on every event and might never let it fire on its own).
         if self.image_view.buffer_edge_fraction() > BUFFER_EDGE_FRACTION:
             self._debounce_timer.stop()
-            self._start_render()
+            self._start_render(self.pane)
         else:
             self._debounce_timer.start()   # restarts if already running
 
@@ -1343,67 +1397,79 @@ class SandboxWindow(QMainWindow):
         # Center/scale only -- NOT resolution. Resolution is a Settings
         # field now (see app/settings.py), independent of where the user
         # is looking; Reset View undoes pan/zoom, not an Apply from the
-        # Settings tab. Using the session's CURRENT resolution (whatever
+        # Settings tab. Using the pane's CURRENT resolution (whatever
         # Settings last applied), not _initial_viewport's, is what keeps
         # those two concerns from fighting each other.
         iv = self._initial_viewport
-        self.session.viewport = cdx.Viewport(iv.center, iv.scale, self.session.viewport.resolution)
+        self.pane.viewport = cdx.Viewport(iv.center, iv.scale, self.pane.viewport.resolution)
         self._update_status_bar()
         self._debounce_timer.stop()
-        self._start_render()
+        self._start_render(self.pane)
 
-    # ---- render dispatch ---------------------------------------------------------
-    def _start_render(self) -> None:
-        # Every still-pending task is now stale -- cancel it immediately
-        # rather than letting it run to completion only to be discarded by
-        # the request_id check. Also sweep away entries left over from an
-        # EARLIER round that were cancelled then: see the comment on
-        # _pending_tasks's declaration for why cleanup happens here instead
-        # of via a signal from the (silent, on cancellation) task itself.
-        for stale_id, stale_task in list(self._pending_tasks.items()):
+    # ---- render dispatch -----------------------------------------------------------
+    # PER-PANE: request-id/pending-tasks bookkeeping lives on the pane
+    # itself (see app.pane.Pane), not here -- a stale/superseded result
+    # for one pane must never paint a different one, and this is what
+    # makes that true even once a second pane exists (Stage 2). The
+    # thread pool stays shared (one app-wide resource); each RenderTask's
+    # signals are connected via a small lambda that closes over WHICH pane
+    # this particular render was for, so _on_partial_ready/_on_full_ready/
+    # _on_render_failed know which pane's request_id/pending_tasks/
+    # image_view to check and update, without RenderTask/RenderSignals
+    # needing to carry a pane id of their own.
+    def _start_render(self, pane: Pane) -> None:
+        # Every still-pending task FOR THIS PANE is now stale -- cancel it
+        # immediately rather than letting it run to completion only to be
+        # discarded by the request_id check. Also sweep away entries left
+        # over from an EARLIER round that were cancelled then: see the
+        # comment on Pane.pending_tasks for why cleanup happens here
+        # instead of via a signal from the (silent, on cancellation) task
+        # itself. A different pane's pending tasks are untouched --
+        # starting a render for one pane must never cancel another's.
+        for stale_id, stale_task in list(pane.pending_tasks.items()):
             if stale_task.cancel.is_cancelled:
-                del self._pending_tasks[stale_id]
+                del pane.pending_tasks[stale_id]
             else:
                 stale_task.cancel.cancel()
 
-        self._request_id += 1
-        request_id = self._request_id
+        pane.request_id += 1
+        request_id = pane.request_id
 
-        vp = self.session.viewport
+        vp = pane.viewport
         viewport_snapshot = cdx.Viewport(vp.center, vp.scale, vp.resolution)
         rs = self.session.render_settings
         settings_snapshot = cdx.RenderSettings(rs.max_iter, rs.escape_radius, rs.tol, rs.threads)
 
         task = RenderTask(request_id, self.session.map, self.session.param,
-                          viewport_snapshot, settings_snapshot, self.session.render_mode,
+                          viewport_snapshot, settings_snapshot, pane.render_mode,
                           cdx.CancelToken(), self.session.cache)
-        task.signals.partial_ready.connect(self._on_partial_ready)
-        task.signals.full_ready.connect(self._on_full_ready)
-        task.signals.failed.connect(self._on_render_failed)
-        self._pending_tasks[request_id] = task
+        task.signals.partial_ready.connect(
+            lambda rid, payload, bvp, p=pane: self._on_partial_ready(p, rid, payload, bvp))
+        task.signals.full_ready.connect(
+            lambda rid, payload, bvp, p=pane: self._on_full_ready(p, rid, payload, bvp))
+        task.signals.failed.connect(
+            lambda rid, message, p=pane: self._on_render_failed(p, rid, message))
+        pane.pending_tasks[request_id] = task
         self._thread_pool.start(_Runnable(task))
 
-    @Slot(int, object, object)
-    def _on_partial_ready(self, request_id: int, payload,
+    def _on_partial_ready(self, pane: Pane, request_id: int, payload,
                           buffer_viewport: cdx.Viewport) -> None:
-        if request_id != self._request_id:
-            return   # superseded by a newer request; discard
-        self.image_view.set_image(payload, buffer_viewport)
+        if request_id != pane.request_id:
+            return   # superseded by a newer request for THIS pane; discard
+        pane.image_view.set_image(payload, buffer_viewport)
         self._update_status_bar()
 
-    @Slot(int, object, object)
-    def _on_full_ready(self, request_id: int, payload,
+    def _on_full_ready(self, pane: Pane, request_id: int, payload,
                        buffer_viewport: cdx.Viewport) -> None:
-        self._pending_tasks.pop(request_id, None)   # this task is done; safe to release
-        if request_id != self._request_id:
+        pane.pending_tasks.pop(request_id, None)   # this task is done; safe to release
+        if request_id != pane.request_id:
             return
-        self.image_view.set_image(payload, buffer_viewport)
+        pane.image_view.set_image(payload, buffer_viewport)
         self._update_status_bar()
 
-    @Slot(int, str)
-    def _on_render_failed(self, request_id: int, message: str) -> None:
-        self._pending_tasks.pop(request_id, None)
-        if request_id != self._request_id:
+    def _on_render_failed(self, pane: Pane, request_id: int, message: str) -> None:
+        pane.pending_tasks.pop(request_id, None)
+        if request_id != pane.request_id:
             return
         self.statusBar().showMessage(f"render failed: {message}")
 
@@ -1416,8 +1482,9 @@ class SandboxWindow(QMainWindow):
         # in _on_cursor_readout_changed below; both write into
         # _status_base_message/_status_cursor_text and _render_status_bar
         # combines them, so neither overwrites the other's half of the
-        # displayed message.
-        vp = self.session.viewport
+        # displayed message. Stage 1: one pane, so this stays unambiguous;
+        # a per-pane status readout is a Stage 2 concern.
+        vp = self.pane.viewport
         renderer = cdx.Renderer(map=cdx.Map.custom(self.session.map, self.session.param),
                                 viewport=vp, settings=self.session.render_settings)
         floor = renderer.precision_floor
@@ -1453,8 +1520,9 @@ class SandboxWindow(QMainWindow):
         # its own comment), which is what keeps that residual window from
         # being a real risk rather than just a shorter one.
         self._debounce_timer.stop()
-        for task in self._pending_tasks.values():
-            task.cancel.cancel()
+        for pane in self.panes:
+            for task in pane.pending_tasks.values():
+                task.cancel.cancel()
         super().closeEvent(event)
 
 

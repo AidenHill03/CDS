@@ -182,24 +182,24 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
 
 
 class Session:
-    """Sandbox session: current map + parameter + viewport + render mode,
-    term editing, a family library, and dynamical-facts extraction.
+    """Sandbox session: SHARED state only -- the current map, its bound
+    parameter, render settings, the family library, and the render cache.
+    Deliberately does NOT own a viewport or a render mode: those are now
+    per-Pane (see app.pane.Pane's own docstring for why), since two panes
+    showing different planes of the same map need two independent ones.
+    Every RENDERED PIXEL still ultimately comes from map/param/
+    render_settings here plus whichever pane's own viewport/mode asked
+    for it -- this class holds what stays the same no matter how many
+    panes are looking at it.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.map: cdx.RationalMap = cdx.RationalMap.mandelbrot()
         self.param: complex = DEFAULT_JULIA_PARAM
         self._settings = settings if settings is not None else Settings()
-        # Starts on the PARAMETER PLANE (the Mandelbrot set): unlike the
-        # filled disc z^2+0 gives in julia mode, it teaches the tool by
-        # itself -- clicking around it is the natural first interaction.
-        self.viewport: cdx.Viewport = cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER,
-                                                    DEFAULT_PARAMETER_VIEW_SCALE,
-                                                    self._settings.resolution)
         self.render_settings: cdx.RenderSettings = cdx.RenderSettings(
             self._settings.max_iter, self._settings.escape_radius,
             self._settings.tol, self._settings.threads)
-        self.render_mode: str = "parameter"
         self.library: cdx.FamilyLibrary = cdx.FamilyLibrary.with_defaults()
         # One cache for this session's lifetime, shared by every render --
         # foreground (render() below) and background (app/sandbox.py's
@@ -213,41 +213,42 @@ class Session:
     def settings(self) -> Settings:
         """The Settings this session is currently rendering with -- kept in
         sync by apply_settings() below, the only way this changes after
-        construction (viewport.resolution/render_settings/cache.budget
-        aren't mutated directly by anything else in this class).
+        construction (render_settings/cache.budget aren't mutated directly
+        by anything else in this class; a pane's own viewport.resolution
+        is the CALLER's job to update per-pane -- see app/sandbox.py's
+        _on_settings_applied, which loops over every pane -- since this
+        class no longer owns any one viewport to update).
         """
         return self._settings
 
     def apply_settings(self, settings: Settings) -> None:
         """Applies a (validated -- see app.settings.validate_field, used by
         the Settings panel before ever calling this) Settings to this
-        session: render_settings, the viewport's resolution (keeping its
-        current center/scale -- Settings does not own WHERE the user is
-        looking, only how it's rendered), and the cache's byte budget.
-        Does NOT clear the cache; see RenderCache's own docstring for why a
-        resolution/setting change should age old entries out under the
-        budget rather than flush them.
+        session: render_settings and the cache's byte budget. Does NOT
+        touch resolution -- that is now a per-pane viewport field (see
+        app.pane.Pane), so updating it for every visible pane is the
+        CALLER's job (app/sandbox.py's _on_settings_applied loops over
+        every pane), not something this class can do on its own anymore.
+        Does NOT clear the cache either; see RenderCache's own docstring
+        for why a resolution/setting change should age old entries out
+        under the budget rather than flush them.
         """
         self._settings = settings
-        vp = self.viewport
-        self.viewport = cdx.Viewport(vp.center, vp.scale, settings.resolution)
         self.render_settings = cdx.RenderSettings(settings.max_iter, settings.escape_radius,
                                                   settings.tol, settings.threads)
         self.cache.set_budget(settings.cache_budget_bytes)
 
-    # ---- render mode ---------------------------------------------------------
-    def set_render_mode(self, mode: str) -> None:
-        if mode not in RENDER_MODES:
-            raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
-        self.render_mode = mode
-
-    def render(self):
-        """Renders the current map/parameter/viewport in the current mode.
-        See render_map() above for the return shape; this is just that
-        function applied to the session's own current state.
+    def render(self, viewport: cdx.Viewport, render_mode: str,
+              cancel: cdx.CancelToken | None = None):
+        """Renders THIS session's map/parameter/render_settings at the
+        given viewport and mode (typically a pane's own -- see
+        app.pane.Pane). Explicit rather than reading a self.viewport/
+        self.render_mode this class no longer has; see render_map() above
+        for the return shape, this is just that function applied to this
+        session's own map/param/settings/cache.
         """
-        return render_map(self.map, self.param, self.viewport, self.render_settings,
-                          self.render_mode, cache=self.cache)
+        return render_map(self.map, self.param, viewport, self.render_settings,
+                          render_mode, cancel=cancel, cache=self.cache)
 
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/
@@ -468,15 +469,17 @@ class Session:
     # library above (save_to_library/FamilyLibrary), which stores named maps
     # only and has read-only presets; a snapshot restores the map alongside
     # everything else, but never touches the library itself.
-    def snapshot_to_dict(self, orbit: tuple[complex, int] | None = None) -> dict:
+    def snapshot_to_dict(self, viewport: cdx.Viewport, render_mode: str,
+                         orbit: tuple[complex, int] | None = None) -> dict:
         """Assembles a JSON-serializable dict capturing everything needed to
-        reconstruct exactly what is currently on screen. `orbit`, if given,
-        is (z0, n) -- OrbitState's own two independent fields; z and
-        history are DERIVED from stepping z0 n times (see
-        restore_from_snapshot), so storing more than that would just be
-        redundant, recomputable state.
+        reconstruct exactly what is currently on screen. `viewport` and
+        `render_mode` are the CALLER's own -- typically one Pane's (see
+        app.pane.Pane) -- since this class no longer owns either (see this
+        class's own docstring for why). `orbit`, if given, is (z0, n) --
+        OrbitState's own two independent fields; z and history are DERIVED
+        from stepping z0 n times (see restore_from_snapshot), so storing
+        more than that would just be redundant, recomputable state.
         """
-        vp = self.viewport
         rs = self.render_settings
         return {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -484,11 +487,11 @@ class Session:
             "map": self.map.serialize(),
             "param": [self.param.real, self.param.imag],
             "viewport": {
-                "center": [vp.center.real, vp.center.imag],
-                "scale": vp.scale,
-                "resolution": vp.resolution,
+                "center": [viewport.center.real, viewport.center.imag],
+                "scale": viewport.scale,
+                "resolution": viewport.resolution,
             },
-            "render_mode": self.render_mode,
+            "render_mode": render_mode,
             "render_settings": {
                 "max_iter": rs.max_iter,
                 "escape_radius": rs.escape_radius,
@@ -499,7 +502,8 @@ class Session:
                                                  "n": orbit[1]},
         }
 
-    def restore_from_snapshot(self, data: dict) -> tuple[complex, int] | None:
+    def restore_from_snapshot(self, data: dict) -> tuple[cdx.Viewport, str,
+                                                          tuple[complex, int] | None]:
         """The inverse of snapshot_to_dict. Fully validates and parses
         EVERY field before mutating any live state -- a malformed or
         wrong-version snapshot raises ValueError and leaves this Session
@@ -508,12 +512,14 @@ class Session:
         to load_user_library's silent-degrade treatment for the merge-at-
         startup path, which this is not).
 
-        Returns the orbit as (z0, n), or None if the snapshot had none --
-        actually SEEDING it is the caller's job (see app/sandbox.py): this
-        class has no OrbitTracker of its own (that lives on ImageView),
-        and reconstructing an orbit needs to go through the tracker's own
-        seed()/step() so z/history regenerate through the exact same code
-        path a live orbit does, not a Session-level shortcut around it.
+        Only map/param/render_settings are actually SET on this Session --
+        it has no viewport/render_mode of its own to assign, and no
+        OrbitTracker to seed. Returns (viewport, render_mode, orbit) for
+        the caller to apply to its own pane (viewport/render_mode) and
+        tracker (orbit, as (z0, n) or None): reconstructing an orbit needs
+        to go through the tracker's own seed()/step() so z/history
+        regenerate through the exact same code path a live orbit does, not
+        a Session-level shortcut around it.
         """
         if not isinstance(data, dict):
             raise ValueError("experiment snapshot must be a JSON object")
@@ -542,21 +548,20 @@ class Session:
 
         # Only now, once everything above has parsed successfully, mutate
         # live state -- an error partway through would otherwise leave the
-        # session half-updated (new map, old viewport), which is worse than
+        # session half-updated (new map, old settings), which is worse than
         # rejecting the whole file outright.
         self.map = rational_map
         self.param = param
-        self.viewport = viewport
-        self.render_mode = mode
         self.render_settings = render_settings
-        return orbit
+        return viewport, mode, orbit
 
-    def save_snapshot(self, path: str, orbit: tuple[complex, int] | None = None) -> None:
+    def save_snapshot(self, path: str, viewport: cdx.Viewport, render_mode: str,
+                      orbit: tuple[complex, int] | None = None) -> None:
         with open(path, "w") as f:
-            json.dump(self.snapshot_to_dict(orbit), f, indent=2)
+            json.dump(self.snapshot_to_dict(viewport, render_mode, orbit), f, indent=2)
             f.write("\n")
 
-    def load_snapshot(self, path: str) -> tuple[complex, int] | None:
+    def load_snapshot(self, path: str) -> tuple[cdx.Viewport, str, tuple[complex, int] | None]:
         """Raises ValueError for a missing/unreadable file (OSError is NOT
         caught here -- unlike load_user_library's silent-degrade startup
         path, an explicit Open Experiment... action that fails should tell
