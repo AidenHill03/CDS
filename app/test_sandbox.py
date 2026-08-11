@@ -655,6 +655,84 @@ def main() -> None:
     check(window.mode_combo.currentText() == window.pane.render_mode,
           "the combo box starts on the session's actual startup render mode")
 
+    # ---- Stage 2: dual-pane splitter, focus, coupled toggle -----------------------
+    print("\ndual-pane splitter / focus / coupled toggle:")
+    ok2 = wait_for(lambda: window.image_view2._pixmap is not None, timeout_ms=10000)
+    check(ok2, "the second pane's initial render also completes, independently of the first")
+
+    check(window.pane.render_mode == "parameter" and window.pane2.render_mode == "julia",
+          "the two panes start on different planes -- a natural parameter+dynamical pairing, "
+          "not two copies of the same view")
+    check(window.mode_combo2.currentText() == window.pane2.render_mode,
+          "the second pane has its OWN mode combo, starting on ITS pane's mode")
+    check(window.mode_combo is not window.mode_combo2,
+          "the two mode combos are genuinely separate widgets, not one shared between panes")
+
+    check(window._focused_pane is window.pane,
+          "focus starts on pane A, matching today's single-view startup")
+    check(window.coupled_checkbox.isChecked(), "coupled view is the default -- both panes visible")
+
+    window.show()   # the visibility checks below need a real, shown top-level window
+    check(window.pane_column.isVisible() and window.pane_column2.isVisible(),
+          "coupled: both pane columns are visible")
+
+    # Clicking pane2's image -- not setting focus programmatically -- is
+    # what actually moves focus in the real app (see ImageView.pane_activated,
+    # emitted from mousePressEvent).
+    window.image_view2.mousePressEvent(_FakeMouseEvent(QPoint(50, 50)))
+    window.image_view2.mouseReleaseEvent(_FakeMouseEvent(QPoint(50, 50)))
+    check(window._focused_pane is window.pane2,
+          "pressing on pane2's image moves focus to pane2, via ImageView.pane_activated")
+    check(window.pane_column2.styleSheet() != "" and window.pane_column.styleSheet() == "",
+          "the focus-highlight border moves to the newly-focused pane's column")
+
+    window.coupled_checkbox.setChecked(False)
+    check(window.pane_column2.isVisible() and not window.pane_column.isVisible(),
+          "single-view collapses to just the FOCUSED pane -- pane2 here, not always pane A")
+    window.coupled_checkbox.setChecked(True)
+    check(window.pane_column.isVisible() and window.pane_column2.isVisible(),
+          "re-checking coupled shows both panes again")
+
+    # Per-pane mode combo: switching pane2's mode does not touch pane A's.
+    pane_mode_before = window.pane.render_mode
+    window.mode_combo2.setCurrentText("basin")
+    check(window.pane2.render_mode == "basin" and window.pane.render_mode == pane_mode_before,
+          "switching pane2's OWN mode combo changes only pane2's render_mode")
+    window.mode_combo2.setCurrentText("julia")   # restore for the orbit-strip check below
+
+    # Orbit strip follows whichever pane is currently dynamical (focus
+    # is still pane2 from the click above).
+    check(window.orbit_panel.image_view is window.pane2.image_view,
+          "the orbit strip follows pane2 -- the only dynamical pane right now (pane A is "
+          "still on the parameter plane)")
+    window.mode_combo.setCurrentText("julia")
+    check(window.orbit_panel.isEnabled(), "with both panes dynamical, the orbit strip stays enabled")
+    window.mode_combo2.setCurrentText("parameter")
+    check(window.orbit_panel.image_view is window.pane.image_view,
+          "with pane2 back on the parameter plane, the orbit strip follows pane A instead")
+    window.mode_combo.setCurrentText("parameter")
+    check(not window.orbit_panel.isEnabled(),
+          "with NEITHER pane dynamical, the orbit strip is disabled rather than showing stale "
+          "controls for a plane that has no orbit concept")
+
+    # Per-pane debounce isolation: a viewport-changed event for one pane
+    # must never touch the OTHER pane's request id / pending tasks.
+    window.mode_combo.setCurrentText("julia")
+    window.mode_combo2.setCurrentText("julia")
+    wait_for(lambda: window.pane.request_id not in window.pane.pending_tasks, timeout_ms=10000)
+    wait_for(lambda: window.pane2.request_id not in window.pane2.pending_tasks, timeout_ms=10000)
+    pane2_request_id_before = window.pane2.request_id
+    window._on_viewport_changed(window.pane)
+    check(window.pane2.request_id == pane2_request_id_before,
+          "a viewport-changed event for pane A never touches pane2's request id / debounce")
+
+    # Restore both panes and focus to their startup defaults -- later
+    # sections (e.g. "mode selector" below) assume pane A starts on
+    # "parameter", the state this whole block found it in.
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+    window._set_focused_pane(window.pane)
+
     # ---- window title / About dialog -----------------------------------------------
     print("\nwindow title / About dialog:")
     check(window.windowTitle() == "ComplexDynamics",
@@ -1049,18 +1127,44 @@ def main() -> None:
 
     # ---- Reset View --------------------------------------------------------------------
     print("\nReset View:")
-    initial = window._initial_viewport
+    # window.session.map.name is "renamed-live" at this point (set just
+    # above) -- not a name default_view_for recognizes, so it falls back to
+    # the generic view. Using a renamed map here is deliberate: if Reset
+    # View still restored a frozen startup snapshot (the Stage 1/pre-Stage-2
+    # bug), it would land on DEFAULT_PARAMETER_VIEW_CENTER/SCALE instead of
+    # this fallback, so this distinguishes "family default" from "frozen
+    # snapshot" instead of the two coincidentally agreeing.
+    from app.library_panel import default_view_for as _default_view_for
+    expected_center, expected_scale = _default_view_for(window.session.map.name)
+    check(expected_center == complex(0, 0) and expected_scale == 2.0,
+          "sanity: 'renamed-live' isn't a recognized family name, so default_view_for "
+          "falls back to the generic view")
+
     # Resolution stays at new_resolution (from the Settings Apply above) --
     # only center/scale are thrown away here, to isolate what Reset View
     # itself is being tested against.
     window.pane.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
     window._reset_view()
     vp = window.pane.viewport
-    check(close(vp.center, initial.center) and abs(vp.scale - initial.scale) < 1e-12,
-          "Reset View restores exactly the viewport captured at startup")
+    check(close(vp.center, expected_center) and abs(vp.scale - expected_scale) < 1e-12,
+          "Reset View resets to this map's mode-appropriate default framing "
+          "(default_view_for), NOT a frozen viewport captured at startup -- "
+          "that was the pre-Stage-2 bug")
     check(vp.resolution == new_resolution,
           "Reset View does NOT revert resolution -- that is a Settings concern (see the last "
           "Apply above), not part of 'the view' pan/zoom resets")
+
+    # Reset View acts on the FOCUSED pane, not always pane A.
+    window.pane2.viewport = cdx.Viewport(complex(7, 7), 0.002, window.pane2.viewport.resolution)
+    window._set_focused_pane(window.pane2)
+    pane_center_before = window.pane.viewport.center
+    window._reset_view()
+    check(close(window.pane2.viewport.center, expected_center) and
+          abs(window.pane2.viewport.scale - expected_scale) < 1e-12,
+          "Reset View acts on the FOCUSED pane -- here pane2, once it is focused")
+    check(window.pane.viewport.center == pane_center_before,
+          "...and leaves the OTHER (unfocused) pane's viewport completely untouched")
+    window._set_focused_pane(window.pane)   # restore focus to pane A for the sections below
 
     # ---- precision floor warning ---------------------------------------------------
     print("\nprecision floor warning:")

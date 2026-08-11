@@ -57,8 +57,27 @@ class OrbitPanel(QWidget):
         layout.addWidget(run_button)
 
         clear_button = QPushButton("Clear")
-        clear_button.clicked.connect(self.image_view.clear_orbit)
+        # A lambda, like the other two buttons above -- NOT
+        # self.image_view.clear_orbit directly, which would bind to
+        # whichever ImageView is current AT CONNECT TIME and keep calling
+        # that one even after set_image_view below repoints self.image_view
+        # to a different pane's view.
+        clear_button.clicked.connect(lambda: self.image_view.clear_orbit())
         layout.addWidget(clear_button)
+
+    def set_image_view(self, image_view) -> None:
+        """Repoints this panel at a DIFFERENT pane's ImageView -- Stage 2's
+        "the orbit strip follows the dynamical pane": SandboxWindow calls
+        this whenever which pane counts as "the" dynamical one changes
+        (a mode switch on either pane, see its own _sync_orbit_panel).
+        A no-op if already pointed here.
+        """
+        if image_view is self.image_view:
+            return
+        self.image_view.orbit_changed.disconnect(self._refresh)
+        self.image_view = image_view
+        self.image_view.orbit_changed.connect(self._refresh)
+        self._refresh()
 
     def _refresh(self) -> None:
         tracker = self.image_view.orbit_tracker

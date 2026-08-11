@@ -25,9 +25,9 @@ import numpy as np
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QLabel,
-                               QMainWindow, QMessageBox, QPushButton, QTabWidget, QToolBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+                               QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter,
+                               QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
 from app.about_dialog import AboutDialog
@@ -366,6 +366,14 @@ class ImageView(QWidget):
     viewport_changed = Signal()
     orbit_changed = Signal()
     cursor_readout_changed = Signal(str)
+    # Emitted at the start of every mouse press -- Stage 2's only hook for
+    # "which pane did the user just interact with." ImageView itself has
+    # no notion of a window or of other panes; SandboxWindow is the one
+    # that connects this (per instance, via a pane-capturing lambda -- see
+    # _build_ui) to actually move focus. Unconnected in every standalone
+    # test that builds an ImageView without a SandboxWindow, so it is a
+    # pure no-op there.
+    pane_activated = Signal()
     # Emitted with the clicked complex value on a PARAMETER-plane click --
     # deliberately does NOT set session.param itself (unlike _seed_orbit_at
     # setting the orbit tracker directly): SandboxWindow._apply_new_param
@@ -837,6 +845,7 @@ class ImageView(QWidget):
 
     # ---- drag: rubber-band zoom, or pan -----------------------------------------
     def mousePressEvent(self, event) -> None:
+        self.pane_activated.emit()
         pos = event.position().toPoint()
         is_pan = (event.button() == Qt.MouseButton.MiddleButton or
                  (event.button() == Qt.MouseButton.LeftButton and
@@ -934,31 +943,38 @@ class SandboxWindow(QMainWindow):
         # file is missing (nothing saved yet) or malformed.
         self.session.load_user_library(library_path())
 
-        # The Pane this single-view window builds -- see app.pane.Pane's
-        # own docstring for what it owns (viewport + render_mode + this
-        # pane's own render-supersession state) versus what stays on
-        # Session (map/param/render_settings/cache, shared across every
-        # pane). Constructed BEFORE _build_ui() -- ImageView's own
-        # constructor reads an initial viewport/mode from it, so the pane
-        # must already exist with real values.
+        # Two panes: `self.pane` (left, defaults to the parameter plane)
+        # and `self.pane2` (right, defaults to the dynamical plane at this
+        # map's own default framing) -- see app.pane.Pane's own docstring
+        # for what a pane owns (viewport + render_mode + its own
+        # render-supersession state) versus what stays on Session
+        # (map/param/render_settings/cache, shared across both). Neither
+        # pane is privileged by role -- Stage 3's coupling keys off
+        # whether a pane's OWN render_mode is in PARAMETER_PLANE_MODES,
+        # never off "is this self.pane or self.pane2" -- these are just
+        # the two panes' STARTING modes, matching today's single-view
+        # startup (parameter plane) plus a natural dynamical partner.
+        # Constructed BEFORE _build_ui() -- ImageView's own constructor
+        # reads an initial viewport/mode from its pane, so both panes must
+        # already exist with real values.
+        resolution = self.session.settings.resolution
         self.pane = Pane(cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
-                                      self.session.settings.resolution),
+                                      resolution),
                          "parameter")
-        # Every pane this window owns -- just the one for now. Iterated by
-        # closeEvent (cancel every pane's in-flight renders) and
-        # _on_settings_applied (a resolution change touches every pane's
-        # viewport, not just one) rather than hardcoding self.pane in
-        # those two places, so Stage 2's second pane needs no changes
-        # there when it's added.
-        self.panes: list[Pane] = [self.pane]
+        pane2_center, pane2_scale = default_view_for(self.session.map.name)
+        self.pane2 = Pane(cdx.Viewport(pane2_center, pane2_scale, resolution), "julia")
+        # Every pane this window owns. Iterated by closeEvent (cancel every
+        # pane's in-flight renders) and _on_settings_applied (a resolution
+        # change touches every pane's viewport, not just one).
+        self.panes: list[Pane] = [self.pane, self.pane2]
 
-        # Captured once, independent of self.pane.viewport (a fresh
-        # Viewport, not a reference to it) -- Reset View must restore
-        # exactly this regardless of anything that has happened since,
-        # undo history or not (there is no undo yet, but the point is this
-        # does not need one).
-        vp0 = self.pane.viewport
-        self._initial_viewport = cdx.Viewport(vp0.center, vp0.scale, vp0.resolution)
+        # The pane Reset View/the status bar/the metadata header act on --
+        # starts on self.pane (matching today's single-view startup), moves
+        # whenever either ImageView reports a mouse press (see
+        # ImageView.pane_activated, wired in _build_ui). Not restricted to
+        # "the pane currently marked dynamical" or any other role -- either
+        # pane can be focused regardless of its mode.
+        self._focused_pane = self.pane
 
         # A dedicated pool, not QThreadPool.globalInstance(): keeps this
         # app's renders independent of anything else in the process that
@@ -985,53 +1001,115 @@ class SandboxWindow(QMainWindow):
         # here -- see this whole comment's own point: results must never
         # cross between panes, and neither should their bookkeeping.
 
-        self._debounce_timer = QTimer(self)
-        self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.setInterval(RENDER_DEBOUNCE_MS)
-        # Stage 1 has exactly one pane, so one shared debounce timer always
-        # re-rendering THAT pane is unambiguous; a debounce timer per pane
-        # (so an edit affecting only one pane doesn't re-render the other)
-        # is a Stage 2 concern, once a second pane actually exists.
-        self._debounce_timer.timeout.connect(lambda: self._start_render(self.pane))
+        # One debounce timer PER PANE -- an ambient edit (scroll/drag) on
+        # one pane must not restart, or be satisfied by, a render of the
+        # OTHER pane. Keyed by the Pane object itself (plain identity
+        # hashing is fine -- Pane defines no __eq__/__hash__).
+        self._debounce_timers: dict[Pane, QTimer] = {}
+        for pane in self.panes:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(RENDER_DEBOUNCE_MS)
+            timer.timeout.connect(lambda p=pane: self._start_render(p))
+            self._debounce_timers[pane] = timer
 
         self._build_ui()
-        self.image_view.refresh_critical_points()
+        for pane in self.panes:
+            pane.image_view.refresh_critical_points()
         self._update_status_bar()
-        self._start_render(self.pane)
+        for pane in self.panes:
+            self._start_render(pane)
 
     def _build_ui(self) -> None:
         self.image_view = ImageView(self.pane, self.session, self)
         self.pane.image_view = self.image_view
-        self.image_view.viewport_changed.connect(self._on_viewport_changed)
-        self.image_view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
-        self.image_view.param_changed.connect(self._on_param_changed_by_click)
-        # Keeps the "Orbit seed z0" field showing the CURRENT z0 whenever
-        # one is seeded via a dynamical-plane click (P6's "symmetry of
-        # input": the click path must populate the field, same as the
-        # field committing a value must seed an orbit -- see
-        # _on_z0_field_committed). Also fires on step/clear, both harmless
-        # no-ops here: z0 itself never changes mid-orbit, and clear leaves
-        # state None, which this deliberately does NOT react to -- z0 is a
-        # persistent, independently-chosen seed, and Clear only stops
-        # DRAWING it, it does not retract the choice (see
-        # OrbitTracker.recompute_current's own docstring for the same
-        # principle from the other direction).
-        self.image_view.orbit_changed.connect(self._on_orbit_changed)
+        self.image_view2 = ImageView(self.pane2, self.session, self)
+        self.pane2.image_view = self.image_view2
+
+        # Every signal below is wired TWICE, once per pane's own ImageView,
+        # each through a pane-capturing lambda -- the same pattern
+        # _start_render(pane) already uses for render-result routing (see
+        # its own comment on Pane.pending_tasks). Every handler now takes
+        # the originating pane explicitly instead of assuming self.pane, so
+        # a signal from EITHER pane reaches the same code and acts on the
+        # right one.
+        for pane, view in ((self.pane, self.image_view), (self.pane2, self.image_view2)):
+            view.viewport_changed.connect(lambda p=pane: self._on_viewport_changed(p))
+            view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
+            # No pane-capturing lambda needed here -- mousePressEvent
+            # always emits pane_activated (moving focus) BEFORE a release
+            # can ever emit param_changed, so by the time this fires,
+            # self._focused_pane is already the clicked pane; see
+            # _apply_new_param, which acts on the focused pane.
+            view.param_changed.connect(self._on_param_changed_by_click)
+            # Keeps the "Orbit seed z0" field showing the CURRENT z0
+            # whenever one is seeded via a dynamical-plane click (P6's
+            # "symmetry of input": the click path must populate the
+            # field, same as the field committing a value must seed an
+            # orbit -- see _on_z0_field_committed). Also fires on
+            # step/clear, both harmless no-ops here: z0 itself never
+            # changes mid-orbit, and clear leaves state None, which this
+            # deliberately does NOT react to -- z0 is a persistent,
+            # independently-chosen seed, and Clear only stops DRAWING it,
+            # it does not retract the choice (see
+            # OrbitTracker.recompute_current's own docstring for the same
+            # principle from the other direction).
+            view.orbit_changed.connect(lambda p=pane: self._on_orbit_changed(p))
+            # Moves focus to whichever pane the user actually pressed on
+            # -- Reset View, the metadata header, and the status bar all
+            # act on the focused pane (see _set_focused_pane).
+            view.pane_activated.connect(lambda p=pane: self._set_focused_pane(p))
+
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
         self.metadata_header = MetadataHeader(self.session, self.pane, self)
 
+        # PER-PANE mode combo -- replaces the old single window-level
+        # self.mode_combo. self.mode_combo is now specifically pane A's
+        # (kept under that name for the many single-pane call sites/tests
+        # that still mean "the" pane); self.mode_combo2 is pane B's, wired
+        # identically. Neither one is more "correct" than the other --
+        # Stage 3's coupling keys off render_mode, never off which combo
+        # this is.
+        self.mode_combo = QComboBox(self)
+        self.mode_combo.addItems(RENDER_MODES)
+        self.mode_combo.setCurrentText(self.pane.render_mode)
+        self.mode_combo.currentTextChanged.connect(lambda m: self._on_mode_changed(self.pane, m))
+
+        self.mode_combo2 = QComboBox(self)
+        self.mode_combo2.addItems(RENDER_MODES)
+        self.mode_combo2.setCurrentText(self.pane2.render_mode)
+        self.mode_combo2.currentTextChanged.connect(
+            lambda m: self._on_mode_changed(self.pane2, m))
+
+        self.pane_column = self._build_pane_column(self.mode_combo, self.image_view)
+        self.pane_column2 = self._build_pane_column(self.mode_combo2, self.image_view2)
+        self._pane_columns: dict[Pane, QWidget] = {
+            self.pane: self.pane_column, self.pane2: self.pane_column2}
+        self._mode_combos: dict[Pane, QComboBox] = {
+            self.pane: self.mode_combo, self.pane2: self.mode_combo2}
+
+        # Side by side in a splitter, not two fixed halves -- the user can
+        # drag the divider to give one pane more room. Coupled (both
+        # visible) is the natural instrument default (see
+        # self.coupled_checkbox below); single-view collapses to just
+        # whichever pane is currently focused (see _relayout_panes).
+        self.view_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.view_splitter.addWidget(self.pane_column)
+        self.view_splitter.addWidget(self.pane_column2)
+
         # The View tab holds a small container -- the metadata header
-        # above the image, the orbit-tracking strip below it -- not the
-        # bare ImageView. The header sits directly above what it
+        # above the splitter, the orbit-tracking strip below it -- not the
+        # bare ImageView(s). The header sits directly above what it
         # describes so a screenshot of just this tab is self-explanatory
         # (P5c's own reason for building it at all); the orbit panel is
         # meaningless without the image it overlays and needs to stay
-        # visible while the user clicks the image to seed a new orbit.
+        # visible while the user clicks an image to seed a new orbit --
+        # see _sync_orbit_panel for which pane it currently overlays.
         self.view_container = QWidget(self)
         view_layout = QVBoxLayout(self.view_container)
         view_layout.setContentsMargins(0, 0, 0, 0)
         view_layout.addWidget(self.metadata_header)
-        view_layout.addWidget(self.image_view, 1)
+        view_layout.addWidget(self.view_splitter, 1)
         view_layout.addWidget(self.orbit_panel)
 
         # A QTabWidget as the central widget, not the bare view container --
@@ -1056,12 +1134,14 @@ class SandboxWindow(QMainWindow):
 
         toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
-        toolbar.addWidget(QLabel("Mode:", self))
-        self.mode_combo = QComboBox(self)
-        self.mode_combo.addItems(RENDER_MODES)
-        self.mode_combo.setCurrentText(self.pane.render_mode)
-        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        toolbar.addWidget(self.mode_combo)
+
+        # Coupled (both panes visible) is the natural instrument default
+        # -- see _relayout_panes for what unchecking this actually does
+        # (collapse to just the focused pane, not always pane A).
+        self.coupled_checkbox = QCheckBox("Coupled view", self)
+        self.coupled_checkbox.setChecked(True)
+        self.coupled_checkbox.toggled.connect(lambda _checked: self._relayout_panes())
+        toolbar.addWidget(self.coupled_checkbox)
 
         # Two always-visible complex-number fields -- NOT buried in the
         # Terms tab -- the typed half of P6's "symmetry of input": a and
@@ -1085,15 +1165,25 @@ class SandboxWindow(QMainWindow):
         reset_button.clicked.connect(self._reset_view)
         toolbar.addWidget(reset_button)
 
+        # GLOBAL, not per-pane -- acceptable for now (per-pane would be
+        # more correct: e.g. tracing orbits only on the pane you're
+        # actually looking at), but these three toggles are visual
+        # preferences a user sets once and expects to stick regardless of
+        # which pane they're looking at, and per-pane versions would mean
+        # SIX checkboxes crowding the toolbar instead of three. Revisit if
+        # that tradeoff stops holding.
         self.critical_points_checkbox = QCheckBox("Critical Points", self)
         self.critical_points_checkbox.toggled.connect(self.image_view.set_show_critical_points)
+        self.critical_points_checkbox.toggled.connect(self.image_view2.set_show_critical_points)
         toolbar.addWidget(self.critical_points_checkbox)
         self.trace_orbits_checkbox = QCheckBox("Trace Orbits", self)
         self.trace_orbits_checkbox.toggled.connect(self.image_view.set_trace_orbits)
+        self.trace_orbits_checkbox.toggled.connect(self.image_view2.set_trace_orbits)
         toolbar.addWidget(self.trace_orbits_checkbox)
         self.orbit_connect_lines_checkbox = QCheckBox("Connect orbit points", self)
         self.orbit_connect_lines_checkbox.setChecked(True)
         self.orbit_connect_lines_checkbox.toggled.connect(self.image_view.set_orbit_connect_lines)
+        self.orbit_connect_lines_checkbox.toggled.connect(self.image_view2.set_orbit_connect_lines)
         toolbar.addWidget(self.orbit_connect_lines_checkbox)
 
         self.addToolBar(toolbar)
@@ -1130,8 +1220,76 @@ class SandboxWindow(QMainWindow):
 
         self.statusBar().showMessage("")
 
+        self._update_pane_focus_styling()
+        self._sync_orbit_panel()
+
+    def _build_pane_column(self, mode_combo: QComboBox, image_view: "ImageView") -> QWidget:
+        """One pane's own little control strip (mode combo) stacked above
+        its ImageView -- what actually goes side by side in the splitter.
+        """
+        column = QWidget(self)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Mode:", self))
+        row.addWidget(mode_combo)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addWidget(image_view, 1)
+        return column
+
     def _show_about_dialog(self) -> None:
         AboutDialog(self).exec()
+
+    # ---- focus / layout: which pane Reset View, the header, and single- ---------
+    # ---- view mode act on ---------------------------------------------------------
+    def _set_focused_pane(self, pane: Pane) -> None:
+        if pane is self._focused_pane:
+            return
+        self._focused_pane = pane
+        self.metadata_header.pane = pane
+        self.metadata_header.refresh()
+        self._update_status_bar()
+        self._update_pane_focus_styling()
+        if not self.coupled_checkbox.isChecked():
+            self._relayout_panes()
+
+    def _update_pane_focus_styling(self) -> None:
+        # Purely visual -- which column has a highlighted border -- so the
+        # user can actually SEE which pane Reset View/typed-field actions
+        # (still self.pane-directed until Stage 3) are about to act on.
+        for pane, column in self._pane_columns.items():
+            column.setStyleSheet(
+                "border: 2px solid palette(highlight);" if pane is self._focused_pane else "")
+
+    def _relayout_panes(self) -> None:
+        # Coupled: both panes visible, side by side. Single: only the
+        # FOCUSED pane's column is visible -- not always pane A -- the
+        # other pane keeps rendering/tracking its own state in the
+        # background (nothing about it is torn down), it's just hidden.
+        coupled = self.coupled_checkbox.isChecked()
+        for pane, column in self._pane_columns.items():
+            column.setVisible(coupled or pane is self._focused_pane)
+
+    # ---- orbit strip: follows whichever pane is currently dynamical -------------
+    def _current_dynamical_pane(self) -> Pane | None:
+        # Prefers the FOCUSED pane when it qualifies (most likely the one
+        # the user is about to click to seed/step an orbit on); otherwise
+        # falls back to scanning self.panes so a dynamical pane that isn't
+        # focused is still found. None if neither pane is currently in a
+        # dynamical mode.
+        if self._focused_pane.render_mode not in PARAMETER_PLANE_MODES:
+            return self._focused_pane
+        for pane in self.panes:
+            if pane.render_mode not in PARAMETER_PLANE_MODES:
+                return pane
+        return None
+
+    def _sync_orbit_panel(self) -> None:
+        dynamical_pane = self._current_dynamical_pane()
+        self.orbit_panel.setEnabled(dynamical_pane is not None)
+        if dynamical_pane is not None:
+            self.orbit_panel.set_image_view(dynamical_pane.image_view)
 
     # ---- experiment snapshots: File > Save/Open Experiment... -------------------
     # MODAL DIALOGS AREN'T DIRECTLY TESTABLE (QFileDialog blocks on a real
@@ -1149,6 +1307,9 @@ class SandboxWindow(QMainWindow):
             self._do_save_experiment(path)
 
     def _do_save_experiment(self, path: str) -> None:
+        # Still self.pane specifically (not the focused pane, not both
+        # panes) -- extending the .cdsx format to cover layout/both
+        # panes/focus/marker is explicitly Stage 4's job, not this one's.
         if not path.endswith(".cdsx"):
             path += ".cdsx"
         state = self.image_view.orbit_tracker.state
@@ -1212,7 +1373,7 @@ class SandboxWindow(QMainWindow):
         self.image_view.refresh_critical_points()
         self.metadata_header.refresh()
         self._update_status_bar()
-        self._debounce_timer.stop()
+        self._debounce_timers[self.pane].stop()
         self._start_render(self.pane)
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
@@ -1228,65 +1389,78 @@ class SandboxWindow(QMainWindow):
 
     def _apply_new_param(self, a: complex, *, switch_to_dynamical: bool) -> None:
         """The ONE place session.param is ever assigned from user input --
-        both the field and the parameter-plane click funnel through this,
-        so they cannot diverge (P6's own requirement). On any change to
-        `a`: reset the dynamical-plane viewport to this map's default (a
-        deep zoom from the PREVIOUS parameter is almost never informative
-        for a new one), refresh critical points/dynamical facts/the
-        metadata header, recompute (not clear) z0's orbit under the new
-        map, and sync the field's own display.
+        both the field and a parameter-plane click funnel through this, so
+        they cannot diverge (P6's own requirement). Acts on the FOCUSED
+        pane: reset ITS viewport to this map's default (a deep zoom from
+        the PREVIOUS parameter is almost never informative for a new one),
+        refresh critical points/dynamical facts/the metadata header,
+        recompute (not clear) z0's orbit under the new map, and sync the
+        field's own display. session.param itself is shared, so the OTHER
+        pane's rendered pixels are now stale if it's a dynamical mode --
+        re-rendering it too, and doing so ONLY when it actually needs it
+        (see the cache asymmetry: a parameter-plane pane ignores param
+        entirely), is Stage 3's coupling job, not this one's.
         """
         self.session.param = a
+        pane = self._focused_pane
         center, scale = default_view_for(self.session.map.name)
-        vp = self.pane.viewport
-        self.pane.viewport = cdx.Viewport(center, scale, vp.resolution)
-        self.image_view.refresh_critical_points()
-        self.image_view.refresh_orbit_for_new_param()
+        vp = pane.viewport
+        pane.viewport = cdx.Viewport(center, scale, vp.resolution)
+        pane.image_view.refresh_critical_points()
+        pane.image_view.refresh_orbit_for_new_param()
         self.facts_panel.refresh()
         self.metadata_header.refresh()
         self.param_field.set_value(a)
-        if switch_to_dynamical and self.pane.render_mode in PARAMETER_PLANE_MODES:
+        if switch_to_dynamical and pane.render_mode in PARAMETER_PLANE_MODES:
             # Triggers _on_mode_changed, which itself renders -- so this
             # branch does NOT also call _start_render below; doing both
             # would fire two render requests for one user action (the
             # second cancels the first's in-flight generation, so it
             # would not be WRONG, just a wasted request for a plain
             # mode-switch).
-            self.mode_combo.setCurrentText("julia")
+            self._mode_combos[pane].setCurrentText("julia")
         else:
             self._update_status_bar()
-            self._debounce_timer.stop()
-            self._start_render(self.pane)
+            self._debounce_timers[pane].stop()
+            self._start_render(pane)
 
     # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
     def _on_z0_field_committed(self, z0: complex) -> None:
-        # Same gate _seed_orbit_at itself uses -- orbit tracking is a
-        # dynamical-plane concept; committing a z0 while looking at the
-        # parameter plane is silently a no-op, matching what clicking the
-        # (nonexistent, on that plane) orbit target would also do.
-        if self.pane.render_mode in PARAMETER_PLANE_MODES:
+        # Acts on the FOCUSED pane -- same gate _seed_orbit_at itself uses
+        # -- orbit tracking is a dynamical-plane concept; committing a z0
+        # while the focused pane is looking at the parameter plane is
+        # silently a no-op, matching what clicking the (nonexistent, on
+        # that plane) orbit target would also do.
+        pane = self._focused_pane
+        if pane.render_mode in PARAMETER_PLANE_MODES:
             return
-        self.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
-        self.image_view.orbit_changed.emit()
-        self.image_view.update()
+        pane.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
+        pane.image_view.orbit_changed.emit()
+        pane.image_view.update()
 
-    def _on_orbit_changed(self) -> None:
+    def _on_orbit_changed(self, pane: Pane) -> None:
         # Keeps the z0 FIELD showing the current z0 whenever a real orbit
         # exists -- fires on seed/step/clear alike; step leaves z0
         # unchanged (a harmless re-set to the same value) and clear
         # deliberately does nothing here (see this connection's own
-        # comment in _build_ui for why the field outlives Clear).
-        state = self.image_view.orbit_tracker.state
+        # comment in _build_ui for why the field outlives Clear). The z0
+        # field describes the FOCUSED pane specifically -- an orbit change
+        # on the OTHER, unfocused pane does not steal the field's display.
+        if pane is not self._focused_pane:
+            return
+        state = pane.image_view.orbit_tracker.state
         if state is not None:
             self.z0_field.set_value(state.z0)
 
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
-    def _on_mode_changed(self, mode: str) -> None:
-        self.pane.set_render_mode(mode)
-        self.metadata_header.refresh()   # domain/mode text depends on the mode itself
-        self._update_status_bar()
-        self._debounce_timer.stop()
-        self._start_render(self.pane)
+    def _on_mode_changed(self, pane: Pane, mode: str) -> None:
+        pane.set_render_mode(mode)
+        if pane is self._focused_pane:
+            self.metadata_header.refresh()   # domain/mode text depends on the mode itself
+            self._update_status_bar()
+        self._sync_orbit_panel()   # this pane may have just become (or stopped being) dynamical
+        self._debounce_timers[pane].stop()
+        self._start_render(pane)
 
     # ---- settings: apply on demand, from the Settings tab -----------------------
     def _on_settings_applied(self, new_settings: Settings) -> None:
@@ -1310,8 +1484,8 @@ class SandboxWindow(QMainWindow):
             pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
-        self._debounce_timer.stop()
         for pane in self.panes:
+            self._debounce_timers[pane].stop()
             self._start_render(pane)
 
     # ---- term edits: live but debounced, reusing the viewport-change path -------
@@ -1325,8 +1499,17 @@ class SandboxWindow(QMainWindow):
         # render per keystroke. TermEditorPanel has already validated and
         # applied the edit to self.session.map by the time this is called;
         # this only has to trigger the render side.
+        #
+        # session.map is SHARED, so a term edit really invalidates BOTH
+        # panes, not just the focused one -- re-rendering only the focused
+        # pane here (and leaving the other visibly stale until its own
+        # trigger) is a known, deliberate Stage 2 gap: "a MAP or term edit
+        # invalidates BOTH panes" is explicitly Stage 3's cache-asymmetry
+        # job, alongside the equivalent gap for a plain param-field commit
+        # (see _apply_new_param's own docstring).
+        pane = self._focused_pane
         self._update_status_bar()
-        self._debounce_timer.start()
+        self._debounce_timers[pane].start()
         self.metadata_header.refresh()   # name/formula depend directly on the edited map
         # Cheap: refresh() only recomputes when (map, param) actually
         # changed since its last call, so this stays fresh for whenever the
@@ -1334,10 +1517,10 @@ class SandboxWindow(QMainWindow):
         # on every keystroke's worth of edits.
         self.facts_panel.refresh()
         # Same memoization property -- see ImageView.refresh_critical_points.
-        self.image_view.refresh_critical_points()
+        pane.image_view.refresh_critical_points()
         # An orbit traced under the PRE-edit map no longer describes this
         # map's dynamics -- see OrbitTracker.reset_if_stale's own docstring.
-        self.image_view.refresh_orbit_staleness()
+        pane.image_view.refresh_orbit_staleness()
 
     # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
     def _on_tab_changed(self, index: int) -> None:
@@ -1346,65 +1529,84 @@ class SandboxWindow(QMainWindow):
 
     # ---- facts tab: clicking a listed point centres the view on it --------------
     def _on_center_view(self, point: complex) -> None:
-        vp = self.pane.viewport
-        self.pane.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
+        pane = self._focused_pane
+        vp = pane.viewport
+        pane.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
         self.tabs.setCurrentWidget(self.view_container)
         self._update_status_bar()
-        self._debounce_timer.stop()
-        self._start_render(self.pane)
+        self._debounce_timers[pane].stop()
+        self._start_render(pane)
 
     # ---- library tab: loading a family replaces session.map wholesale -----------
     def _on_family_loaded(self) -> None:
         # LibraryPanel has already replaced self.session.map by the time
         # this fires (see its _load_selected) but no longer touches any
         # viewport itself (Session has none to touch -- see app.pane.Pane)
-        # -- resetting THIS pane's viewport to the new map's default is
-        # this method's own job now, before resyncing every OTHER panel
-        # that caches a view of the old map, then rendering right away,
-        # the same "deliberate action, not a debounce-worthy burst"
-        # treatment Reset View and Settings' Apply already get.
+        # -- resetting the FOCUSED pane's viewport to the new map's
+        # default is this method's own job now, before resyncing every
+        # OTHER panel that caches a view of the old map, then rendering
+        # right away, the same "deliberate action, not a debounce-worthy
+        # burst" treatment Reset View and Settings' Apply already get.
+        # session.map is SHARED, so this leaves the OTHER (unfocused)
+        # pane showing the OLD map until its own trigger -- the same
+        # known, deliberate Stage 2 gap _on_term_edited's docstring notes
+        # (Stage 3's cache-asymmetry job, not this one's).
+        pane = self._focused_pane
         center, scale = default_view_for(self.session.map.name)
-        self.pane.viewport = cdx.Viewport(center, scale, self.pane.viewport.resolution)
+        pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
         self.term_editor_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.image_view.refresh_critical_points()
-        self.image_view.refresh_orbit_staleness()
+        pane.image_view.refresh_critical_points()
+        pane.image_view.refresh_orbit_staleness()
         self.metadata_header.refresh()   # name/formula/param all just changed wholesale
         self._update_status_bar()
-        self._debounce_timer.stop()
-        self._start_render(self.pane)
+        self._debounce_timers[pane].stop()
+        self._start_render(pane)
 
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
         self.session.save_user_library(library_path())
 
     # ---- viewport change -> debounced render ------------------------------------
-    @Slot()
-    def _on_viewport_changed(self) -> None:
-        self._update_status_bar()
+    def _on_viewport_changed(self, pane: Pane) -> None:
+        if pane is self._focused_pane:
+            self._update_status_bar()
         # A render is normally debounced -- but if the visible viewport has
         # drifted far enough into the last buffer's overscan margin, waiting
         # out the debounce risks running off the buffer's real pixels before
         # a fresh one lands (a long continuous drag/scroll restarts the
         # debounce on every event and might never let it fire on its own).
-        if self.image_view.buffer_edge_fraction() > BUFFER_EDGE_FRACTION:
-            self._debounce_timer.stop()
-            self._start_render(self.pane)
+        # PER PANE: one pane drifting past its own buffer's margin starts
+        # only ITS timer/render, never the other pane's.
+        if pane.image_view.buffer_edge_fraction() > BUFFER_EDGE_FRACTION:
+            self._debounce_timers[pane].stop()
+            self._start_render(pane)
         else:
-            self._debounce_timer.start()   # restarts if already running
+            self._debounce_timers[pane].start()   # restarts if already running
 
     def _reset_view(self) -> None:
         # Center/scale only -- NOT resolution. Resolution is a Settings
         # field now (see app/settings.py), independent of where the user
         # is looking; Reset View undoes pan/zoom, not an Apply from the
         # Settings tab. Using the pane's CURRENT resolution (whatever
-        # Settings last applied), not _initial_viewport's, is what keeps
-        # those two concerns from fighting each other.
-        iv = self._initial_viewport
-        self.pane.viewport = cdx.Viewport(iv.center, iv.scale, self.pane.viewport.resolution)
+        # Settings last applied) keeps that concern from fighting this one.
+        #
+        # Resets to this map's own default framing (default_view_for),
+        # mode-appropriate for EITHER plane -- the same table already
+        # doubles as "the parameter plane's legible region" (see
+        # DEFAULT_PARAMETER_VIEW_CENTER/SCALE, which is exactly
+        # default_view_for("mandelbrot")) and "the dynamical plane's"
+        # (_apply_new_param uses the identical call for exactly that
+        # purpose) -- NOT a frozen startup snapshot, which is what this
+        # used to restore and was the bug Stage 2 was asked to fix (a
+        # deep zoom from a PREVIOUS session/param is never what "reset"
+        # should mean).
+        pane = self._focused_pane
+        center, scale = default_view_for(self.session.map.name)
+        pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
         self._update_status_bar()
-        self._debounce_timer.stop()
-        self._start_render(self.pane)
+        self._debounce_timers[pane].stop()
+        self._start_render(pane)
 
     # ---- render dispatch -----------------------------------------------------------
     # PER-PANE: request-id/pending-tasks bookkeeping lives on the pane
@@ -1482,9 +1684,10 @@ class SandboxWindow(QMainWindow):
         # in _on_cursor_readout_changed below; both write into
         # _status_base_message/_status_cursor_text and _render_status_bar
         # combines them, so neither overwrites the other's half of the
-        # displayed message. Stage 1: one pane, so this stays unambiguous;
-        # a per-pane status readout is a Stage 2 concern.
-        vp = self.pane.viewport
+        # displayed message. One shared status bar describes the FOCUSED
+        # pane specifically (see _set_focused_pane, _on_viewport_changed,
+        # _on_mode_changed) -- not a per-pane status bar of its own.
+        vp = self._focused_pane.viewport
         renderer = cdx.Renderer(map=cdx.Map.custom(self.session.map, self.session.param),
                                 viewport=vp, settings=self.session.render_settings)
         floor = renderer.precision_floor
@@ -1519,8 +1722,8 @@ class SandboxWindow(QMainWindow):
         # seconds. RenderTask.run() emits nothing at all once cancelled (see
         # its own comment), which is what keeps that residual window from
         # being a real risk rather than just a shorter one.
-        self._debounce_timer.stop()
         for pane in self.panes:
+            self._debounce_timers[pane].stop()
             for task in pane.pending_tasks.values():
                 task.cancel.cancel()
         super().closeEvent(event)
