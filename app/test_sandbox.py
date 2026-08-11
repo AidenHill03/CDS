@@ -23,7 +23,7 @@ import threading
 import time
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -31,7 +31,8 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
-from app.sandbox import ImageView, RenderTask, SandboxWindow, array_to_qimage
+from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
+                         drawable_polyline_segments)
 from app.session import Session, render_map
 from app.settings import Settings
 
@@ -377,6 +378,82 @@ def main() -> None:
           "a real drag (rubber-band zoom) does NOT also seed an orbit at the release point")
     check(close(gesture_view.session.viewport.center, complex(0, 0), 0.7),
           "sanity: the drag actually did rubber-band zoom (viewport changed)")
+
+    # ---- orbit trace: drawable_polyline_segments (pure geometry, no painter needed) --
+    print("\ndrawable_polyline_segments (segment-break fix, pure geometry):")
+    rect = QRectF(0, 0, 400, 400)   # already "inflated" for this test's own purposes
+    p0, p1, p2, p3 = QPointF(10, 10), QPointF(20, 20), QPointF(30, 30), QPointF(40, 40)
+    huge = QPointF(1e7, 1e7)   # a huge-but-finite point's mapped pixel -- far outside rect
+
+    segs = drawable_polyline_segments([complex(0, 0), complex(1, 1), complex(2, 2)],
+                                      [p0, p1, p2], rect)
+    check(segs == [(p0, p1), (p1, p2)],
+          "an all-finite, all-on-screen run draws every consecutive pair")
+
+    # A non-finite point in the middle: must NOT bridge across it to connect its finite
+    # neighbours -- the FILTER-AND-BRIDGE bug this whole fix exists to remove.
+    points_nonfinite = [complex(0, 0), complex(math.inf, 0.0), complex(2, 2)]
+    segs_nonfinite = drawable_polyline_segments(points_nonfinite, [p0, p1, p2], rect)
+    check(segs_nonfinite == [],
+          "a non-finite point breaks BOTH adjacent pairs -- neither survives, and the two "
+          "finite neighbours either side of it are NOT bridged across the gap")
+
+    # A huge-but-finite point (an escaping orbit before it overflows, e.g. |z|~1e300):
+    # must not sweep a line across the whole pane to or from it -- the OFF-SCREEN SWEEP bug.
+    points_huge = [complex(0, 0), complex(1e300, 1e300), complex(2, 2)]
+    segs_huge = drawable_polyline_segments(points_huge, [p0, huge, p2], rect)
+    check(segs_huge == [],
+          "a huge-but-finite off-screen point draws no segment to OR from it -- no sweep "
+          "across the pane, and its finite on-screen neighbours are not bridged across it")
+
+    # Both defects in the SAME sequence at once, exactly the combined case the task asks
+    # for: a NaN AND a huge-but-finite point.
+    points_combined = [complex(0, 0), complex(1, 1), complex(math.nan, 0.0),
+                       complex(1e300, 1e300), complex(3, 3)]
+    pixels_combined = [p0, p1, p1, huge, p3]
+    segs_combined = drawable_polyline_segments(points_combined, pixels_combined, rect)
+    check(segs_combined == [(p0, p1)],
+          "with a NaN AND a huge-but-finite point both present, only the one genuinely "
+          "finite-and-on-screen consecutive pair survives -- neither defect bridges across "
+          "the other, and no drawn segment leaves the inflated rect")
+    check(all(rect.contains(a) and rect.contains(b) for a, b in segs_combined),
+          "sanity: every segment this function returns stays fully within the given rect")
+
+    # ---- orbit trace: connect-lines toggle, via the testable _orbit_line_segments ----
+    print("\n_orbit_line_segments (connect-lines toggle):")
+    toggle_session = Session()
+    toggle_session.map = cdx.RationalMap.mandelbrot()
+    toggle_session.param = -1 + 0j   # the basilica
+    toggle_session.set_render_mode("julia")
+    toggle_session.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
+    toggle_view = ImageView(toggle_session)
+    toggle_view.resize(400, 400)
+    toggle_view.orbit_tracker.seed(toggle_session.map, toggle_session.param, complex(0.3, 0.2))
+    toggle_view.step_orbit(3)
+
+    check(toggle_view._orbit_connect_lines is True, "sanity: the toggle defaults on")
+    check(len(toggle_view._orbit_line_segments()) > 0,
+          "sanity: with the toggle on, the seeded+stepped orbit has at least one drawable "
+          "segment")
+    history_before = list(toggle_view.orbit_tracker.state.history)
+
+    toggle_view.set_orbit_connect_lines(False)
+    check(toggle_view._orbit_line_segments() == [],
+          "with the toggle off, _orbit_line_segments returns zero segments")
+    check(list(toggle_view.orbit_tracker.state.history) == history_before,
+          "...but the underlying orbit history -- what the dots and seed marker are drawn "
+          "from -- is completely unaffected by the toggle")
+
+    toggle_view.set_orbit_connect_lines(True)
+    check(len(toggle_view._orbit_line_segments()) > 0, "re-enabling restores the segments")
+
+    # Orbit-only: must never affect the SEPARATE post-critical-point traces.
+    toggle_view._trace_orbits = True
+    toggle_view.refresh_critical_points()
+    toggle_view.set_orbit_connect_lines(False)
+    check(toggle_view._trace_orbits is True,
+          "the connect-lines toggle does not touch the independent trace-orbits flag -- "
+          "it is orbit-only, per its own docstring")
 
     # ---- cursor readout: coordinate precision + mode-dependent sampled value ------
     print("\ncursor readout:")
@@ -912,6 +989,14 @@ def main() -> None:
     window.critical_points_checkbox.setChecked(False)
     check(window.image_view._show_critical_points is False, "unchecking turns it back off")
 
+    check(window.image_view._orbit_connect_lines is True,
+          "'Connect orbit points' starts checked, matching image_view's own default")
+    window.orbit_connect_lines_checkbox.setChecked(False)
+    check(window.image_view._orbit_connect_lines is False,
+          "unchecking 'Connect orbit points' reaches image_view's own flag")
+    window.orbit_connect_lines_checkbox.setChecked(True)
+    check(window.image_view._orbit_connect_lines is True, "re-checking it turns it back on")
+
     # ---- centre-view still switches to the View tab (regression: the View tab's ------
     # ---- widget became a container around image_view, not image_view itself, when ----
     # ---- the orbit-tracking strip was added below it) ---------------------------------
@@ -1068,6 +1153,59 @@ def main() -> None:
     check(window.image_view.orbit_tracker.state is None,
           "orbit tracking stays a dynamical-plane concept -- same gate _seed_orbit_at itself uses")
     window.mode_combo.setCurrentText("julia")
+
+    # ---- experiment snapshots: File > Save/Open Experiment, through the REAL window --
+    # Session-level round-trip correctness is already covered directly in
+    # app/test_session.py; this is the one thing only a live SandboxWindow
+    # can confirm -- that _do_open_experiment's UI-facing glue (the mode
+    # combo box, the param field, and ImageView.orbit_tracker's actual
+    # seed()/step() reconstruction) all genuinely happen, not just
+    # session.restore_from_snapshot's own dict-level fields.
+    print("\nexperiment snapshots (File > Save/Open Experiment, via the real window):")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.session.param = complex(0.111, -0.222)
+    window.session.viewport = cdx.Viewport(complex(0.01, 0.02), 0.05, 200)
+    window.mode_combo.setCurrentText("julia")
+    saved_z0 = complex(0.05, -0.05)
+    window.image_view.orbit_tracker.seed(window.session.map, window.session.param, saved_z0)
+    window.image_view.step_orbit(3)
+    saved_history = list(window.image_view.orbit_tracker.state.history)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "roundtrip.cdsx")
+        window._do_save_experiment(path)
+        check(os.path.exists(path), "Save Experiment actually wrote a file")
+
+        # Disturb EVERYTHING the snapshot should restore, so a pass here
+        # can only mean the load genuinely put it back, not that it was
+        # already correct by coincidence.
+        window.session.map = cdx.RationalMap.newton_cubic()
+        window.session.param = complex(9, 9)
+        window.session.viewport = cdx.Viewport(complex(9, 9), 9.0, 50)
+        window.mode_combo.setCurrentText("parameter")
+        window.image_view.clear_orbit()
+
+        window._do_open_experiment(path)
+
+        check(window.session.map.to_formula() == cdx.RationalMap.mandelbrot().to_formula(),
+              "Open Experiment restores the map")
+        check(window.session.param == complex(0.111, -0.222), "Open Experiment restores param")
+        check(window.session.viewport.center == complex(0.01, 0.02) and
+              window.session.viewport.scale == 0.05,
+              "Open Experiment restores the viewport")
+        check(window.mode_combo.currentText() == "julia",
+              "Open Experiment syncs the mode combo box to the restored render_mode, not "
+              "just session.render_mode underneath it")
+        check(close(window.param_field.value, complex(0.111, -0.222), 1e-9),
+              "Open Experiment syncs the 'Parameter a' field's displayed value too")
+
+        state = window.image_view.orbit_tracker.state
+        check(state is not None and state.z0 == saved_z0,
+              "Open Experiment reconstructs the orbit at the SAVED z0")
+        check(state.n == 3, "...stepped the saved number of times")
+        check(list(state.history) == saved_history,
+              "...through the tracker's real seed()/step() API, regenerating the exact same "
+              "history a live orbit would have")
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded

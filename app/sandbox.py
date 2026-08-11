@@ -25,8 +25,9 @@ import numpy as np
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QMainWindow,
-                               QPushButton, QTabWidget, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QLabel,
+                               QMainWindow, QMessageBox, QPushButton, QTabWidget, QToolBar,
+                               QVBoxLayout, QWidget)
 
 import cdx
 from app.about_dialog import AboutDialog
@@ -93,6 +94,53 @@ PRECISION_WARN_MULTIPLE = 100
 CRITICAL_ORBIT_TRACE_STEPS = 60
 
 CRITICAL_POINT_MARKER_RADIUS = 5.0
+
+# How far outside the visible widget rect a mapped orbit/trace point may
+# still fall and be treated as "leaving the view" rather than "off
+# screen, don't draw toward it" -- see drawable_polyline_segments. A
+# point escaping to infinity is finite right up until it isn't (a
+# quadratic Julia orbit can sit at |z|~1e6 before overflowing), and that
+# maps to a pixel far outside the widget; without this margin a single
+# drawLine to it sweeps a line across the entire pane, and several such
+# segments wash into a translucent "film" instead of reading as an orbit.
+OFFSCREEN_MARGIN_PX = 300
+
+
+def drawable_polyline_segments(points: list[complex], pixel_points: list,
+                               rect) -> list[tuple]:
+    """Which CONSECUTIVE pairs of an orbit/trace sequence are safe to draw
+    as a line segment, given each point's own mapped screen position.
+
+    Deliberately walks pairs of the ORIGINAL sequence rather than
+    filtering out non-finite points first and connecting the survivors
+    (the bug this replaces): a pair is drawable only when BOTH endpoints
+    are finite complex numbers AND both mapped pixels fall inside `rect`
+    (the caller passes an already-inflated rect -- see
+    OFFSCREEN_MARGIN_PX). A pair failing either check is a BREAK, not
+    bridged to the next drawable point -- a real gap in the orbit (an
+    escape to infinity) stays a gap on screen instead of being painted
+    over with a line to whatever finite point happens to come next.
+
+    A point that's finite but off-screen is simply not drawn TO or FROM;
+    the segment is skipped rather than clipped to the rect edge -- simpler,
+    and sufficient to kill the sweep/film bug (a partial segment that
+    genuinely exits the view just isn't drawn, rather than being drawn up
+    to the boundary).
+
+    Pure function of its arguments (no widget/painter access), so the
+    geometry is unit-testable without constructing a QPainter.
+    """
+    def finite(w: complex) -> bool:
+        return math.isfinite(w.real) and math.isfinite(w.imag)
+
+    def drawable(i: int) -> bool:
+        return finite(points[i]) and rect.contains(pixel_points[i])
+
+    segments = []
+    for i in range(len(points) - 1):
+        if drawable(i) and drawable(i + 1):
+            segments.append((pixel_points[i], pixel_points[i + 1]))
+    return segments
 
 
 def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
@@ -331,6 +379,10 @@ class ImageView(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(200, 200)
         self.orbit_tracker = OrbitTracker()
+        # Orbit-only -- deliberately independent of _trace_orbits below,
+        # which governs the SEPARATE post-critical-point traces (see
+        # set_orbit_connect_lines's own docstring).
+        self._orbit_connect_lines: bool = True
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
@@ -553,6 +605,16 @@ class ImageView(QWidget):
         self.refresh_critical_points()   # lazily fills in traces if just turned on
         self.update()
 
+    def set_orbit_connect_lines(self, on: bool) -> None:
+        """Governs ONLY _paint_orbit's connecting segments -- the seeded
+        orbit's own history, drawn in orange. Independent of
+        set_trace_orbits: the post-critical-point traces (drawn in
+        _paint_critical_point_overlay, in white) are a different overlay
+        entirely and always connect when shown, regardless of this flag.
+        """
+        self._orbit_connect_lines = on
+        self.update()
+
     # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
     def refresh_orbit_staleness(self) -> None:
         """Called at the same map/param-change points refresh_critical_points
@@ -665,9 +727,12 @@ class ImageView(QWidget):
             trace_pen = QPen(QColor(255, 255, 255, 160))
             trace_pen.setWidth(1)
             painter.setPen(trace_pen)
+            inflated_rect = QRectF(self.rect()).adjusted(
+                -OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
+                OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
             for trace in self._orbit_traces:
-                finite_points = [self._complex_to_display_pixel(w) for w in trace if finite(w)]
-                for a, b in zip(finite_points, finite_points[1:]):
+                pixel_points = [self._complex_to_display_pixel(w) for w in trace]
+                for a, b in drawable_polyline_segments(trace, pixel_points, inflated_rect):
                     painter.drawLine(a, b)
 
         marker_pen = QPen(QColor(0, 0, 0))
@@ -681,6 +746,24 @@ class ImageView(QWidget):
             pixel = self._complex_to_display_pixel(w)
             painter.drawEllipse(pixel, r, r)
 
+    def _orbit_line_segments(self):
+        """The line segments _paint_orbit would draw for the CURRENT
+        orbit, already respecting both the dynamical-plane-only gate and
+        the connect-lines toggle -- factored out of _paint_orbit so this
+        is directly testable without a real QPainter/paint event. Returns
+        [] whenever _paint_orbit would draw no lines at all: no orbit,
+        parameter-plane mode, or the toggle off.
+        """
+        state = self.orbit_tracker.state
+        if (state is None or self.session.render_mode in PARAMETER_PLANE_MODES
+                or not self._orbit_connect_lines):
+            return []
+        inflated_rect = QRectF(self.rect()).adjusted(
+            -OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
+            OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
+        pixel_points = [self._complex_to_display_pixel(w) for w in state.history]
+        return drawable_polyline_segments(state.history, pixel_points, inflated_rect)
+
     def _paint_orbit(self, painter: QPainter) -> None:
         state = self.orbit_tracker.state
         if state is None or self.session.render_mode in PARAMETER_PLANE_MODES:
@@ -689,12 +772,18 @@ class ImageView(QWidget):
         def finite(w: complex) -> bool:
             return math.isfinite(w.real) and math.isfinite(w.imag)
 
-        finite_points = [self._complex_to_display_pixel(w) for w in state.history if finite(w)]
+        inflated_rect = QRectF(self.rect()).adjusted(
+            -OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
+            OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
+        pixel_points = [self._complex_to_display_pixel(w) for w in state.history]
 
+        # Lines are the only thing the toggle governs -- dots and the seed
+        # marker below are cheap, never sweep, and stay on regardless (see
+        # set_orbit_connect_lines's own docstring).
         line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from the white/black
         line_pen.setWidth(1)                        # critical-point markers on any palette
         painter.setPen(line_pen)
-        for a, b in zip(finite_points, finite_points[1:]):
+        for a, b in self._orbit_line_segments():
             painter.drawLine(a, b)
 
         dot_pen = QPen(QColor(0, 0, 0))
@@ -702,14 +791,15 @@ class ImageView(QWidget):
         painter.setPen(dot_pen)
         painter.setBrush(QColor(255, 120, 0))
         dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
-        for pixel in finite_points:                   # visually subordinate, not competing
-            painter.drawEllipse(pixel, dot_r, dot_r)
+        for w, pixel in zip(state.history, pixel_points):   # visually subordinate, not competing
+            if finite(w) and inflated_rect.contains(pixel):
+                painter.drawEllipse(pixel, dot_r, dot_r)
 
         # The SEED (history[0]) gets its own larger, distinct marker -- the
         # one point in the trace the user actually chose, not one the
         # orbit passed through.
         seed_pixel = self._complex_to_display_pixel(state.z0)
-        if finite(state.z0):
+        if finite(state.z0) and inflated_rect.contains(seed_pixel):
             seed_pen = QPen(QColor(0, 0, 0))
             seed_pen.setWidth(2)
             painter.setPen(seed_pen)
@@ -966,8 +1056,25 @@ class SandboxWindow(QMainWindow):
         self.trace_orbits_checkbox = QCheckBox("Trace Orbits", self)
         self.trace_orbits_checkbox.toggled.connect(self.image_view.set_trace_orbits)
         toolbar.addWidget(self.trace_orbits_checkbox)
+        self.orbit_connect_lines_checkbox = QCheckBox("Connect orbit points", self)
+        self.orbit_connect_lines_checkbox.setChecked(True)
+        self.orbit_connect_lines_checkbox.toggled.connect(self.image_view.set_orbit_connect_lines)
+        toolbar.addWidget(self.orbit_connect_lines_checkbox)
 
         self.addToolBar(toolbar)
+
+        # A full reproducible EXPERIMENT (map + parameter + view + mode +
+        # render settings + orbit) -- separate from the Library tab, which
+        # stores named MAPS only. See app.session.Session.snapshot_to_dict's
+        # own docstring for why the two are not the same concept.
+        #
+        # Stored on self for the SAME reason help_menu/about_action are
+        # below -- see that comment.
+        self.file_menu = self.menuBar().addMenu("File")
+        self.save_experiment_action = self.file_menu.addAction("Save Experiment...")
+        self.save_experiment_action.triggered.connect(self._on_save_experiment)
+        self.open_experiment_action = self.file_menu.addAction("Open Experiment...")
+        self.open_experiment_action.triggered.connect(self._on_open_experiment)
 
         # On macOS, Qt moves a menu titled "Help" (and any action inside
         # named "About <AppName>") into the system application menu
@@ -990,6 +1097,83 @@ class SandboxWindow(QMainWindow):
 
     def _show_about_dialog(self) -> None:
         AboutDialog(self).exec()
+
+    # ---- experiment snapshots: File > Save/Open Experiment... -------------------
+    # MODAL DIALOGS AREN'T DIRECTLY TESTABLE (QFileDialog blocks on a real
+    # event loop) -- split the same way app.library_panel's own save/load
+    # buttons are: the button's own slot gathers a path via the dialog,
+    # then hands off to a _do_* method containing the actual logic. Tests
+    # call _do_save_experiment/_do_open_experiment directly with an
+    # explicit path, the same way app/test_library_panel.py drives
+    # LibraryPanel's mutating methods directly rather than through a
+    # QPushButton click.
+    def _on_save_experiment(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Experiment", "", "ComplexDynamics experiment (*.cdsx);;All files (*)")
+        if path:
+            self._do_save_experiment(path)
+
+    def _do_save_experiment(self, path: str) -> None:
+        if not path.endswith(".cdsx"):
+            path += ".cdsx"
+        state = self.image_view.orbit_tracker.state
+        orbit = None if state is None else (state.z0, state.n)
+        try:
+            self.session.save_snapshot(path, orbit)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save Experiment failed", str(exc))
+
+    def _on_open_experiment(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Experiment", "", "ComplexDynamics experiment (*.cdsx);;All files (*)")
+        if path:
+            self._do_open_experiment(path)
+
+    def _do_open_experiment(self, path: str) -> None:
+        # session.load_snapshot fully validates and parses BEFORE mutating
+        # anything (see restore_from_snapshot's own docstring) -- on
+        # failure the live session is untouched, so there is nothing here
+        # to roll back, just an error to surface.
+        try:
+            orbit = self.session.load_snapshot(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Open Experiment failed", str(exc))
+            return
+
+        # session.render_mode (step 4) is already applied by load_snapshot
+        # -- sync the toolbar combo box to match BEFORE touching the orbit,
+        # so the dynamical-plane-only gate just below sees the RESTORED
+        # mode, not whatever was showing before this load (the ordering
+        # this whole method exists to get right: restore the mode, THEN
+        # the orbit, never the other way around).
+        self.mode_combo.setCurrentText(self.session.render_mode)
+        self.param_field.set_value(self.session.param)
+
+        # Orbit reconstruction goes through the tracker's REAL seed()/step()
+        # API, not a shortcut -- z and history regenerate through the exact
+        # same code path a live, click-seeded orbit does. clear_orbit()
+        # covers both "the snapshot had no orbit" and "it did, but we're
+        # on the parameter plane" (orbit tracking is a dynamical-plane
+        # concept, same gate _seed_orbit_at itself uses).
+        if orbit is None or self.session.render_mode in PARAMETER_PLANE_MODES:
+            self.image_view.clear_orbit()
+        else:
+            z0, n = orbit
+            self.image_view.orbit_tracker.seed(self.session.map, self.session.param, z0)
+            self.image_view.step_orbit(n)
+
+        # The same full resync _on_family_loaded already does for a
+        # wholesale map replacement -- a snapshot changes just as much at
+        # once (map AND param AND viewport AND mode AND settings), so
+        # every panel that caches a view of the old state needs the same
+        # treatment, not a partial refresh.
+        self.term_editor_panel.refresh_from_session()
+        self.facts_panel.refresh()
+        self.image_view.refresh_critical_points()
+        self.metadata_header.refresh()
+        self._update_status_bar()
+        self._debounce_timer.stop()
+        self._start_render()
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
     def _on_param_field_committed(self, a: complex) -> None:

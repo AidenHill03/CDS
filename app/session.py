@@ -20,11 +20,14 @@ app/sandbox.py for the actual invocation:
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 import cdx
 from app.render_cache import RenderCache, make_key
 from app.settings import Settings
+from app.version import VERSION
 
 RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens")
 
@@ -44,6 +47,13 @@ PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens"})
 # copied, so this can never drift out of sync with whatever that actually
 # ships (see cdx/src/rational.cpp's own with_defaults()).
 PRESET_FAMILY_NAMES = frozenset(cdx.FamilyLibrary.with_defaults().names())
+
+# Bumped whenever snapshot_to_dict's own dict shape changes in a way
+# restore_from_snapshot can't parse forward-compatibly -- checked FIRST in
+# restore_from_snapshot, before touching any other field, so a snapshot
+# from an incompatible future (or unrelated) version is rejected cleanly
+# rather than half-parsed.
+SNAPSHOT_SCHEMA_VERSION = 1
 
 # Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
 # Julia set, not the origin (which gives the plain filled unit disc --
@@ -451,6 +461,113 @@ class Session:
             entry = loaded.find(entry_name)
             if entry is not None:
                 self.library.add(entry)
+
+    # ---- experiment snapshots ---------------------------------------------------
+    # A full reproducible EXPERIMENT -- map + parameter + view + mode + render
+    # settings + orbit -- NOT a saved MAP. Deliberately separate from the
+    # library above (save_to_library/FamilyLibrary), which stores named maps
+    # only and has read-only presets; a snapshot restores the map alongside
+    # everything else, but never touches the library itself.
+    def snapshot_to_dict(self, orbit: tuple[complex, int] | None = None) -> dict:
+        """Assembles a JSON-serializable dict capturing everything needed to
+        reconstruct exactly what is currently on screen. `orbit`, if given,
+        is (z0, n) -- OrbitState's own two independent fields; z and
+        history are DERIVED from stepping z0 n times (see
+        restore_from_snapshot), so storing more than that would just be
+        redundant, recomputable state.
+        """
+        vp = self.viewport
+        rs = self.render_settings
+        return {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "app_version": VERSION,
+            "map": self.map.serialize(),
+            "param": [self.param.real, self.param.imag],
+            "viewport": {
+                "center": [vp.center.real, vp.center.imag],
+                "scale": vp.scale,
+                "resolution": vp.resolution,
+            },
+            "render_mode": self.render_mode,
+            "render_settings": {
+                "max_iter": rs.max_iter,
+                "escape_radius": rs.escape_radius,
+                "tol": rs.tol,
+                "threads": rs.threads,
+            },
+            "orbit": None if orbit is None else {"z0": [orbit[0].real, orbit[0].imag],
+                                                 "n": orbit[1]},
+        }
+
+    def restore_from_snapshot(self, data: dict) -> tuple[complex, int] | None:
+        """The inverse of snapshot_to_dict. Fully validates and parses
+        EVERY field before mutating any live state -- a malformed or
+        wrong-version snapshot raises ValueError and leaves this Session
+        byte-for-byte unchanged, the same raise-don't-swallow treatment
+        load_library_file already gives an explicit-path load (as opposed
+        to load_user_library's silent-degrade treatment for the merge-at-
+        startup path, which this is not).
+
+        Returns the orbit as (z0, n), or None if the snapshot had none --
+        actually SEEDING it is the caller's job (see app/sandbox.py): this
+        class has no OrbitTracker of its own (that lives on ImageView),
+        and reconstructing an orbit needs to go through the tracker's own
+        seed()/step() so z/history regenerate through the exact same code
+        path a live orbit does, not a Session-level shortcut around it.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("experiment snapshot must be a JSON object")
+        if data.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported experiment snapshot schema_version "
+                f"{data.get('schema_version')!r} (expected {SNAPSHOT_SCHEMA_VERSION})")
+        try:
+            rational_map = cdx.RationalMap.deserialize(data["map"])
+            param = complex(*data["param"])
+            vp_data = data["viewport"]
+            viewport = cdx.Viewport(complex(*vp_data["center"]), float(vp_data["scale"]),
+                                    int(vp_data["resolution"]))
+            mode = data["render_mode"]
+            if mode not in RENDER_MODES:
+                raise ValueError(f"unknown render_mode {mode!r}")
+            rs_data = data["render_settings"]
+            render_settings = cdx.RenderSettings(int(rs_data["max_iter"]),
+                                                 float(rs_data["escape_radius"]),
+                                                 float(rs_data["tol"]), int(rs_data["threads"]))
+            orbit_data = data.get("orbit")
+            orbit = None if orbit_data is None else (complex(*orbit_data["z0"]),
+                                                      int(orbit_data["n"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed experiment snapshot: {exc}") from exc
+
+        # Only now, once everything above has parsed successfully, mutate
+        # live state -- an error partway through would otherwise leave the
+        # session half-updated (new map, old viewport), which is worse than
+        # rejecting the whole file outright.
+        self.map = rational_map
+        self.param = param
+        self.viewport = viewport
+        self.render_mode = mode
+        self.render_settings = render_settings
+        return orbit
+
+    def save_snapshot(self, path: str, orbit: tuple[complex, int] | None = None) -> None:
+        with open(path, "w") as f:
+            json.dump(self.snapshot_to_dict(orbit), f, indent=2)
+            f.write("\n")
+
+    def load_snapshot(self, path: str) -> tuple[complex, int] | None:
+        """Raises ValueError for a missing/unreadable file (OSError is NOT
+        caught here -- unlike load_user_library's silent-degrade startup
+        path, an explicit Open Experiment... action that fails should tell
+        the user why, not quietly do nothing) or malformed JSON
+        (json.JSONDecodeError is itself a ValueError subclass) or a
+        malformed/wrong-version snapshot (restore_from_snapshot's own
+        checks) alike.
+        """
+        with open(path) as f:
+            data = json.load(f)
+        return self.restore_from_snapshot(data)
 
     # ---- data extraction -----------------------------------------------------------
     def dynamical_facts(self, opts: cdx.FindAttractorsOptions | None = None) -> cdx.DynamicalFacts:

@@ -20,6 +20,7 @@ import tempfile
 import numpy as np
 
 import cdx
+from app.orbit_tracker import OrbitTracker
 from app.session import PRESET_FAMILY_NAMES, Session, render_map
 
 failures = 0
@@ -411,6 +412,121 @@ def main() -> None:
     )
     check(n_2cycle == 1, "basilica: one attracting 2-cycle")
     check(n_finite_fixed_attracting == 0, "basilica: zero finite attracting fixed points")
+
+    # ---- experiment snapshots: round-trip (map/param/view/mode/settings/orbit) -----
+    print("\nexperiment snapshots (snapshot_to_dict/restore_from_snapshot):")
+
+    # A non-trivial, custom (not-a-preset) map -- to_formula() is the
+    # cleanest thing to compare on, since RationalMap has no __eq__.
+    src = Session()
+    custom_map = cdx.RationalMap("scratch")
+    custom_map.add_poly(complex(1, 0), 3, 0, "z^3")
+    custom_map.add_pole(complex(0.5, -0.5), complex(1, 0), 2, 1, "pole")
+    src.map = custom_map
+    src.param = complex(0.123, -0.456)
+    src.viewport = cdx.Viewport(complex(0.01, -0.02), 1e-4, 333)   # a genuinely zoomed view
+    src.set_render_mode("basin")
+    src.render_settings = cdx.RenderSettings(321, 3.5, 1e-8, 2)
+
+    z0 = complex(0.3, -0.1)
+    d = src.snapshot_to_dict(orbit=(z0, 4))
+    dst = Session()
+    orbit = dst.restore_from_snapshot(d)
+
+    check(dst.map.to_formula() == src.map.to_formula(), "round-trip: map formula matches")
+    check(dst.param == src.param, "round-trip: param matches")
+    check(dst.viewport.center == src.viewport.center and
+          dst.viewport.scale == src.viewport.scale and
+          dst.viewport.resolution == src.viewport.resolution,
+          "round-trip: viewport (center/scale/resolution) matches")
+    check(dst.render_mode == src.render_mode, "round-trip: render_mode matches")
+    check(dst.render_settings.max_iter == src.render_settings.max_iter and
+          dst.render_settings.escape_radius == src.render_settings.escape_radius and
+          dst.render_settings.tol == src.render_settings.tol and
+          dst.render_settings.threads == src.render_settings.threads,
+          "round-trip: render_settings (all four fields) matches")
+    check(orbit is not None and orbit[0] == z0 and orbit[1] == 4,
+          "round-trip: orbit z0 and n both survive")
+
+    # z/history are DERIVED, not stored -- reconstruct via the tracker's
+    # REAL API (exactly what app/sandbox.py's Open Experiment does) and
+    # confirm the regenerated orbit matches what stepping the ORIGINAL
+    # map/param the same way would have produced.
+    restored_tracker = OrbitTracker()
+    restored_tracker.seed(dst.map, dst.param, orbit[0])
+    restored_tracker.step(dst.map, dst.param, orbit[1])
+    reference_tracker = OrbitTracker()
+    reference_tracker.seed(src.map, src.param, z0)
+    reference_tracker.step(src.map, src.param, 4)
+    check(restored_tracker.state.z == reference_tracker.state.z,
+          "round-trip: the regenerated orbit's current z matches stepping the ORIGINAL "
+          "map/param the same number of times from the same z0")
+    check(restored_tracker.state.history == reference_tracker.state.history,
+          "round-trip: the regenerated orbit's full history matches too, not just the "
+          "final point")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "test.cdsx")
+        src.save_snapshot(path, orbit=(z0, 4))
+        dst_file = Session()
+        orbit_file = dst_file.load_snapshot(path)
+        check(dst_file.map.to_formula() == src.map.to_formula() and dst_file.param == src.param
+              and orbit_file == (z0, 4),
+              "save_snapshot/load_snapshot round-trips through an ACTUAL JSON file, not just "
+              "the in-memory dict -- the float encode/decode step is lossless too")
+
+    # ---- orbit-null round-trip -------------------------------------------------------
+    d_null = src.snapshot_to_dict(orbit=None)
+    dst_null = Session()
+    orbit_null = dst_null.restore_from_snapshot(d_null)
+    check(orbit_null is None, "orbit-null round-trip: no active orbit survives as no orbit")
+
+    # ---- parameter-plane mode with no orbit -------------------------------------------
+    param_plane_session = Session()
+    param_plane_session.map = cdx.RationalMap.mandelbrot()
+    param_plane_session.set_render_mode("parameter")
+    d_pp = param_plane_session.snapshot_to_dict(orbit=None)
+    dst_pp = Session()
+    orbit_pp = dst_pp.restore_from_snapshot(d_pp)
+    check(orbit_pp is None and dst_pp.render_mode == "parameter",
+          "a snapshot taken in a parameter-plane mode with no orbit restores cleanly, with "
+          "nothing to seed")
+
+    # ---- malformed / wrong-version input: raises, changes NOTHING --------------------
+    print("\nexperiment snapshots (validation -- malformed input never mutates state):")
+    guard_session = Session()
+    guard_session.map = cdx.RationalMap.mandelbrot()
+    guard_session.param = complex(-0.7269, 0.1889)
+    before_map = guard_session.map.serialize()   # pre-captured, compared byte-for-byte after
+    before_param = guard_session.param
+    before_mode = guard_session.render_mode
+
+    valid_map_text = guard_session.map.serialize()
+    bad_snapshots = [
+        {},                                   # missing schema_version entirely
+        {"schema_version": 999},              # wrong version
+        "not even a dict",
+        None,
+        {"schema_version": 1, "map": "not a real serialized map", "param": [0, 0],
+         "viewport": {"center": [0, 0], "scale": 1, "resolution": 10},
+         "render_mode": "julia",
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0}},
+        {"schema_version": 1, "map": valid_map_text, "param": [0, 0],
+         "viewport": {"center": [0, 0], "scale": 1, "resolution": 10},
+         "render_mode": "not_a_real_mode",
+         "render_settings": {"max_iter": 1, "escape_radius": 1, "tol": 1, "threads": 0}},
+    ]
+    for bad in bad_snapshots:
+        try:
+            guard_session.restore_from_snapshot(bad)
+            check(False, f"malformed input {bad!r} should have raised ValueError")
+        except ValueError:
+            check(True, f"malformed/wrong-version input ({type(bad).__name__}) raises ValueError")
+
+    check(guard_session.map.serialize() == before_map,
+          "the live session's map is BYTE-FOR-BYTE unchanged after every rejected load")
+    check(guard_session.param == before_param and guard_session.render_mode == before_mode,
+          "...and so is everything else -- no half-applied load")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")
