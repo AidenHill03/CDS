@@ -17,6 +17,7 @@ Entry point: `python -m app.sandbox`.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -24,8 +25,8 @@ import sys
 
 import numpy as np
 import shiboken6
-from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
-                            QThreadPool, QTimer, Signal, Slot)
+from PySide6.QtCore import (QBuffer, QIODevice, QObject, QPoint, QPointF, QRect, QRectF,
+                            QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -37,15 +38,17 @@ from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel, facts_to_dict
-from app.library_panel import LibraryPanel, default_view_for_mode
+from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
 from app.pane import Pane
 from app.render_cache import RenderCache
 from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
-                         PARAMETER_PLANE_MODES, RENDER_MODES, Session, render_map)
-from app.settings import Settings, library_path, load_settings, save_settings
+                         PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES, RENDER_MODES, Session,
+                         render_map)
+from app.settings import (Settings, library_path, load_settings, preview_path_for,
+                          previews_dir, save_settings)
 from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
 from app.version import PRODUCT_NAME
@@ -1151,6 +1154,81 @@ def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport
 EXPORT_PREVIEW_RESOLUTION = 240
 
 
+# List-icon-sized (Stage C) -- a saved family/experiment browsed at a
+# glance, not a real export.
+THUMBNAIL_RESOLUTION = 64
+
+
+def render_thumbnail(rational_map: cdx.RationalMap, param: complex, colour_settings: Settings,
+                     render_settings: cdx.RenderSettings,
+                     resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
+    """A small CLEAN dynamical-plane render (Julia set, no overlays) of
+    (rational_map, param) -- the same render_map + array_to_qimage pipeline
+    every other render goes through, so a thumbnail always matches what the
+    map actually looks like, never a stale/approximated stand-in.
+
+    Always the DYNAMICAL plane (never parameter): a family's own critical/
+    fixed-point structure lives there regardless of whether `a` affects
+    anything at all, whereas a parameter-plane render can be entirely
+    degenerate for a map like newton_cubic() where `a` has no effect (see
+    ImageView.no_effect_parameter_message) -- there is no single parameter-
+    plane framing that is meaningful for every possible family, but
+    default_dynamical_view's fixed center-0 framing (Stage A) is.
+    """
+    center, scale = default_dynamical_view(rational_map, param)
+    viewport = cdx.Viewport(center, scale, resolution)
+    array = render_map(rational_map, param, viewport, render_settings, "julia")
+    return array_to_qimage(array, "julia", colour_settings, render_settings.max_iter)
+
+
+def qimage_to_base64_png(image: QImage) -> str:
+    """PNG-encodes `image` in memory (QBuffer, never touches disk) and
+    base64-encodes the bytes -- how a thumbnail is embedded inline in a
+    .cdsx experiment snapshot (a plain JSON file) rather than written as a
+    sidecar the way a saved family's preview is (see preview_path_for):
+    an experiment is already a single self-contained file, and it should
+    stay one file, not gain a sidecar of its own.
+    """
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, "PNG")
+    return base64.b64encode(buffer.data().data()).decode("ascii")
+
+
+def _regenerate_library_previews(library: cdx.FamilyLibrary, colour_settings: Settings,
+                                 render_settings: cdx.RenderSettings) -> None:
+    """(Re)writes a sidecar thumbnail (see app.settings.preview_path_for) for
+    every non-preset entry currently in `library`, and removes any leftover
+    sidecar for a name no longer present -- so previews/ never drifts out of
+    sync with what save_user_library just wrote to library.txt. Called after
+    EVERY persisted library change (SandboxWindow._on_library_changed): a
+    rename or delete is handled for free by recomputing from the library's
+    current contents rather than special-casing each action, since a rename
+    changes an entry's hashed filename and a delete just drops it from the
+    "keep" set below.
+
+    Rendered at a=0 -- RationalMap itself carries no stored parameter (see
+    Session.param, which belongs to the session, not to any one library
+    entry, and may currently be showing a completely different family), so
+    there is no "the" parameter a saved entry was last viewed at to reuse;
+    0 is a plain, always-valid evaluation point, not a per-entry guess.
+    """
+    keep_paths = set()
+    for name in library.names():
+        if name in PRESET_FAMILY_NAMES:
+            continue
+        entry = library.find(name)
+        if entry is None:
+            continue
+        path = preview_path_for(name)
+        keep_paths.add(path)
+        image = render_thumbnail(entry, 0j, colour_settings, render_settings)
+        image.save(str(path), "PNG")
+    for existing in previews_dir().glob("*.png"):
+        if existing not in keep_paths:
+            existing.unlink()
+
+
 class ExportImageDialog(QDialog):
     """File > Export Image's preview dialog (Stage B): a resolution input,
     a checkbox per overlay APPLICABLE to the pane's current mode/state
@@ -1787,8 +1865,14 @@ class SandboxWindow(QMainWindow):
             state = orbit_pane.image_view.orbit_tracker.state
             if state is not None:
                 orbit = (self.panes.index(orbit_pane), state.z0, state.n)
+        # Clean thumbnail (Stage C), same as a library entry's own -- see
+        # render_thumbnail's own docstring for why it's always the
+        # dynamical plane, never parameter.
+        preview_image = render_thumbnail(self.session.map, self.session.param,
+                                         self.session.settings, self.session.render_settings)
+        preview = qimage_to_base64_png(preview_image)
         try:
-            self.session.save_snapshot(path, panes, focused_index, coupled, orbit)
+            self.session.save_snapshot(path, panes, focused_index, coupled, orbit, preview)
         except OSError as exc:
             QMessageBox.critical(self, "Save Experiment failed", str(exc))
 
@@ -1804,10 +1888,15 @@ class SandboxWindow(QMainWindow):
         # failure the live session is untouched, so there is nothing here
         # to roll back, just an error to surface. Session has no panes,
         # viewport, or render_mode of its own, so the restored
-        # (panes, focused_index, coupled, orbit) come back explicitly for
-        # THIS window to apply to its own panes/layout/tracker.
+        # (panes, focused_index, coupled, orbit, preview) come back
+        # explicitly for THIS window to apply to its own panes/layout/
+        # tracker. `preview` (Stage C) is intentionally unused here -- this
+        # app has no experiment BROWSER yet for it to appear in (see
+        # render_thumbnail's own module-level note); it round-trips through
+        # save/load correctly (see app/test_sandbox.py) and is available
+        # for a future browser to display without another format change.
         try:
-            panes_data, focused_index, coupled, orbit = self.session.load_snapshot(path)
+            panes_data, focused_index, coupled, orbit, _preview = self.session.load_snapshot(path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Open Experiment failed", str(exc))
             return
@@ -2199,6 +2288,9 @@ class SandboxWindow(QMainWindow):
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
         self.session.save_user_library(library_path())
+        _regenerate_library_previews(self.session.library, self.session.settings,
+                                     self.session.render_settings)
+        self.library_panel.refresh_previews()
 
     # ---- viewport change -> debounced render ------------------------------------
     def _on_viewport_changed(self, pane: Pane) -> None:

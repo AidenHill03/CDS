@@ -430,7 +430,7 @@ def main() -> None:
     z0 = complex(0.3, -0.1)
     d = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled, orbit=(1, z0, 4))
     dst = Session()
-    dst_panes, dst_focused_index, dst_coupled, orbit = dst.restore_from_snapshot(d)
+    dst_panes, dst_focused_index, dst_coupled, orbit, _preview = dst.restore_from_snapshot(d)
 
     check(dst.map.to_formula() == src.map.to_formula(), "round-trip: map formula matches")
     check(dst.param == src.param, "round-trip: param matches")
@@ -472,7 +472,8 @@ def main() -> None:
         path = os.path.join(tmp, "test.cdsx")
         src.save_snapshot(path, src_panes, src_focused_index, src_coupled, orbit=(1, z0, 4))
         dst_file = Session()
-        panes_file, focused_index_file, coupled_file, orbit_file = dst_file.load_snapshot(path)
+        (panes_file, focused_index_file, coupled_file, orbit_file,
+         _preview_file) = dst_file.load_snapshot(path)
         check(dst_file.map.to_formula() == src.map.to_formula() and dst_file.param == src.param
               and focused_index_file == src_focused_index and coupled_file == src_coupled
               and panes_file[0][1] == src_pane_a[1] and panes_file[1][1] == src_pane_b[1]
@@ -483,7 +484,8 @@ def main() -> None:
     # ---- orbit-null round-trip -------------------------------------------------------
     d_null = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled, orbit=None)
     dst_null = Session()
-    _panes_null, _focus_null, _coupled_null, orbit_null = dst_null.restore_from_snapshot(d_null)
+    (_panes_null, _focus_null, _coupled_null,
+     orbit_null, _preview_null) = dst_null.restore_from_snapshot(d_null)
     check(orbit_null is None, "orbit-null round-trip: no active orbit survives as no orbit")
 
     # ---- parameter-plane mode with no orbit -------------------------------------------
@@ -492,10 +494,57 @@ def main() -> None:
     d_pp = param_plane_session.snapshot_to_dict(
         [(src_pane_a[0], "parameter"), src_pane_b], 0, True, orbit=None)
     dst_pp = Session()
-    panes_pp, _focus_pp, _coupled_pp, orbit_pp = dst_pp.restore_from_snapshot(d_pp)
+    panes_pp, _focus_pp, _coupled_pp, orbit_pp, _preview_pp = dst_pp.restore_from_snapshot(d_pp)
     check(orbit_pp is None and panes_pp[0][1] == "parameter",
           "a snapshot taken with a parameter-plane pane and no orbit restores cleanly, with "
           "nothing to seed")
+
+    # ---- embedded preview (Stage C): round-trips, and is optional on read ------------
+    print("\nexperiment snapshots (embedded preview thumbnail):")
+    d_preview = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled,
+                                     orbit=None, preview_png_base64="not-really-a-png-just-a-marker")
+    dst_preview = Session()
+    (_panes_pv, _focus_pv, _coupled_pv,
+     _orbit_pv, preview_pv) = dst_preview.restore_from_snapshot(d_preview)
+    check(preview_pv == "not-really-a-png-just-a-marker",
+          "a snapshot saved WITH a preview restores that exact preview string")
+
+    d_no_preview = src.snapshot_to_dict(src_panes, src_focused_index, src_coupled, orbit=None)
+    dst_no_preview = Session()
+    (_panes_np, _focus_np, _coupled_np,
+     _orbit_np, preview_np) = dst_no_preview.restore_from_snapshot(d_no_preview)
+    check(preview_np is None,
+          "a snapshot saved WITHOUT a preview restores preview as None, not an error")
+
+    # A hand-built version-2 dict -- the actual pre-Stage-C shape, with NO
+    # "preview" key at all (not even present, unlike d_no_preview above
+    # which is a version-3 dict whose preview happens to be None) -- must
+    # still load cleanly: see MIN_SNAPSHOT_SCHEMA_VERSION's own comment for
+    # why this, unlike the version-1 case below, is accepted rather than
+    # rejected.
+    v2_snapshot = {
+        "schema_version": 2, "app_version": "0.0.0-test",
+        "map": src.map.serialize(), "param": [src.param.real, src.param.imag],
+        "render_settings": {"max_iter": src.render_settings.max_iter,
+                            "escape_radius": src.render_settings.escape_radius,
+                            "tol": src.render_settings.tol,
+                            "threads": src.render_settings.threads},
+        "layout": {"coupled": src_coupled, "focused_index": src_focused_index,
+                   "panes": [{"render_mode": mode,
+                              "viewport": {"center": [vp.center.real, vp.center.imag],
+                                          "scale": vp.scale, "resolution": vp.resolution}}
+                             for vp, mode in src_panes]},
+        "orbit": None,
+    }
+    dst_v2 = Session()
+    (panes_v2, focus_v2, coupled_v2,
+     orbit_v2, preview_v2) = dst_v2.restore_from_snapshot(v2_snapshot)
+    check(dst_v2.map.to_formula() == src.map.to_formula() and focus_v2 == src_focused_index
+          and coupled_v2 == src_coupled and len(panes_v2) == 2 and orbit_v2 is None,
+          "an older (version-2, pre-Stage-C) snapshot with no 'preview' key at all still "
+          "loads fine -- not just rejected the way a version-1 snapshot is")
+    check(preview_v2 is None,
+          "...with preview correctly reported as None, not a KeyError")
 
     # ---- malformed / wrong-version input: raises, changes NOTHING --------------------
     print("\nexperiment snapshots (validation -- malformed input never mutates state):")

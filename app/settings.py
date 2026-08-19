@@ -18,6 +18,7 @@ Session's map/param/viewport do not.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -264,6 +265,38 @@ def library_path() -> Path:
     config_dir() docstring already anticipated.
     """
     return config_dir() / "library.txt"
+
+
+def previews_dir() -> Path:
+    """Where per-family sidecar preview thumbnails (PNGs) live -- keyed by
+    name via preview_path_for below. Kept OUT of library.txt itself:
+    FamilyLibrary::serialize() is a hand-rolled line-based text format (see
+    cdx/src/rational.cpp) with no room for a binary/base64 blob without
+    inventing an escaping scheme inside a parser that currently just does
+    getline + prefix matching -- a sidecar file per entry is far simpler
+    than changing that format. Created on first use, same as config_dir().
+    """
+    directory = config_dir() / "previews"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _preview_filename(name: str) -> str:
+    """A stable, filesystem-safe filename for a family NAME, which is
+    otherwise freeform user text (no charset restriction enforced anywhere
+    it's entered -- see LibraryPanel's QInputDialog.getText calls) --
+    hashing sidesteps path-traversal/invalid-filename/length concerns
+    entirely rather than trying to sanitize arbitrary text into one. Pure
+    (no filesystem access), factored out so it's directly testable for its
+    actual property -- same name -> same file, different names -> different
+    files -- without needing previews_dir()'s side effect of creating a real
+    directory under the caller's home.
+    """
+    return hashlib.sha256(name.encode("utf-8")).hexdigest() + ".png"
+
+
+def preview_path_for(name: str) -> Path:
+    return previews_dir() / _preview_filename(name)
 
 
 def load_settings(path: Path | None = None) -> Settings:

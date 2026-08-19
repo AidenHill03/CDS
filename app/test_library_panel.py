@@ -22,15 +22,21 @@ Run with:
 from __future__ import annotations
 
 import math
+import tempfile
+from pathlib import Path
 
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
+import app.settings as settings_module
 import cdx
 from app.library_panel import (LibraryPanel, _bounding_view, _derive_dynamical_view_from_facts,
                                _DYNAMICAL_VIEW_FALLBACK, _DYNAMICAL_VIEW_MIN_SCALE,
-                               _DYNAMICAL_VIEW_PADDING, default_dynamical_view, default_view_for,
+                               _DYNAMICAL_VIEW_PADDING, _LIST_ICON_SIZE, _NAME_ROLE,
+                               _placeholder_icon, default_dynamical_view, default_view_for,
                                default_view_for_mode)
 from app.session import PRESET_FAMILY_NAMES, Session
+from app.settings import preview_path_for
 
 failures = 0
 
@@ -44,6 +50,16 @@ def check(cond: bool, what: str) -> None:
 
 def main() -> None:
     app = QApplication.instance() or QApplication([])
+
+    # LibraryPanel's _icon_for reads a preview sidecar path (see
+    # app.settings.preview_path_for) on every list refresh -- rooted at
+    # config_dir() (~/.complexdynamics by default), which would otherwise
+    # create a real directory on the machine running this test just by
+    # constructing a LibraryPanel. Redirected to a throwaway temp dir for
+    # the whole module, same fix as app/test_sandbox.py uses for
+    # library_path/load_settings/save_settings.
+    _fake_config_dir = Path(tempfile.mkdtemp(suffix="-config"))
+    settings_module.config_dir = lambda: _fake_config_dir
 
     print("=== app.library_panel tests ===")
 
@@ -237,6 +253,51 @@ def main() -> None:
     panel._do_delete("does-not-exist")
     check(len(changes) == 0, "deleting a nonexistent name is rejected, on_change not called")
     check(panel._error_label.text() != "", "the rejection shows an inline error")
+
+    # ---- preview thumbnails: list icons (Stage C) -----------------------------------
+    # This panel never GENERATES a thumbnail itself (that's app.sandbox's
+    # render pipeline, deliberately kept out of this standalone-widget test
+    # -- see this module's own docstring) -- a raw PNG is written directly
+    # to the sidecar path any real thumbnail would also land at, to
+    # exercise _icon_for/refresh_previews's own READ-side logic in
+    # isolation.
+    print("\npreview thumbnails (list icons):")
+    session.save_to_library("thumbed-family")
+    session.save_to_library("bare-family")
+    thumb_image = QImage(4, 4, QImage.Format.Format_RGB888)
+    thumb_image.fill(0x336699)
+    assert thumb_image.save(str(preview_path_for("thumbed-family")), "PNG")
+    panel._refresh_list()
+
+    placeholder_image = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
+
+    def icon_image(name: str):
+        for row in range(panel._list.count()):
+            item = panel._list.item(row)
+            if item.data(_NAME_ROLE) == name:
+                return item.icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
+        raise AssertionError(f"{name!r} not found in the list")
+
+    check(icon_image("thumbed-family") != placeholder_image,
+          "an entry WITH a sidecar preview shows that thumbnail as its list icon, not the "
+          "placeholder")
+    check(icon_image("bare-family") == placeholder_image,
+          "an entry with NO sidecar preview yet falls back to the placeholder icon")
+    check(icon_image("mandelbrot") == placeholder_image,
+          "a preset (app.sandbox never generates one for a PRESET_FAMILY_NAMES entry) also "
+          "falls back to the placeholder")
+
+    # refresh_previews() re-reads icons WITHOUT rebuilding the list (unlike
+    # _refresh_list, which also resets selection) -- the actual method
+    # SandboxWindow._on_library_changed calls after it (re)writes sidecars.
+    panel._select_by_name("bare-family")
+    thumb_image.save(str(preview_path_for("bare-family")), "PNG")
+    panel.refresh_previews()
+    check(icon_image("bare-family") != placeholder_image,
+          "refresh_previews() picks up a sidecar that appeared after the last _refresh_list, "
+          "without a full list rebuild")
+    check(panel._selected_name() == "bare-family",
+          "...and does not disturb the current selection, unlike _refresh_list")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

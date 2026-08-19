@@ -19,14 +19,19 @@ methods directly, the same way app/test_term_editor_panel.py drives
 TermEditorPanel's mutating methods directly rather than through QPushButton
 clicks.
 
-PERSISTENCE. This panel never touches disk itself -- every successful
+PERSISTENCE. This panel never WRITES to disk itself -- every successful
 mutation (save/rename/delete/notes edit) calls on_change(), and every
 successful load calls on_load(); SandboxWindow wires the former to
-session.save_user_library(app.settings.library_path()) and the latter to a
-viewport reset + immediate render. Keeping disk I/O out of this class is
+session.save_user_library(app.settings.library_path()) (and, since Stage C,
+regenerating each entry's sidecar preview thumbnail) and the latter to a
+viewport reset + immediate render. Keeping WRITE I/O out of this class is
 what keeps it constructible standalone in tests without ever touching a
 real ~/.complexdynamics/library.txt (see app/test_settings_panel.py's own
-note on the identical concern for Settings).
+note on the identical concern for Settings). It does READ one thing from
+disk directly, though: _icon_for checks whether a given entry's sidecar
+preview (app.settings.preview_path_for) exists, to show it as a list icon
+-- see app/test_library_panel.py's own note on redirecting config_dir() for
+the whole test module so this stays off the real filesystem there too.
 
 LOADING resets each visible pane's VIEWPORT to a per-family, MODE-aware
 default (default_view_for_mode below) -- hand-picked a-space framings
@@ -51,12 +56,20 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
 
 import cdx
 from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
+from app.settings import preview_path_for
+
+# Matches self._list.setIconSize below -- a saved family's sidecar preview
+# (see app.sandbox.THUMBNAIL_RESOLUTION/preview_path_for) is rendered
+# larger than this and scaled down, the same "render bigger, display
+# smaller" every other thumbnail in this app already does.
+_LIST_ICON_SIZE = 32
 
 # Hand-picked (center, scale) for each built-in preset's most legible
 # region -- not derived from any formula, just where each shape's
@@ -199,6 +212,38 @@ def default_view_for_mode(rational_map: cdx.RationalMap, param: complex,
     return default_dynamical_view(rational_map, param)
 
 
+# A flat mid-grey square -- built once, lazily, and reused for every entry
+# without its own sidecar (every preset, always, since _regenerate_library_
+# previews in app/sandbox.py only ever writes one for a non-preset entry;
+# also any brand-new user entry from before its first _on_library_changed
+# has run). Module-level rather than per-QApplication-instance state
+# because QPixmap itself can't be constructed before a QApplication exists
+# -- built lazily on first use, not at import time, for the same reason
+# every other QPixmap/QIcon in this codebase is.
+_placeholder_icon_cache: QIcon | None = None
+
+
+def _placeholder_icon() -> QIcon:
+    global _placeholder_icon_cache
+    if _placeholder_icon_cache is None:
+        pixmap = QPixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE)
+        pixmap.fill(Qt.GlobalColor.lightGray)
+        _placeholder_icon_cache = QIcon(pixmap)
+    return _placeholder_icon_cache
+
+
+def _icon_for(name: str) -> QIcon:
+    """A saved family's own sidecar thumbnail (see
+    app.sandbox._regenerate_library_previews/app.settings.preview_path_for)
+    if one has been written for `name`, else a plain placeholder -- never
+    an empty/missing icon, so every row in the list looks consistent.
+    """
+    path = preview_path_for(name)
+    if path.exists():
+        return QIcon(str(path))
+    return _placeholder_icon()
+
+
 class LibraryPanel(QWidget):
     def __init__(self, session, on_load: Callable[[], None], on_change: Callable[[], None],
                 parent: QWidget | None = None):
@@ -216,6 +261,7 @@ class LibraryPanel(QWidget):
 
         split = QHBoxLayout()
         self._list = QListWidget()
+        self._list.setIconSize(QSize(_LIST_ICON_SIZE, _LIST_ICON_SIZE))
         self._list.currentItemChanged.connect(lambda *_: self._refresh_detail())
         split.addWidget(self._list, 1)
 
@@ -257,13 +303,26 @@ class LibraryPanel(QWidget):
         self._list.clear()
         for entry_name in self.session.library.names():
             label = f"{entry_name}  (preset)" if entry_name in PRESET_FAMILY_NAMES else entry_name
-            item = QListWidgetItem(label)
+            item = QListWidgetItem(_icon_for(entry_name), label)
             item.setData(_NAME_ROLE, entry_name)
             self._list.addItem(item)
         self._list.blockSignals(False)
         target = select if select is not None else self.session.map.name
         self._select_by_name(target)
         self._refresh_detail()
+
+    def refresh_previews(self) -> None:
+        """Re-reads each item's icon from disk without touching selection or
+        the detail pane -- called by SandboxWindow._on_library_changed after
+        it (re)writes the sidecar thumbnails themselves (this panel never
+        touches disk directly -- see this module's own docstring), so an
+        icon that just got (re)generated actually shows up without a full
+        _refresh_list rebuild (which would also reset the current
+        selection).
+        """
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            item.setIcon(_icon_for(item.data(_NAME_ROLE)))
 
     def _select_by_name(self, name: str) -> None:
         for row in range(self._list.count()):

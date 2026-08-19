@@ -64,7 +64,18 @@ PRESET_FAMILY_NAMES = frozenset(cdx.FamilyLibrary.with_defaults().names())
 # leave the session untouched) -- migrating in place would be the one
 # exception to that rule, for a format only ever shipped internally
 # between P7 and Stage 4, never in a tagged release.
-SNAPSHOT_SCHEMA_VERSION = 2
+#
+# 2 -> 3 (embedded preview, Stage C): added one optional "preview" key
+# (a base64 PNG thumbnail, or absent/None). Unlike 1 -> 2 above, this is
+# PURELY ADDITIVE -- nothing existing changed shape, so a version-2 file
+# still parses correctly through this exact same code path; it simply has
+# no "preview" key for restore_from_snapshot to find (data.get returns
+# None). MIN_SNAPSHOT_SCHEMA_VERSION below is what lets a version-2 file
+# keep loading instead of being rejected outright the way version-1 is --
+# raise it (to the same value as SNAPSHOT_SCHEMA_VERSION) if a future bump
+# ever becomes a real structural break like 1 -> 2 was.
+SNAPSHOT_SCHEMA_VERSION = 3
+MIN_SNAPSHOT_SCHEMA_VERSION = 2
 
 # Startup parameter for the DYNAMICAL plane: a filled, dendritic quadratic
 # Julia set, not the origin (which gives the plain filled unit disc --
@@ -481,8 +492,8 @@ class Session:
     # only and has read-only presets; a snapshot restores the map alongside
     # everything else, but never touches the library itself.
     def snapshot_to_dict(self, panes: list[tuple[cdx.Viewport, str]], focused_index: int,
-                         coupled: bool,
-                         orbit: tuple[int, complex, int] | None = None) -> dict:
+                         coupled: bool, orbit: tuple[int, complex, int] | None = None,
+                         preview_png_base64: str | None = None) -> dict:
         """Assembles a JSON-serializable dict capturing everything needed to
         reconstruct exactly what is currently on screen -- EVERY pane, not
         just one (Stage 4). `panes` is one (viewport, render_mode) pair per
@@ -500,6 +511,12 @@ class Session:
         all: it's just session.param drawn on whichever panes are
         currently parameter-plane (see ImageView._param_marker_pixel), and
         param is already captured below -- nothing else to keep in sync.
+
+        `preview_png_base64` (Stage C) is an OPAQUE string as far as this
+        class is concerned -- Session has no Qt/rendering dependency (see
+        this module's own imports), so the caller (app.sandbox) renders a
+        clean thumbnail and base64-encodes it before calling this; this
+        method just stores whatever it's given, or None.
         """
         rs = self.render_settings
         return {
@@ -533,10 +550,12 @@ class Session:
                 "z0": [orbit[1].real, orbit[1].imag],
                 "n": orbit[2],
             },
+            "preview": preview_png_base64,
         }
 
     def restore_from_snapshot(self, data: dict) -> tuple[list[tuple[cdx.Viewport, str]], int, bool,
-                                                          tuple[int, complex, int] | None]:
+                                                          tuple[int, complex, int] | None,
+                                                          str | None]:
         """The inverse of snapshot_to_dict. Fully validates and parses
         EVERY field -- every pane's own viewport/render_mode included --
         before mutating any live state -- a malformed or wrong-version
@@ -546,24 +565,30 @@ class Session:
         load_user_library's silent-degrade treatment for the merge-at-
         startup path, which this is not). A version-1 (pre-Stage-4,
         single-pane) snapshot is REJECTED here, not migrated -- see
-        SNAPSHOT_SCHEMA_VERSION's own comment for why.
+        SNAPSHOT_SCHEMA_VERSION's own comment for why. A version-2
+        (pre-Stage-C, no "preview" key) snapshot, by contrast, is accepted
+        -- see MIN_SNAPSHOT_SCHEMA_VERSION's own comment.
 
         Only map/param/render_settings are actually SET on this Session --
         it has no panes, viewport, render_mode, or OrbitTracker of its own
-        to assign/seed. Returns (panes, focused_index, coupled, orbit) for
-        the caller to rebuild its own panes (viewport/render_mode each),
-        layout (coupled flag, which pane is focused), and tracker (orbit,
-        as (pane_index, z0, n) or None): reconstructing an orbit needs to
-        go through the tracker's own seed()/step() so z/history regenerate
-        through the exact same code path a live orbit does, not a
-        Session-level shortcut around it.
+        to assign/seed. Returns (panes, focused_index, coupled, orbit,
+        preview) for the caller to rebuild its own panes (viewport/
+        render_mode each), layout (coupled flag, which pane is focused),
+        tracker (orbit, as (pane_index, z0, n) or None): reconstructing an
+        orbit needs to go through the tracker's own seed()/step() so
+        z/history regenerate through the exact same code path a live orbit
+        does, not a Session-level shortcut around it -- and preview (the
+        base64 PNG string a version-3 file may carry, or None for a
+        version-2 file / a version-3 one saved without one).
         """
         if not isinstance(data, dict):
             raise ValueError("experiment snapshot must be a JSON object")
-        if data.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+        version = data.get("schema_version")
+        if not isinstance(version, int) or not (
+                MIN_SNAPSHOT_SCHEMA_VERSION <= version <= SNAPSHOT_SCHEMA_VERSION):
             raise ValueError(
-                f"unsupported experiment snapshot schema_version "
-                f"{data.get('schema_version')!r} (expected {SNAPSHOT_SCHEMA_VERSION})")
+                f"unsupported experiment snapshot schema_version {version!r} "
+                f"(expected {MIN_SNAPSHOT_SCHEMA_VERSION}-{SNAPSHOT_SCHEMA_VERSION})")
         try:
             rational_map = cdx.RationalMap.deserialize(data["map"])
             param = complex(*data["param"])
@@ -600,6 +625,9 @@ class Session:
                     raise ValueError(
                         f"orbit pane_index {orbit_pane_index} out of range for {len(panes)} panes")
                 orbit = (orbit_pane_index, complex(*orbit_data["z0"]), int(orbit_data["n"]))
+            preview = data.get("preview")
+            if preview is not None and not isinstance(preview, str):
+                raise ValueError("preview must be a string (base64 PNG) or absent/null")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"malformed experiment snapshot: {exc}") from exc
 
@@ -610,16 +638,18 @@ class Session:
         self.map = rational_map
         self.param = param
         self.render_settings = render_settings
-        return panes, focused_index, coupled, orbit
+        return panes, focused_index, coupled, orbit, preview
 
     def save_snapshot(self, path: str, panes: list[tuple[cdx.Viewport, str]], focused_index: int,
-                      coupled: bool, orbit: tuple[int, complex, int] | None = None) -> None:
+                      coupled: bool, orbit: tuple[int, complex, int] | None = None,
+                      preview_png_base64: str | None = None) -> None:
         with open(path, "w") as f:
-            json.dump(self.snapshot_to_dict(panes, focused_index, coupled, orbit), f, indent=2)
+            json.dump(self.snapshot_to_dict(panes, focused_index, coupled, orbit,
+                                            preview_png_base64), f, indent=2)
             f.write("\n")
 
     def load_snapshot(self, path: str) -> tuple[list[tuple[cdx.Viewport, str]], int, bool,
-                                                 tuple[int, complex, int] | None]:
+                                                 tuple[int, complex, int] | None, str | None]:
         """Raises ValueError for a missing/unreadable file (OSError is NOT
         caught here -- unlike load_user_library's silent-degrade startup
         path, an explicit Open Experiment... action that fails should tell

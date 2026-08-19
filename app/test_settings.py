@@ -17,6 +17,7 @@ from pathlib import Path
 from app.settings import (
     FIELD_SPECS,
     Settings,
+    _preview_filename,
     estimated_full_render_seconds,
     load_settings,
     save_settings,
@@ -227,6 +228,24 @@ def main() -> None:
 
     check(estimated_full_render_seconds(slow) > estimated_full_render_seconds(fast),
           "the estimate actually grows with resolution/max_iter, not a constant")
+
+    # ---- _preview_filename: pure keying logic for library preview sidecars ---------
+    # (see app.settings.preview_path_for) -- tested directly rather than via
+    # preview_path_for/previews_dir, which would touch a real directory
+    # under config_dir()/home; this part has no filesystem dependency at
+    # all, matching the "test the pure function" split app.library_panel's
+    # own _bounding_view already uses.
+    print("\n_preview_filename (library preview sidecar keying):")
+    check(_preview_filename("mandelbrot") == _preview_filename("mandelbrot"),
+          "the same name always maps to the same filename")
+    check(_preview_filename("mandelbrot") != _preview_filename("newton_cubic"),
+          "different names map to different filenames")
+    check(_preview_filename("a/../../etc/passwd") != "a/../../etc/passwd.png"
+          and "/" not in _preview_filename("a/../../etc/passwd"),
+          "a name containing path-traversal-looking characters produces a plain, safe "
+          "filename -- no directory separators survive into the result")
+    check(_preview_filename("").endswith(".png") and _preview_filename("x").endswith(".png"),
+          "every result ends in .png regardless of input")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

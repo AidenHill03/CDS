@@ -16,12 +16,14 @@ plugin search path):
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import shiboken6
@@ -32,13 +34,15 @@ from PySide6.QtWidgets import QApplication
 
 import cdx
 import app.sandbox as sandbox_module
+import app.settings as settings_module
 from app.colour import PALETTES
-from app.library_panel import _DYNAMICAL_VIEW_FALLBACK, default_dynamical_view, default_view_for
+from app.library_panel import (_DYNAMICAL_VIEW_FALLBACK, _LIST_ICON_SIZE, _NAME_ROLE,
+                               _placeholder_icon, default_dynamical_view, default_view_for)
 from app.pane import Pane
 from app.sandbox import (ExportImageDialog, ImageView, RenderTask, SandboxWindow,
                          array_to_qimage, compose_export_image, drawable_polyline_segments)
 from app.session import Session, render_map
-from app.settings import Settings
+from app.settings import Settings, preview_path_for
 
 
 def _pane_view(session: Session, center: complex = 0j, scale: float = 1.5,
@@ -120,6 +124,18 @@ def main() -> None:
     # save_user_library/load_user_library, against explicit temp paths.)
     _fake_library_path = tempfile.mktemp(suffix="-library.txt")
     sandbox_module.library_path = lambda: _fake_library_path
+    # Same concern, same fix, for ~/.complexdynamics/previews/ (Stage C):
+    # _on_library_changed calls _regenerate_library_previews on every
+    # successful save/rename/delete/notes-edit, which WRITES a sidecar PNG
+    # per non-preset entry, and LibraryPanel._icon_for READS from the same
+    # place on every list refresh. Both sandbox.py's and library_panel.py's
+    # own preview_path_for/previews_dir imports resolve config_dir()
+    # through app.settings's OWN globals internally (see
+    # app.settings.previews_dir's body), so patching config_dir there ONCE
+    # redirects every one of them consistently -- not two separate
+    # per-module lambda rebinds that would need to be kept in sync.
+    _fake_previews_config_dir = Path(tempfile.mkdtemp(suffix="-config"))
+    settings_module.config_dir = lambda: _fake_previews_config_dir
 
     print("=== app.sandbox tests ===")
 
@@ -1842,6 +1858,59 @@ def main() -> None:
           "with no pane in a dynamical mode, clicking a fixed/critical point row is a "
           "no-op -- orbit seeding is a dynamical-plane concept, same gate "
           "ImageView.seed_orbit itself uses")
+
+    window.mode_combo.setCurrentText("julia")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window._set_focused_pane(window.pane)
+
+    # ---- library: saving a family writes a sidecar thumbnail (Stage C) --------------
+    print("\nLibrary: saving a family writes a sidecar preview thumbnail:")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("julia")
+    window.library_panel._do_save_as("stage-c-sidecar-family")
+    check(preview_path_for("stage-c-sidecar-family").exists(),
+          "Save Current As -> on_change -> _on_library_changed writes a real sidecar PNG, "
+          "not just the library.txt entry")
+
+    placeholder_image = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
+    saved_row = next(row for row in range(window.library_panel._list.count())
+                     if window.library_panel._list.item(row).data(_NAME_ROLE)
+                     == "stage-c-sidecar-family")
+    saved_icon = (window.library_panel._list.item(saved_row).icon()
+                 .pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage())
+    check(saved_icon != placeholder_image,
+          "...and the live LibraryPanel's own list icon reflects it immediately, through the "
+          "real _on_library_changed -> refresh_previews wiring, not just on the next full "
+          "app restart")
+
+    window.library_panel._do_delete("stage-c-sidecar-family")
+    check(not preview_path_for("stage-c-sidecar-family").exists(),
+          "deleting the entry removes its sidecar too, via the same regenerate-from-current-"
+          "library-contents pass")
+
+    # ---- File > Export/Open Experiment: embedded preview thumbnail (Stage C) --------
+    print("\nFile > Save/Open Experiment: embedded preview thumbnail:")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("julia")
+    window._set_focused_pane(window.pane)
+    with tempfile.TemporaryDirectory() as tmp:
+        cdsx_path = os.path.join(tmp, "with-preview.cdsx")
+        window._do_save_experiment(cdsx_path)
+        with open(cdsx_path) as f:
+            saved_data = json.load(f)
+        check(isinstance(saved_data.get("preview"), str) and len(saved_data["preview"]) > 0,
+              "a saved .cdsx embeds a non-empty base64 'preview' string, not just the map/"
+              "param/layout fields")
+        check(base64.b64decode(saved_data["preview"])[:8] == b"\x89PNG\r\n\x1a\n",
+              "...and it's a genuine PNG (correct magic bytes), not an arbitrary string")
+
+        # Opening it must not raise on the new field, even though
+        # _do_open_experiment intentionally never reads `preview` back out
+        # (see its own comment) -- a round-trip that crashes on an unused
+        # field would be its own bug.
+        window._do_open_experiment(cdsx_path)
+        check(window.session.map.to_formula() == cdx.RationalMap.mandelbrot().to_formula(),
+              "Open Experiment still restores the map correctly with a preview-bearing file")
 
     window.mode_combo.setCurrentText("julia")
     window.session.map = cdx.RationalMap.mandelbrot()
