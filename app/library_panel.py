@@ -31,12 +31,15 @@ note on the identical concern for Settings).
 LOADING resets each visible pane's VIEWPORT to a per-family, MODE-aware
 default (default_view_for_mode below) -- hand-picked a-space framings
 (_DEFAULT_VIEWS, via default_view_for) for the six built-in shapes' most
-legible parameter-plane region on a parameter-plane pane, a critical-/
-fixed-point-derived z-space framing (default_dynamical_view) on a
-dynamical-plane one -- using the PARAMETER-plane table for a dynamical
-pane's reset was a real bug (Stage 2): it jumped every Julia-set pane onto
-whatever window makes the parameter plane legible, not the Julia set. That
-reset itself now happens in on_load's own handler (app/sandbox.py's
+legible parameter-plane region on a parameter-plane pane, a FIXED center-0
+z-space framing (default_dynamical_view) on a dynamical-plane one --
+using the PARAMETER-plane table for a dynamical pane's reset was a real
+bug (Stage 2): it jumped every Julia-set pane onto whatever window makes
+the parameter plane legible, not the Julia set. default_dynamical_view's
+own per-instance (critical-/fixed-point-derived) framing is DEFERRED for
+now -- see its own docstring and _derive_dynamical_view_from_facts, kept
+but not called. That reset itself now happens in on_load's own handler
+(app/sandbox.py's
 _on_family_loaded), not here: this panel no longer touches any pane's
 viewport directly (see app.pane.Pane -- Session itself has no single
 viewport to reset anymore). Loading a family does not touch render_mode or
@@ -77,6 +80,14 @@ def default_view_for(name: str) -> tuple[complex, float]:
     return _DEFAULT_VIEWS.get(name, _FALLBACK_VIEW)
 
 
+# KNOWN OPEN PROBLEM, not addressed here: _DEFAULT_VIEWS is a hand-picked
+# table for exactly six built-in shapes, and _FALLBACK_VIEW is a single
+# generic guess for everything else (any user-saved family). There is no
+# per-instance parameter-plane framing at all -- a custom map's a-space
+# window is just whatever the generic fallback happens to be, legible or
+# not. Left exactly as it is; only the DYNAMICAL side changes below.
+
+
 # The dynamical (Julia-set) plane's OWN default framing has nothing to do
 # with the table above: _DEFAULT_VIEWS/default_view_for frames a-SPACE (the
 # parameter plane), and using it for z-space too was a real bug -- resetting
@@ -97,15 +108,43 @@ _DYNAMICAL_VIEW_MIN_SCALE = 0.5   # a degenerate (single-point, or nearly so) bo
 
 
 def default_dynamical_view(rational_map: cdx.RationalMap, param: complex) -> tuple[complex, float]:
-    """The dynamical plane's own default framing for THIS map at THIS
-    parameter -- a padded bounding box around its finite critical and fixed
-    points (Fatou: every attracting cycle attracts a critical point, so
-    critical points are where the interesting structure clusters; fixed
-    points mark where a filled Julia set's boundary characteristically
-    threads through), excluding poles/infinity/absurdly-far-out points (see
-    _DYNAMICAL_VIEW_MAGNITUDE_CAP) and falling back to
-    _DYNAMICAL_VIEW_FALLBACK when nothing usable survives that filter (a
-    degenerate map, or one whose only critical/fixed points are excluded).
+    """The dynamical plane's own default framing -- INTERIM: always
+    _DYNAMICAL_VIEW_FALLBACK (center 0, scale 2), regardless of map/param.
+
+    This used to derive a padded bounding box around the map's own finite
+    critical/fixed points (see _derive_dynamical_view_from_facts below,
+    PRESERVED but no longer called from here) -- reverted to a fixed
+    framing per direction: per-instance tailoring needs a proper
+    algorithmic solution, not that heuristic, and this also drops a real
+    root-find (cdx.dynamical_facts) off every reset/family-load/param-
+    change in the meantime. Swap the body back to
+    `return _derive_dynamical_view_from_facts(rational_map, param)` once
+    that solution exists -- `rational_map`/`param` are kept as this
+    function's own parameters (unused for now) specifically so every
+    existing call site (default_view_for_mode, and everything in
+    app/sandbox.py that calls THAT) needs no changes when it does.
+    """
+    del rational_map, param   # interim: genuinely unused -- see docstring
+    return _DYNAMICAL_VIEW_FALLBACK
+
+
+# ---- DEFERRED: future per-instance dynamical framing -- NOT WIRED IN -----------
+# default_dynamical_view above used to call this directly. Preserved,
+# callable, tested (see app/test_library_panel.py) -- just not reachable
+# from the real per-pane reset path right now (see that function's own
+# docstring for why). Do not delete: this is where a real algorithmic
+# solution should resume from, not a start-from-scratch redesign.
+def _derive_dynamical_view_from_facts(rational_map: cdx.RationalMap,
+                                      param: complex) -> tuple[complex, float]:
+    """A padded bounding box around the map's finite critical and fixed
+    points at THIS parameter (Fatou: every attracting cycle attracts a
+    critical point, so critical points are where the interesting structure
+    clusters; fixed points mark where a filled Julia set's boundary
+    characteristically threads through), excluding poles/infinity/
+    absurdly-far-out points (see _DYNAMICAL_VIEW_MAGNITUDE_CAP) and falling
+    back to _DYNAMICAL_VIEW_FALLBACK when nothing usable survives that
+    filter (a degenerate map, or one whose only critical/fixed points are
+    excluded).
 
     Genuinely depends on `param`, not just the map's NAME -- unlike
     default_view_for above, this can't be a name-keyed table: which points
@@ -119,14 +158,16 @@ def default_dynamical_view(rational_map: cdx.RationalMap, param: complex) -> tup
 
 
 def _bounding_view(points: list[complex]) -> tuple[complex, float]:
-    """The actual padded-bounding-box arithmetic default_dynamical_view
-    uses, factored out as a pure function of a plain point list so it's
-    directly testable without needing a real cdx.RationalMap to coax into
-    producing a specific (in particular, a genuinely DEGENERATE/all-
-    excluded) set of critical/fixed points -- the same reason
-    app.sandbox._orbit_line_segments/drawable_polyline_segments exist as
-    their own testable functions rather than being buried inside a paint
-    method.
+    """The actual padded-bounding-box arithmetic
+    _derive_dynamical_view_from_facts uses, factored out as a pure function
+    of a plain point list so it's directly testable without needing a real
+    cdx.RationalMap to coax into producing a specific (in particular, a
+    genuinely DEGENERATE/all-excluded) set of critical/fixed points -- the
+    same reason app.sandbox._orbit_line_segments/drawable_polyline_segments
+    exist as their own testable functions rather than being buried inside a
+    paint method. Not currently called from the live reset path (see
+    _derive_dynamical_view_from_facts' own docstring) -- preserved for the
+    same reason.
     """
     finite_points = [p for p in points
                      if math.isfinite(p.real) and math.isfinite(p.imag)

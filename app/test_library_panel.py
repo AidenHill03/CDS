@@ -26,9 +26,10 @@ import math
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.library_panel import (LibraryPanel, _bounding_view, _DYNAMICAL_VIEW_FALLBACK,
-                               _DYNAMICAL_VIEW_MIN_SCALE, _DYNAMICAL_VIEW_PADDING,
-                               default_dynamical_view, default_view_for, default_view_for_mode)
+from app.library_panel import (LibraryPanel, _bounding_view, _derive_dynamical_view_from_facts,
+                               _DYNAMICAL_VIEW_FALLBACK, _DYNAMICAL_VIEW_MIN_SCALE,
+                               _DYNAMICAL_VIEW_PADDING, default_dynamical_view, default_view_for,
+                               default_view_for_mode)
 from app.session import PRESET_FAMILY_NAMES, Session
 
 failures = 0
@@ -55,33 +56,48 @@ def main() -> None:
     check(fallback_center == 0j and fallback_scale > 0,
           "an unlisted name gets the generic fallback view, not a KeyError")
 
-    # ---- dynamical (Julia-set) default framing: mode-aware, Stage 2 ----------------
+    # ---- dynamical (Julia-set) default framing: FIXED, interim -----------------------
     # default_view_for's own table is a-SPACE (the parameter plane) --
     # default_dynamical_view frames z-space instead, and must NOT just
     # reuse the same table (that reuse was the Stage 2 bug: resetting a
     # Julia-set pane jumped it onto the parameter plane's own window).
-    print("\ndynamical default framing (default_dynamical_view):")
+    # INTERIM (this batch's Stage A): always the fixed fallback framing,
+    # regardless of map/param -- per-instance derivation is deferred (see
+    # _derive_dynamical_view_from_facts below, preserved but not called).
+    print("\ndynamical default framing (default_dynamical_view, interim fixed value):")
     mandelbrot = cdx.RationalMap.mandelbrot()
     julia_param = complex(-0.7269, 0.1889)
     dyn_center, dyn_scale = default_dynamical_view(mandelbrot, julia_param)
     param_center, param_scale = default_view_for("mandelbrot")
     check((dyn_center, dyn_scale) != (param_center, param_scale),
           "the dynamical-plane default framing is NOT the same window as the "
-          "parameter-plane's own table -- that reuse was the actual bug")
-    check(dyn_scale > 0 and math.isfinite(dyn_center.real) and math.isfinite(dyn_center.imag),
-          "the derived framing is a genuinely usable (finite center, positive scale) viewport")
+          "parameter-plane's own table -- that reuse was the Stage 2 bug")
+    check((dyn_center, dyn_scale) == _DYNAMICAL_VIEW_FALLBACK,
+          "the dynamical framing is exactly the fixed fallback (center 0), not derived "
+          "from mandelbrot's own critical/fixed points -- the interim direction")
 
     # newton_cubic(): `a` has NO effect on this map at all (confirmed
-    # elsewhere, describe_parameter_role), but it still has real critical
-    # and fixed points -- the dynamical framing must still derive something
-    # usable from THOSE, independent of describe_parameter_role's own
-    # "unused by this map" finding (a different, unrelated question).
+    # elsewhere, describe_parameter_role) -- a different, unrelated
+    # question from what its dynamical default framing is, which (interim)
+    # is the SAME fixed value regardless of map or param.
     newton = cdx.RationalMap.newton_cubic()
     newton_center, newton_scale = default_dynamical_view(newton, 0j)
-    check(newton_scale > 0 and math.isfinite(newton_center.real) and
-          math.isfinite(newton_center.imag),
-          "newton_cubic() -- whose `a` is unused -- still gets a real, finite dynamical "
-          "default framing, derived from its critical/fixed points regardless")
+    check((newton_center, newton_scale) == _DYNAMICAL_VIEW_FALLBACK,
+          "newton_cubic() gets the SAME fixed dynamical framing as mandelbrot -- "
+          "interim, center 0 regardless of map/param")
+
+    # ---- _derive_dynamical_view_from_facts: preserved, NOT wired in -----------------
+    # The per-instance (critical-/fixed-point-derived) logic default_
+    # dynamical_view used to run directly -- still correct and callable,
+    # just not reachable from the live reset path right now.
+    print("\n_derive_dynamical_view_from_facts (deferred, preserved, still correct):")
+    derived_center, derived_scale = _derive_dynamical_view_from_facts(mandelbrot, julia_param)
+    check((derived_center, derived_scale) != _DYNAMICAL_VIEW_FALLBACK,
+          "the DEFERRED function still genuinely derives a per-instance box (not just the "
+          "fixed fallback) -- it's dormant, not broken")
+    check(derived_scale > 0 and math.isfinite(derived_center.real) and
+          math.isfinite(derived_center.imag),
+          "...and the derived framing is still a genuinely usable viewport")
 
     # ---- _bounding_view: the pure arithmetic, tested directly ----------------------
     # Coaxing a real RationalMap into producing a genuinely DEGENERATE

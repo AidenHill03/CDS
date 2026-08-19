@@ -33,7 +33,7 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
-from app.library_panel import default_dynamical_view, default_view_for
+from app.library_panel import _DYNAMICAL_VIEW_FALLBACK, default_dynamical_view, default_view_for
 from app.pane import Pane
 from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
                          drawable_polyline_segments)
@@ -1280,26 +1280,32 @@ def main() -> None:
     print("\nReset View:")
     # window.session.map.name is "renamed-live" at this point (set just
     # above) -- not a name default_view_for recognizes, so it falls back to
-    # the generic (a-space) view. Using a renamed map here is deliberate:
-    # if Reset View still restored a frozen startup snapshot (the
-    # pre-Stage-2 bug), it would land on DEFAULT_PARAMETER_VIEW_CENTER/
-    # SCALE instead of this fallback, so this distinguishes "family
-    # default" from "frozen snapshot" instead of the two coincidentally
-    # agreeing.
+    # the generic (a-space) view (0, 2.0) -- which, now that this batch's
+    # Stage A made the dynamical default framing a FIXED constant too, is
+    # the SAME (0, 2.0) value _DYNAMICAL_VIEW_FALLBACK already returns.
+    # Reset to a RECOGNIZED name (mandelbrot, whose own parameter-table
+    # entry (-0.5, 1.5) is provably different from the fixed dynamical
+    # value) so the checks below can still distinguish "used the dynamical
+    # table" from "used the parameter table by mistake" -- with
+    # "renamed-live" still bound, the two would coincidentally agree and
+    # a real routing bug could pass unnoticed.
+    window.session.map = cdx.RationalMap.mandelbrot()
     expected_param_center, expected_param_scale = default_view_for(window.session.map.name)
-    check(expected_param_center == complex(0, 0) and expected_param_scale == 2.0,
-          "sanity: 'renamed-live' isn't a recognized family name, so default_view_for "
-          "falls back to the generic view")
+    check((expected_param_center, expected_param_scale) == (complex(-0.5, 0.0), 1.5),
+          "sanity: mandelbrot's own parameter-table entry, not the generic fallback")
 
     # window.pane is on "julia" (dynamical) here (last set by the mode
-    # selector section above) -- Reset View on it must frame the JULIA
-    # SET's own default (default_dynamical_view), never default_view_for's
-    # a-space table -- reusing that table for a dynamical pane's reset was
-    # exactly Stage 2's bug (it jumped a Julia-set pane onto whatever
-    # window makes the PARAMETER plane legible instead).
+    # selector section above) -- Reset View on it must frame the FIXED
+    # dynamical default (default_dynamical_view, this batch's Stage A),
+    # never default_view_for's a-space table -- reusing that table for a
+    # dynamical pane's reset was exactly the earlier Stage 2 bug (it
+    # jumped a Julia-set pane onto whatever window makes the PARAMETER
+    # plane legible instead).
     check(window.pane.render_mode == "julia", "sanity: pane A is dynamical here")
     expected_dyn_center, expected_dyn_scale = default_dynamical_view(window.session.map,
                                                                      window.session.param)
+    check((expected_dyn_center, expected_dyn_scale) == _DYNAMICAL_VIEW_FALLBACK,
+          "sanity: the dynamical default is exactly the fixed fallback (interim, Stage A)")
     check((expected_dyn_center, expected_dyn_scale)
           != (expected_param_center, expected_param_scale),
           "sanity: the dynamical and parameter-plane default framings are genuinely "
@@ -1370,8 +1376,9 @@ def main() -> None:
     check(window.session.param == complex(2, -3),
           "committing the field is the SAME source of truth session.param reads")
     check(param_committed == [], "field commit does not go through the plane-click signal path")
-    # The dynamical-plane's OWN default (default_dynamical_view), not
-    # default_view_for's a-space table -- Stage 2's fix.
+    # The dynamical-plane's OWN default (default_dynamical_view -- interim,
+    # a fixed constant; see this batch's Stage A), not default_view_for's
+    # a-space table -- Stage 2's fix.
     expected_field_center, expected_field_scale = default_dynamical_view(window.session.map,
                                                                          window.session.param)
     check(close(window.pane.viewport.center, expected_field_center) and
@@ -1416,10 +1423,10 @@ def main() -> None:
           "the field is populated with the SAME value the click just set -- the two never diverge")
 
     # pane2 is dynamical ("julia"), so this MUST be default_dynamical_view's
-    # own critical-/fixed-point-derived framing (via the mode-aware
-    # dispatcher _apply_param_change now routes through), not
-    # default_view_for's a-space table -- Stage 2's fix, exercised here
-    # through the Stage 3 coupling path specifically.
+    # own framing (via the mode-aware dispatcher _apply_param_change now
+    # routes through -- interim, a fixed constant; see this batch's Stage
+    # A), not default_view_for's a-space table -- Stage 2's fix, exercised
+    # here through the Stage 3 coupling path specifically.
     expected_center, expected_scale = default_dynamical_view(window.session.map,
                                                               window.session.param)
     check(close(window.pane2.viewport.center, expected_center) and
