@@ -16,6 +16,7 @@ plugin search path):
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import tempfile
@@ -1650,6 +1651,62 @@ def main() -> None:
     window.mode_combo.setCurrentText("parameter")
     check(window.image_view.no_effect_parameter_message() is None,
           "and mandelbrot()'s parameter plane (where `a` is the whole point) has no guard either")
+
+    # ---- File > Export: PNG at a chosen resolution, and JSON facts (Stage 4) --------
+    print("\nFile > Export (Image PNG / Facts JSON), via the real window:")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("julia")
+    window._set_focused_pane(window.pane)
+    window.pane.viewport = cdx.Viewport(complex(-0.5, 0.0), 1.2, 100)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = os.path.join(tmp, "export")   # deliberately no extension
+        window._do_export_image(png_path, 64)
+        actual_png_path = png_path + ".png"
+        check(os.path.exists(actual_png_path),
+              "_do_export_image appends .png when the chosen path doesn't already have one")
+        exported_image = QImage(actual_png_path)
+        check(exported_image.width() == 64 and exported_image.height() == 64,
+              "the exported PNG is FRESH-rendered at the CHOSEN resolution -- not the pane's "
+              "own display resolution (100) or a downsample of whatever's on screen")
+        check(not exported_image.isNull(), "the exported file is a genuine, readable PNG")
+
+        json_path = os.path.join(tmp, "facts")   # also no extension
+        window._do_export_facts(json_path)
+        actual_json_path = json_path + ".json"
+        check(os.path.exists(actual_json_path),
+              "_do_export_facts appends .json when the chosen path doesn't already have one")
+        with open(actual_json_path) as f:
+            exported_facts = json.load(f)
+        check(exported_facts["map"]["formula"] == window.session.map.to_formula() and
+              exported_facts["render_mode"] == "julia",
+              "the exported facts describe the CURRENT map and the FOCUSED pane's own "
+              "render_mode")
+        check(exported_facts["viewport"]["center"] == [window.pane.viewport.center.real,
+                                                        window.pane.viewport.center.imag],
+              "...and the focused pane's own viewport too, for provenance")
+
+    # ---- File > Export: the no-effect-parameter guard applies to image export too ---
+    print("\nFile > Export: no-effect-parameter guard:")
+    window.session.map = cdx.RationalMap.newton_cubic()
+    window.mode_combo.setCurrentText("parameter")
+    critical_calls_export = []
+    original_critical_export = sandbox_module.QMessageBox.critical
+    sandbox_module.QMessageBox.critical = staticmethod(
+        lambda *args, **kwargs: critical_calls_export.append(args))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            guard_png_path = os.path.join(tmp, "guarded.png")
+            window._do_export_image(guard_png_path, 50)
+            check(not os.path.exists(guard_png_path),
+                  "Export Image refuses to write a PNG for a no-effect parameter-plane pane "
+                  "-- the same guard _start_render uses for the live view")
+    finally:
+        sandbox_module.QMessageBox.critical = original_critical_export
+    check(len(critical_calls_export) == 1,
+          "...and shows exactly one explanatory error dialog instead of a silent no-op")
+    window.mode_combo.setCurrentText("julia")
+    window.session.map = cdx.RationalMap.mandelbrot()
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded

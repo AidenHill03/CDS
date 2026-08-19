@@ -90,6 +90,71 @@ def _critical_points_with_multiplicity(rational_map: cdx.RationalMap, a: complex
     return groups
 
 
+def facts_to_dict(session, render_mode: str, viewport: cdx.Viewport) -> dict:
+    """A plain, JSON-serializable snapshot of session.dynamical_facts() for
+    the CURRENT (session.map, session.param) -- File > Export Facts (JSON)'s
+    own logic (see app/sandbox.py's _do_export_facts). Reuses
+    _critical_points_with_multiplicity/_classify, the SAME grouping and
+    classification FactsPanel's own tables use, so the exported JSON always
+    matches what is actually on screen -- one source of truth for both,
+    not a second copy of the grouping logic that could drift out of sync.
+
+    `render_mode` and `viewport` are the CALLER's own -- typically the
+    FOCUSED pane's (see app.pane.Pane) -- included purely for PROVENANCE
+    (what was being looked at when this was exported), the same reason
+    Session.snapshot_to_dict takes them explicitly rather than reading a
+    render_mode/viewport this class doesn't own.
+
+    Complex numbers serialize as [real, imag] pairs throughout, matching
+    Session.snapshot_to_dict's own convention. A point at infinity
+    serializes as literal Infinity (Python's json module emits this by
+    default, and its own json.load reads it back) rather than being
+    excluded or special-cased -- infinity is an ordinary point here (see
+    CLAUDE.md's "sphere-first" convention), not an error case to hide.
+    """
+    facts = session.dynamical_facts()
+    expected = 2 * facts.degree - 2
+    actual = len(facts.critical_points)
+    matches = actual == expected
+    if matches:
+        rh_summary = (f"{actual} critical points with multiplicity, matches 2d-2 = {expected}")
+    else:
+        rh_summary = (f"MISMATCH: {actual} critical points counted, expected 2d-2 = {expected} "
+                      "-- critical_points() is incomplete for this map")
+
+    def c(z: complex) -> list[float]:
+        return [z.real, z.imag]
+
+    critical_groups = _critical_points_with_multiplicity(session.map, session.param)
+    return {
+        "map": {"name": session.map.name, "formula": session.map.to_formula()},
+        "param": c(session.param),
+        "render_mode": render_mode,
+        "viewport": {
+            "center": c(viewport.center),
+            "scale": viewport.scale,
+            "resolution": viewport.resolution,
+        },
+        "degree": facts.degree,
+        "riemann_hurwitz": {
+            "critical_points_with_multiplicity": actual,
+            "expected_2d_minus_2": expected,
+            "matches": matches,
+            "summary": rh_summary,
+        },
+        "critical_points": [{"point": c(point), "multiplicity": mult}
+                            for point, mult in critical_groups],
+        "fixed_points": [{"point": c(fp.point), "multiplier": c(fp.multiplier),
+                          "classification": _classify(fp.multiplier)}
+                         for fp in facts.fixed_points],
+        "attracting_cycles": [{"period": cyc.period, "multiplier": c(cyc.multiplier),
+                               "points": [c(p) for p in cyc.points]}
+                              for cyc in facts.attracting_cycles],
+        "poles": [{"location": c(loc), "order": order}
+                 for loc, order in zip(facts.pole_locations, facts.pole_orders)],
+    }
+
+
 class FactsPanel(QWidget):
     def __init__(self, session, on_center_view: Callable[[complex], None],
                 parent: QWidget | None = None):

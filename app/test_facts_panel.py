@@ -16,10 +16,14 @@ Run with:
 
 from __future__ import annotations
 
+import json
+import math
+
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.facts_panel import FactsPanel, _classify, _critical_points_with_multiplicity, _is_inf
+from app.facts_panel import (FactsPanel, _classify, _critical_points_with_multiplicity, _is_inf,
+                             facts_to_dict)
 from app.session import Session
 
 failures = 0
@@ -128,6 +132,68 @@ def main() -> None:
         panel2._on_center_view = centered2.append
         panel2._on_row_clicked(panel2._critical_table, inf_row)
         check(len(centered2) == 0, "clicking the infinity row never calls on_center_view")
+
+    # ---- facts_to_dict: JSON export (Stage 4 of the batch) ---------------------------
+    print("\nfacts_to_dict (JSON fact-sheet export):")
+    export_session = Session()
+    export_session.map = cdx.RationalMap.newton_cubic()
+    export_viewport = cdx.Viewport(complex(0.1, -0.2), 1.8, 333)
+    data = facts_to_dict(export_session, "julia", export_viewport)
+
+    check(set(data.keys()) == {"map", "param", "render_mode", "viewport", "degree",
+                               "riemann_hurwitz", "critical_points", "fixed_points",
+                               "attracting_cycles", "poles"},
+          "the exported dict has exactly the documented top-level keys")
+    check(data["map"]["name"] == "newton3" and
+          data["map"]["formula"] == export_session.map.to_formula(),
+          "map name/formula match the CURRENT map exactly")
+    check(data["param"] == [export_session.param.real, export_session.param.imag],
+          "param serializes as [real, imag]")
+    check(data["render_mode"] == "julia", "render_mode is the CALLER's own (provenance only)")
+    check(data["viewport"] == {"center": [0.1, -0.2], "scale": 1.8, "resolution": 333},
+          "viewport is the CALLER's own too, not something this reads off a pane/session")
+    check(data["degree"] == 3, "newton_cubic() has degree 3")
+
+    # newton_cubic() specifically: 4 fixed points, 1 pole (the spec's own
+    # worked example for this test).
+    check(len(data["fixed_points"]) == 4, "newton_cubic() has exactly 4 fixed points")
+    check(len(data["poles"]) == 1, "newton_cubic() has exactly 1 pole")
+    check(data["poles"][0]["order"] > 0, "the pole entry has a real (positive) order")
+
+    check(data["riemann_hurwitz"]["matches"] is True,
+          "newton_cubic()'s critical points satisfy Riemann-Hurwitz (2d-2 = 4)")
+    check(sum(g["multiplicity"] for g in data["critical_points"]) ==
+          data["riemann_hurwitz"]["critical_points_with_multiplicity"],
+          "the grouped critical_points' multiplicities sum back to the RH count exactly")
+
+    check(all(fp["classification"] in ("attracting", "repelling", "neutral", "superattracting")
+              for fp in data["fixed_points"]),
+          "every fixed point's classification is one of the real, documented outcomes")
+    check(any(math.isinf(fp["point"][0]) for fp in data["fixed_points"]),
+          "newton_cubic() genuinely has a fixed point AT infinity, included here like any "
+          "other point -- not excluded (sphere-first, per CLAUDE.md)")
+
+    # Matches the SAME grouping/classification FactsPanel's own tables use --
+    # not a second, independently-drifting copy of that logic.
+    panel_groups = _critical_points_with_multiplicity(export_session.map, export_session.param)
+    check([g["multiplicity"] for g in data["critical_points"]] == [m for _, m in panel_groups],
+          "critical-point multiplicities match _critical_points_with_multiplicity exactly, "
+          "the same helper FactsPanel's own table uses")
+    exported_classifications = [fp["classification"] for fp in data["fixed_points"]]
+    panel_facts = export_session.dynamical_facts()
+    check(exported_classifications == [_classify(fp.multiplier) for fp in panel_facts.fixed_points],
+          "fixed-point classifications match _classify exactly, the same helper the panel uses")
+
+    # Round-trips through an ACTUAL json.dumps/loads, including the literal
+    # Infinity token above -- not just a well-formed-looking dict.
+    round_tripped = json.loads(json.dumps(data))
+    inf_index = next(i for i, fp in enumerate(data["fixed_points"])
+                     if math.isinf(fp["point"][0]))
+    check(math.isinf(round_tripped["fixed_points"][inf_index]["point"][0]),
+          "json.dumps/json.loads round-trips the infinite fixed point losslessly")
+    check(round_tripped["degree"] == data["degree"] and
+          round_tripped["map"]["formula"] == data["map"]["formula"],
+          "the rest of the dict round-trips through real JSON too, not just in memory")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

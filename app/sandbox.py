@@ -17,6 +17,7 @@ Entry point: `python -m app.sandbox`.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -27,14 +28,14 @@ from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, 
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter,
-                               QTabWidget, QToolBar, QVBoxLayout, QWidget)
+                               QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton,
+                               QSplitter, QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
 from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
-from app.facts_panel import FactsPanel
+from app.facts_panel import FactsPanel, facts_to_dict
 from app.library_panel import LibraryPanel, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
@@ -1312,6 +1313,16 @@ class SandboxWindow(QMainWindow):
         self.open_experiment_action = self.file_menu.addAction("Open Experiment...")
         self.open_experiment_action.triggered.connect(self._on_open_experiment)
 
+        # File > Export (Stage 4): a rendered PNG at a CHOSEN resolution, or
+        # a JSON fact sheet -- both of the FOCUSED pane specifically (see
+        # _do_export_image/_do_export_facts's own docstrings). Same
+        # store-on-self reason as everything else on this menu bar.
+        self.export_menu = self.file_menu.addMenu("Export")
+        self.export_image_action = self.export_menu.addAction("Export Image (PNG)...")
+        self.export_image_action.triggered.connect(self._on_export_image)
+        self.export_facts_action = self.export_menu.addAction("Export Facts (JSON)...")
+        self.export_facts_action.triggered.connect(self._on_export_facts)
+
         # ---- View menu: mirrors the toolbar's own view controls (Stage 3) -------
         # Same store-on-self reason as file_menu/help_menu -- see help_menu's own
         # comment below. The toolbar stays for now (its fate is a separate,
@@ -1557,6 +1568,87 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             self._start_render(pane)
         self._sync_orbit_panel()
+
+    # ---- File > Export: PNG at a chosen resolution, or a JSON fact sheet --------
+    # Same _on_*/_do_* split as Save/Open Experiment above (see that
+    # section's own comment): QInputDialog.getInt/QFileDialog both block on
+    # a real event loop, so _on_export_image gathers both, then hands off to
+    # _do_export_image for the actual (directly testable) logic.
+    def _on_export_image(self) -> None:
+        pane = self._focused_pane
+        resolution, ok = QInputDialog.getInt(
+            self, "Export Image", "Resolution (pixels, square):",
+            value=pane.viewport.resolution, minValue=1, maxValue=20000)
+        if not ok:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", "", "PNG image (*.png);;All files (*)")
+        if path:
+            self._do_export_image(path, resolution)
+
+    def _do_export_image(self, path: str, resolution: int) -> None:
+        """Renders the FOCUSED pane's own (map, param, viewport center/
+        scale, mode, settings) FRESH at `resolution` -- via render_map, the
+        same free function every on-screen render already goes through, not
+        a downsample/upscale of whatever happens to be on screen -- coloured
+        through the identical array_to_qimage pipeline the display itself
+        uses (same palette/scaling/period, so the export matches what is
+        actually shown), then saved as a plain PNG.
+
+        Exports the clean mathematical field ONLY -- no critical-point
+        markers, orbit trace, or param crosshair overlay. Deliberate, not an
+        oversight: those are interactive/UI artifacts of the LIVE view, not
+        part of the rendered field itself, and baking them into an exported
+        image would silently change what render_map's own output means.
+        Overlay export is a real, deliberately deferred future option (a
+        second QPainter pass over the saved QImage, mirroring
+        ImageView._paint_critical_point_overlay/_paint_orbit/
+        _paint_param_marker), not something this leaves broken.
+        """
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        pane = self._focused_pane
+        message = pane.image_view.no_effect_parameter_message()
+        if message is not None:
+            # Same guard _start_render uses for the live view (see
+            # ImageView.no_effect_parameter_message's own docstring) --
+            # exporting would otherwise silently write a meaningless
+            # uniform-colour PNG with no indication anything was wrong.
+            QMessageBox.critical(self, "Export Image failed", message)
+            return
+        vp = pane.viewport
+        export_viewport = cdx.Viewport(vp.center, vp.scale, resolution)
+        rs = self.session.render_settings
+        array = render_map(self.session.map, self.session.param, export_viewport,
+                           rs, pane.render_mode)
+        image = array_to_qimage(array, pane.render_mode, self.session.settings, rs.max_iter)
+        if not image.save(path, "PNG"):
+            QMessageBox.critical(self, "Export Image failed", f"could not write {path!r}")
+
+    def _on_export_facts(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Facts", "", "JSON (*.json);;All files (*)")
+        if path:
+            self._do_export_facts(path)
+
+    def _do_export_facts(self, path: str) -> None:
+        """facts_to_dict(session, mode, viewport) -> JSON, for the FOCUSED
+        pane's own render_mode/viewport (provenance only -- the facts
+        themselves are of session.map/session.param, shared by every pane;
+        see facts_to_dict's own docstring). Reuses FactsPanel's own
+        classification/grouping helpers, so this always matches the Facts
+        tab exactly, not a second copy of that logic that could drift.
+        """
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        pane = self._focused_pane
+        data = facts_to_dict(self.session, pane.render_mode, pane.viewport)
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Facts failed", str(exc))
 
     # ---- parameter a: field commit and parameter-plane click, kept in sync ------
     def _on_param_field_committed(self, a: complex) -> None:
