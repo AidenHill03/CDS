@@ -65,7 +65,8 @@ def main() -> None:
     session.map = cdx.RationalMap.newton_cubic()
     session.param = 0j
     centered: list[complex] = []
-    panel = FactsPanel(session, centered.append)
+    seeded: list[complex] = []
+    panel = FactsPanel(session, centered.append, seeded.append)
 
     check("Degree: 3" in panel._degree_label.text(), "degree label shows the map's actual degree")
     expected_rh = 2 * 3 - 2
@@ -86,16 +87,32 @@ def main() -> None:
           "poles table: newton_cubic has one pole")
     check(panel._pole_table.item(0, 1).text() == "2", "the pole's order column reads 2")
 
-    # ---- clicking a row centres the view (spy callback, not a real viewport) --------
-    print("\nclick-to-centre:")
+    # ---- clicking a row: poles centre the view, fixed/critical seed an orbit --------
+    # (Stage 5) -- spy callbacks, not a real viewport/orbit tracker.
+    print("\nclick-to-centre / click-to-seed:")
     centered.clear()
     panel._on_row_clicked(panel._pole_table, 0)
-    check(len(centered) == 1 and centered[0] == 0j,
-          "clicking the pole row calls on_center_view with that pole's location")
+    check(len(centered) == 1 and centered[0] == 0j and len(seeded) == 0,
+          "clicking the pole row calls on_center_view with that pole's location, and does "
+          "NOT also seed an orbit -- pole rows keep their EXISTING, unchanged behavior")
 
     centered.clear()
     panel._on_row_clicked(panel._pole_table, 99)   # out of range
-    check(len(centered) == 0, "clicking a nonexistent row is a no-op, not an IndexError")
+    check(len(centered) == 0 and len(seeded) == 0,
+          "clicking a nonexistent row is a no-op, not an IndexError")
+
+    seeded.clear()
+    fixed_point_0 = panel._row_points[id(panel._fixed_table)][0]
+    panel._on_row_clicked(panel._fixed_table, 0)
+    check(len(seeded) == 1 and seeded[0] == fixed_point_0 and len(centered) == 0,
+          "clicking a FIXED-point row calls on_seed_orbit with that point, NOT "
+          "on_center_view -- seeding is the action, not a recentre")
+
+    seeded.clear()
+    critical_point_0 = panel._row_points[id(panel._critical_table)][0]
+    panel._on_row_clicked(panel._critical_table, 0)
+    check(len(seeded) == 1 and seeded[0] == critical_point_0 and len(centered) == 0,
+          "clicking a CRITICAL-point row calls on_seed_orbit too, the same as a fixed point")
 
     # ---- caching: refresh() is a no-op unless (map, param) actually changed ---------
     print("\ncaching:")
@@ -114,7 +131,7 @@ def main() -> None:
     session2 = Session()
     session2.map = cdx.RationalMap("scratch")
     session2.add_poly_term(1 + 0j, 2, 0)   # z^2: 2 critical points expected (0 and infinity)
-    panel2 = FactsPanel(session2, lambda p: None)
+    panel2 = FactsPanel(session2, lambda p: None, lambda p: None)
     check("✓" in panel2._rh_label.text() or "MISMATCH" in panel2._rh_label.text(),
           "the RH label always reads one of exactly these two outcomes -- never blank")
 
@@ -129,9 +146,14 @@ def main() -> None:
     check(inf_row is not None, "z^2's critical-points table has an infinity row")
     if inf_row is not None:
         centered2: list[complex] = []
+        seeded2: list[complex] = []
         panel2._on_center_view = centered2.append
+        panel2._on_seed_orbit = seeded2.append
         panel2._on_row_clicked(panel2._critical_table, inf_row)
-        check(len(centered2) == 0, "clicking the infinity row never calls on_center_view")
+        check(len(centered2) == 0 and len(seeded2) == 0,
+              "clicking the infinity row calls NEITHER on_center_view nor on_seed_orbit -- "
+              "it's a critical-point row (would otherwise seed), but infinity has nowhere "
+              "to seed an orbit at either")
 
     # ---- facts_to_dict: JSON export (Stage 4 of the batch) ---------------------------
     print("\nfacts_to_dict (JSON fact-sheet export):")

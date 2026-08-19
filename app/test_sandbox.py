@@ -1708,6 +1708,70 @@ def main() -> None:
     window.mode_combo.setCurrentText("julia")
     window.session.map = cdx.RationalMap.mandelbrot()
 
+    # ---- Facts tab: clicking a fixed/critical point seeds an orbit (Stage 5) --------
+    print("\nFacts tab: clicking a fixed/critical point seeds an orbit on the dynamical plane:")
+    window.session.map = cdx.RationalMap.newton_cubic()
+    window.session.param = 0j
+    window.mode_combo.setCurrentText("julia")
+    window.mode_combo2.setCurrentText("parameter")
+    window._set_focused_pane(window.pane2)   # focus the PARAMETER pane deliberately
+    window.facts_panel.refresh(force=True)
+    window.image_view.clear_orbit()
+    window.image_view2.clear_orbit()
+
+    fixed_points = window.facts_panel._row_points[id(window.facts_panel._fixed_table)]
+    finite_fixed_row = next(i for i, p in enumerate(fixed_points)
+                            if p is not None and not math.isinf(p.real) and not math.isinf(p.imag))
+    target_point = fixed_points[finite_fixed_row]
+    window.facts_panel._on_row_clicked(window.facts_panel._fixed_table, finite_fixed_row)
+
+    check(window.image_view.orbit_tracker.state is not None and
+          window.image_view.orbit_tracker.state.z0 == target_point,
+          "clicking a fixed-point row seeds an orbit at that point on the DYNAMICAL pane, "
+          "even though the PARAMETER pane (pane2) is the one currently focused")
+    check(window.image_view2.orbit_tracker.state is None,
+          "...and does NOT seed anything on the parameter-plane pane")
+    check(window.tabs.currentWidget() is window.view_container,
+          "seeding an orbit from the Facts tab switches to the View tab, the same as "
+          "centring on a pole already does")
+
+    # Critical-point rows do the same thing.
+    window.tabs.setCurrentIndex(2)   # back to Facts
+    window.image_view.clear_orbit()
+    critical_points = window.facts_panel._row_points[id(window.facts_panel._critical_table)]
+    finite_critical_row = next(i for i, p in enumerate(critical_points)
+                               if p is not None and not math.isinf(p.real)
+                               and not math.isinf(p.imag))
+    target_critical_point = critical_points[finite_critical_row]
+    window.facts_panel._on_row_clicked(window.facts_panel._critical_table, finite_critical_row)
+    check(window.image_view.orbit_tracker.state is not None and
+          window.image_view.orbit_tracker.state.z0 == target_critical_point,
+          "clicking a CRITICAL-point row seeds an orbit too, the same as a fixed point")
+
+    # Pole rows keep the EXISTING centre-the-view behavior, unchanged.
+    window.tabs.setCurrentIndex(2)
+    pane2_center_before = window.pane2.viewport.center
+    poles = window.facts_panel._row_points[id(window.facts_panel._pole_table)]
+    window.facts_panel._on_row_clicked(window.facts_panel._pole_table, 0)
+    check(window.pane2.viewport.center == poles[0] and
+          window.pane2.viewport.center != pane2_center_before,
+          "a pole row still centres the FOCUSED pane's view (pane2, parameter) -- unchanged "
+          "from before Stage 5")
+
+    # No dynamical pane at all (both parameter-plane) -> a clean no-op.
+    window.mode_combo.setCurrentText("parameter")   # now BOTH panes are parameter-plane
+    window.image_view.clear_orbit()
+    window.facts_panel._on_row_clicked(window.facts_panel._fixed_table, finite_fixed_row)
+    check(window.image_view.orbit_tracker.state is None and
+          window.image_view2.orbit_tracker.state is None,
+          "with no pane in a dynamical mode, clicking a fixed/critical point row is a "
+          "no-op -- orbit seeding is a dynamical-plane concept, same gate "
+          "ImageView.seed_orbit itself uses")
+
+    window.mode_combo.setCurrentText("julia")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window._set_focused_pane(window.pane)
+
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded
     # render requests" section above deliberately leaves a stale task's

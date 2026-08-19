@@ -3,8 +3,10 @@
 Everything here comes from cdx.dynamical_facts(map, param) (plus a bit of
 Python-side grouping/classification -- see below), displayed in four
 read-only tables plus a degree/Riemann-Hurwitz summary. Nothing here
-mutates session.map or session.param; the only session-affecting action is
-clicking a row, which re-centres the viewport (see _on_center_view).
+mutates session.map or session.param; clicking a row either re-centres the
+viewport (poles -- see on_center_view) or SEEDS AN ORBIT at that point on
+the dynamical plane (fixed/critical points, Stage 5 -- see on_seed_orbit
+and _on_row_clicked's own routing for exactly which table does which).
 
 CACHED PER (map, param). dynamical_facts() runs a root-finder and an
 attracting-cycle search -- real work, not a field lookup -- so refresh()
@@ -157,10 +159,17 @@ def facts_to_dict(session, render_mode: str, viewport: cdx.Viewport) -> dict:
 
 class FactsPanel(QWidget):
     def __init__(self, session, on_center_view: Callable[[complex], None],
-                parent: QWidget | None = None):
+                on_seed_orbit: Callable[[complex], None], parent: QWidget | None = None):
         super().__init__(parent)
         self.session = session
         self._on_center_view = on_center_view
+        # Stage 5: a fixed-point or critical-point row SEEDS an orbit there
+        # instead of recentring -- seeding is the action; the orbit marker
+        # (on whichever pane it lands on -- see SandboxWindow's own
+        # routing) shows where it is. Pole rows keep the EXISTING
+        # centre-the-view behavior unchanged (see _on_row_clicked below for
+        # which table routes to which callback).
+        self._on_seed_orbit = on_seed_orbit
         self._cache_key = None
         self._facts: cdx.DynamicalFacts | None = None
         # Keyed by id(table), not the table itself (QTableWidget isn't
@@ -294,12 +303,20 @@ class FactsPanel(QWidget):
             points.append(loc)
         self._row_points[id(table)] = points
 
-    # ---- click a row -> centre the view on its point ------------------------------------
+    # ---- click a row -> seeds an orbit (critical/fixed) or centres the view (pole) ------
     def _on_row_clicked(self, table: QTableWidget, row: int) -> None:
         points = self._row_points.get(id(table), [])
         if not 0 <= row < len(points):
             return
         point = points[row]
         if point is None or _is_inf(point):
-            return   # infinity (or an empty cycle, defensively) has nowhere to centre on
-        self._on_center_view(point)
+            return   # infinity (or an empty cycle, defensively) has nowhere to seed/centre on
+        if table is self._critical_table or table is self._fixed_table:
+            # Stage 5: NOT also a recentre -- seeding is the action, the
+            # orbit marker itself shows where the point is.
+            self._on_seed_orbit(point)
+        else:
+            # Pole rows (and cycle rows, unmentioned by Stage 5's own spec
+            # -- kept at their EXISTING, unchanged behavior rather than
+            # guessed at) still just centre the view.
+            self._on_center_view(point)

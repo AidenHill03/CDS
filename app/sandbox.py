@@ -692,9 +692,19 @@ class ImageView(QWidget):
         self.update()
 
     def _seed_orbit_at(self, pixel: QPoint) -> None:
+        self.seed_orbit(self._pixel_to_complex(pixel))
+
+    def seed_orbit(self, z0: complex) -> None:
+        """The actual seeding logic -- factored out from _seed_orbit_at so
+        a caller that already HAS an exact complex point (a fixed/critical
+        point from FactsPanel, Stage 5 -- see
+        SandboxWindow._on_seed_orbit_from_facts) can seed it directly,
+        without a lossy pixel round-trip through whatever this pane's
+        CURRENT viewport happens to be (the point may not even be on
+        screen right now).
+        """
         if self.pane.render_mode in PARAMETER_PLANE_MODES:
             return   # orbit tracking is a dynamical-plane concept, see its own module docstring
-        z0 = self._pixel_to_complex(pixel)
         self.orbit_tracker.seed(self.session.map, self.session.param, z0)
         self.orbit_changed.emit()
         self.update()
@@ -1234,7 +1244,8 @@ class SandboxWindow(QMainWindow):
         self.tabs.addTab(self.view_container, "View")
         self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
         self.tabs.addTab(self.term_editor_panel, "Terms")
-        self.facts_panel = FactsPanel(self.session, self._on_center_view, self)
+        self.facts_panel = FactsPanel(self.session, self._on_center_view,
+                                      self._on_seed_orbit_from_facts, self)
         self.tabs.addTab(self.facts_panel, "Facts")
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
                                           self._on_library_changed, self)
@@ -1851,6 +1862,25 @@ class SandboxWindow(QMainWindow):
         self._update_status_bar()
         self._debounce_timers[pane].stop()
         self._start_render(pane)
+
+    # ---- facts tab: clicking a fixed/critical point seeds an orbit there (Stage 5) --
+    def _on_seed_orbit_from_facts(self, point: complex) -> None:
+        # NOT self._focused_pane -- orbit tracking is a dynamical-plane
+        # concept, and the focused pane could easily be a parameter-plane
+        # one (e.g. the pane the user just clicked to set `a`). Routes
+        # through the SAME "which pane counts as THE dynamical one right
+        # now" helper the orbit strip itself follows (_current_dynamical_
+        # pane -- see _sync_orbit_panel) and Save Experiment's own orbit
+        # provenance, rather than a second, independently-drifting notion
+        # of it: prefers the FOCUSED pane if it qualifies, else the first
+        # dynamical pane found among self.panes (not restricted to
+        # whichever pane is currently VISIBLE in single-view mode -- same
+        # tradeoff those two other call sites already make).
+        dynamical_pane = self._current_dynamical_pane()
+        if dynamical_pane is None:
+            return   # no pane is dynamical (both parameter-plane) -- orbit seeding is a no-op
+        dynamical_pane.image_view.seed_orbit(point)
+        self.tabs.setCurrentWidget(self.view_container)
 
     # ---- library tab: loading a family replaces session.map wholesale -----------
     def _on_family_loaded(self) -> None:
