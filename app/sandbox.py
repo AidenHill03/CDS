@@ -35,7 +35,7 @@ from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel
-from app.library_panel import LibraryPanel, default_view_for
+from app.library_panel import LibraryPanel, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
@@ -1050,7 +1050,14 @@ class SandboxWindow(QMainWindow):
         self.pane = Pane(cdx.Viewport(DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
                                       resolution),
                          "parameter")
-        pane2_center, pane2_scale = default_view_for(self.session.map.name)
+        # "julia" -- the dynamical plane -- so this MUST be
+        # default_dynamical_view's own critical-/fixed-point-derived
+        # framing (via the mode-aware dispatcher), not default_view_for's
+        # a-space table -- using the parameter-plane's own window here was
+        # Stage 2's bug: pane2 would start framed on (say) mandelbrot's
+        # OWN (-0.5, 1.5) a-space window applied as though it were z-space.
+        pane2_center, pane2_scale = default_view_for_mode(self.session.map, self.session.param,
+                                                          "julia")
         self.pane2 = Pane(cdx.Viewport(pane2_center, pane2_scale, resolution), "julia")
         # Every pane this window owns. Iterated by closeEvent (cancel every
         # pane's in-flight renders) and _on_settings_applied (a resolution
@@ -1544,9 +1551,10 @@ class SandboxWindow(QMainWindow):
         # repaint _apply_param_change already triggers for every
         # parameter-plane pane) -- only the PARTNER pane, if it's
         # currently dynamical, gets its viewport reset to this map's
-        # default and re-rendered. See _apply_param_change's own
-        # docstring for why this is exactly the same underlying
-        # invalidation a plain field commit also does.
+        # dynamical-plane default (default_dynamical_view, Stage 2 --
+        # never the parameter-plane's own table) and re-rendered. See
+        # _apply_param_change's own docstring for why this is exactly the
+        # same underlying invalidation a plain field commit also does.
         self._apply_param_change(a)
 
     def _apply_param_change(self, a: complex) -> None:
@@ -1558,9 +1566,13 @@ class SandboxWindow(QMainWindow):
         CACHE ASYMMETRY (Stage 3): render_parameter ignores the bound
         param entirely -- every pixel there IS a parameter -- so a param
         change must invalidate/re-render ONLY panes currently in a
-        DYNAMICAL mode: their viewport resets to this map's default (a
-        deep zoom from the PREVIOUS parameter is almost never informative
-        for a new one) and they re-render. A parameter-plane pane's
+        DYNAMICAL mode: their viewport resets to this map's own
+        DYNAMICAL-plane default (default_view_for_mode -> critical-/
+        fixed-point-derived, see app.library_panel.default_dynamical_view;
+        Stage 2 -- a deep zoom from the PREVIOUS parameter is almost never
+        informative for a new one, and the parameter-plane's OWN table
+        would frame the wrong space entirely) and they re-render. A
+        parameter-plane pane's
         pixels don't need to change at all -- it only needs an .update()
         repaint so its marker (see ImageView._param_marker_pixel, derived
         from session.param at paint time) moves to the new value. Neither
@@ -1578,7 +1590,8 @@ class SandboxWindow(QMainWindow):
             if pane.render_mode in PARAMETER_PLANE_MODES:
                 pane.image_view.update()   # move its marker; nothing else about it changed
                 continue
-            center, scale = default_view_for(self.session.map.name)
+            center, scale = default_view_for_mode(self.session.map, self.session.param,
+                                                  pane.render_mode)
             vp = pane.viewport
             pane.viewport = cdx.Viewport(center, scale, vp.resolution)
             pane.image_view.refresh_critical_points()
@@ -1705,8 +1718,12 @@ class SandboxWindow(QMainWindow):
         # LibraryPanel has already replaced self.session.map by the time
         # this fires (see its _load_selected) but no longer touches any
         # viewport itself (Session has none to touch -- see app.pane.Pane)
-        # -- resetting EVERY pane's viewport to the new map's default is
-        # this method's own job now, before resyncing every OTHER panel
+        # -- resetting EVERY pane's viewport to the new map's own
+        # MODE-appropriate default (default_view_for_mode, Stage 2 -- a
+        # parameter-plane pane gets a-space framing, a dynamical one gets
+        # z-space framing derived from the new map's own critical/fixed
+        # points) is this method's own job now, before resyncing every
+        # OTHER panel
         # that caches a view of the old map, then rendering right away,
         # the same "deliberate action, not a debounce-worthy burst"
         # treatment Reset View and Settings' Apply already get. Every
@@ -1718,7 +1735,8 @@ class SandboxWindow(QMainWindow):
         self.facts_panel.refresh()
         self.metadata_header.refresh()   # name/formula/param all just changed wholesale
         for pane in self.panes:
-            center, scale = default_view_for(self.session.map.name)
+            center, scale = default_view_for_mode(self.session.map, self.session.param,
+                                                  pane.render_mode)
             pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
             pane.image_view.refresh_critical_points()
             pane.image_view.refresh_orbit_staleness()
@@ -1755,18 +1773,23 @@ class SandboxWindow(QMainWindow):
         # Settings tab. Using the pane's CURRENT resolution (whatever
         # Settings last applied) keeps that concern from fighting this one.
         #
-        # Resets to this map's own default framing (default_view_for),
-        # mode-appropriate for EITHER plane -- the same table already
-        # doubles as "the parameter plane's legible region" (see
-        # DEFAULT_PARAMETER_VIEW_CENTER/SCALE, which is exactly
-        # default_view_for("mandelbrot")) and "the dynamical plane's"
-        # (_apply_param_change uses the identical call for exactly that
-        # purpose) -- NOT a frozen startup snapshot, which is what this
-        # used to restore and was the bug Stage 2 was asked to fix (a
-        # deep zoom from a PREVIOUS session/param is never what "reset"
-        # should mean).
+        # Resets to this map's own MODE-appropriate default framing
+        # (default_view_for_mode) -- the FOCUSED pane's own render_mode
+        # decides which table applies: default_view_for's a-space table
+        # (DEFAULT_PARAMETER_VIEW_CENTER/SCALE is exactly
+        # default_view_for("mandelbrot")) for a parameter-plane pane,
+        # default_dynamical_view's critical-/fixed-point-derived z-space
+        # framing for a dynamical one (_apply_param_change routes through
+        # the identical dispatcher for exactly that purpose). Earlier this
+        # used ONE table for both planes regardless of mode -- resetting a
+        # Julia-set pane jumped it onto the PARAMETER plane's own window,
+        # not a Julia-appropriate one; that was Stage 2's bug to fix. NOT a
+        # frozen startup snapshot either, which is what this used to
+        # restore before that and was a separate, earlier bug (a deep zoom
+        # from a PREVIOUS session/param is never what "reset" should mean).
         pane = self._focused_pane
-        center, scale = default_view_for(self.session.map.name)
+        center, scale = default_view_for_mode(self.session.map, self.session.param,
+                                              pane.render_mode)
         pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
         self._update_status_bar()
         self._debounce_timers[pane].stop()

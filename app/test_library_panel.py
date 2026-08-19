@@ -21,10 +21,14 @@ Run with:
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.library_panel import LibraryPanel, default_view_for
+from app.library_panel import (LibraryPanel, _bounding_view, _DYNAMICAL_VIEW_FALLBACK,
+                               _DYNAMICAL_VIEW_MIN_SCALE, _DYNAMICAL_VIEW_PADDING,
+                               default_dynamical_view, default_view_for, default_view_for_mode)
 from app.session import PRESET_FAMILY_NAMES, Session
 
 failures = 0
@@ -50,6 +54,79 @@ def main() -> None:
     fallback_center, fallback_scale = default_view_for("some-user-family-not-in-the-table")
     check(fallback_center == 0j and fallback_scale > 0,
           "an unlisted name gets the generic fallback view, not a KeyError")
+
+    # ---- dynamical (Julia-set) default framing: mode-aware, Stage 2 ----------------
+    # default_view_for's own table is a-SPACE (the parameter plane) --
+    # default_dynamical_view frames z-space instead, and must NOT just
+    # reuse the same table (that reuse was the Stage 2 bug: resetting a
+    # Julia-set pane jumped it onto the parameter plane's own window).
+    print("\ndynamical default framing (default_dynamical_view):")
+    mandelbrot = cdx.RationalMap.mandelbrot()
+    julia_param = complex(-0.7269, 0.1889)
+    dyn_center, dyn_scale = default_dynamical_view(mandelbrot, julia_param)
+    param_center, param_scale = default_view_for("mandelbrot")
+    check((dyn_center, dyn_scale) != (param_center, param_scale),
+          "the dynamical-plane default framing is NOT the same window as the "
+          "parameter-plane's own table -- that reuse was the actual bug")
+    check(dyn_scale > 0 and math.isfinite(dyn_center.real) and math.isfinite(dyn_center.imag),
+          "the derived framing is a genuinely usable (finite center, positive scale) viewport")
+
+    # newton_cubic(): `a` has NO effect on this map at all (confirmed
+    # elsewhere, describe_parameter_role), but it still has real critical
+    # and fixed points -- the dynamical framing must still derive something
+    # usable from THOSE, independent of describe_parameter_role's own
+    # "unused by this map" finding (a different, unrelated question).
+    newton = cdx.RationalMap.newton_cubic()
+    newton_center, newton_scale = default_dynamical_view(newton, 0j)
+    check(newton_scale > 0 and math.isfinite(newton_center.real) and
+          math.isfinite(newton_center.imag),
+          "newton_cubic() -- whose `a` is unused -- still gets a real, finite dynamical "
+          "default framing, derived from its critical/fixed points regardless")
+
+    # ---- _bounding_view: the pure arithmetic, tested directly ----------------------
+    # Coaxing a real RationalMap into producing a genuinely DEGENERATE
+    # (all-excluded) critical/fixed-point set is impractical -- tested
+    # directly against a plain point list instead (see _bounding_view's
+    # own docstring for why it's factored out).
+    print("\n_bounding_view (the padded-bounding-box arithmetic, pure):")
+    check(_bounding_view([]) == _DYNAMICAL_VIEW_FALLBACK,
+          "no points at all falls back cleanly")
+    check(_bounding_view([complex(float("inf"), 0), complex(0, float("nan"))])
+          == _DYNAMICAL_VIEW_FALLBACK,
+          "only non-finite points (infinity, NaN) falls back the same way")
+    check(_bounding_view([complex(1000, 0), complex(-1000, 0)]) == _DYNAMICAL_VIEW_FALLBACK,
+          "points that are numerically finite but absurdly far out (beyond "
+          "_DYNAMICAL_VIEW_MAGNITUDE_CAP) are excluded same as non-finite ones -- "
+          "if that exclusion leaves nothing, it's a fallback too")
+
+    box_center, box_scale = _bounding_view([complex(-1, 0), complex(1, 0)])
+    check(box_center == 0j, "two points symmetric about the origin center on the origin")
+    check(box_scale == max(1.0 * _DYNAMICAL_VIEW_PADDING, _DYNAMICAL_VIEW_MIN_SCALE),
+          "the box is padded by exactly _DYNAMICAL_VIEW_PADDING over the tight half-width (1.0)")
+
+    single_center, single_scale = _bounding_view([complex(3, 4)])
+    check(single_center == complex(3, 4), "a single point centers exactly on itself")
+    check(single_scale >= _DYNAMICAL_VIEW_MIN_SCALE,
+          "a single point (zero tight half-width) still gets a USABLE window via the "
+          "minimum-scale floor, not a zero-size/degenerate one")
+
+    mixed_center, mixed_scale = _bounding_view([complex(0, 0), complex(1000, 1000)])
+    check(mixed_center == 0j and mixed_scale == _DYNAMICAL_VIEW_MIN_SCALE,
+          "an excluded far-out point does not drag the box out to include it -- with only "
+          "the origin surviving the filter, this is exactly the single-point case above")
+
+    # ---- mode-aware dispatch: default_view_for_mode routes on render_mode ----------
+    print("\nmode-aware dispatch (default_view_for_mode):")
+    check(default_view_for_mode(mandelbrot, julia_param, "parameter")
+          == default_view_for("mandelbrot"),
+          "a PARAMETER-plane mode routes to default_view_for's own a-space table, unchanged")
+    check(default_view_for_mode(mandelbrot, julia_param, "parameter_greens")
+          == default_view_for("mandelbrot"),
+          "...the same for the other PARAMETER_PLANE_MODES entry")
+    check(default_view_for_mode(mandelbrot, julia_param, "julia")
+          == default_dynamical_view(mandelbrot, julia_param),
+          "a DYNAMICAL mode routes to default_dynamical_view instead, using the actual "
+          "map+param (not just the map's name)")
 
     # ---- initial state: list populated from session.library -----------------------
     print("\ninitial state:")

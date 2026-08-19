@@ -28,26 +28,32 @@ what keeps it constructible standalone in tests without ever touching a
 real ~/.complexdynamics/library.txt (see app/test_settings_panel.py's own
 note on the identical concern for Settings).
 
-LOADING resets each visible pane's VIEWPORT to a per-family default
-(_DEFAULT_VIEWS below, via default_view_for) -- hand-picked framings for
-the six built-in shapes' most legible region, falling back to a generic
-default for anything else (a user-saved family). That reset itself now
-happens in on_load's own handler (app/sandbox.py's _on_family_loaded),
-not here: this panel no longer touches any pane's viewport directly (see
-app.pane.Pane -- Session itself has no single viewport to reset anymore).
-Loading a family does not touch render_mode or the parameter either;
-loading has no informed opinion about either one.
+LOADING resets each visible pane's VIEWPORT to a per-family, MODE-aware
+default (default_view_for_mode below) -- hand-picked a-space framings
+(_DEFAULT_VIEWS, via default_view_for) for the six built-in shapes' most
+legible parameter-plane region on a parameter-plane pane, a critical-/
+fixed-point-derived z-space framing (default_dynamical_view) on a
+dynamical-plane one -- using the PARAMETER-plane table for a dynamical
+pane's reset was a real bug (Stage 2): it jumped every Julia-set pane onto
+whatever window makes the parameter plane legible, not the Julia set. That
+reset itself now happens in on_load's own handler (app/sandbox.py's
+_on_family_loaded), not here: this panel no longer touches any pane's
+viewport directly (see app.pane.Pane -- Session itself has no single
+viewport to reset anymore). Loading a family does not touch render_mode or
+the parameter either; loading has no informed opinion about either one.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
                                QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
 
-from app.session import PRESET_FAMILY_NAMES
+import cdx
+from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
 
 # Hand-picked (center, scale) for each built-in preset's most legible
 # region -- not derived from any formula, just where each shape's
@@ -69,6 +75,87 @@ _NAME_ROLE = Qt.ItemDataRole.UserRole
 
 def default_view_for(name: str) -> tuple[complex, float]:
     return _DEFAULT_VIEWS.get(name, _FALLBACK_VIEW)
+
+
+# The dynamical (Julia-set) plane's OWN default framing has nothing to do
+# with the table above: _DEFAULT_VIEWS/default_view_for frames a-SPACE (the
+# parameter plane), and using it for z-space too was a real bug -- resetting
+# or loading a family while looking at a Julia set jumped to whatever window
+# happens to make the PARAMETER plane legible (e.g. mandelbrot's own
+# (-0.5, 1.5)), not the dynamical plane's. See default_view_for_mode below
+# for the actual per-pane routing.
+_DYNAMICAL_VIEW_FALLBACK: tuple[complex, float] = (complex(0.0, 0.0), 2.0)
+# Points farther out than this are treated as "may as well be infinity" for
+# framing purposes -- a legitimate critical/fixed point this far from the
+# origin would zoom the default view out past anywhere the actual filled
+# Julia set structure is likely to be legible, which defeats the point of a
+# *default* framing (a numerically-finite but dynamically-irrelevant outlier
+# should not dominate the box).
+_DYNAMICAL_VIEW_MAGNITUDE_CAP = 50.0
+_DYNAMICAL_VIEW_PADDING = 1.5   # multiplies the tight half-width so points sit inside the frame, not on its edge
+_DYNAMICAL_VIEW_MIN_SCALE = 0.5   # a degenerate (single-point, or nearly so) box still gets a usable window
+
+
+def default_dynamical_view(rational_map: cdx.RationalMap, param: complex) -> tuple[complex, float]:
+    """The dynamical plane's own default framing for THIS map at THIS
+    parameter -- a padded bounding box around its finite critical and fixed
+    points (Fatou: every attracting cycle attracts a critical point, so
+    critical points are where the interesting structure clusters; fixed
+    points mark where a filled Julia set's boundary characteristically
+    threads through), excluding poles/infinity/absurdly-far-out points (see
+    _DYNAMICAL_VIEW_MAGNITUDE_CAP) and falling back to
+    _DYNAMICAL_VIEW_FALLBACK when nothing usable survives that filter (a
+    degenerate map, or one whose only critical/fixed points are excluded).
+
+    Genuinely depends on `param`, not just the map's NAME -- unlike
+    default_view_for above, this can't be a name-keyed table: which points
+    are critical/fixed (and therefore where the box goes) is a real function
+    of the currently-bound parameter for families where `a` affects a pole's
+    location or a term's exponent-bearing coefficient.
+    """
+    facts = cdx.dynamical_facts(rational_map, param)
+    points = list(facts.critical_points) + [fp.point for fp in facts.fixed_points]
+    return _bounding_view(points)
+
+
+def _bounding_view(points: list[complex]) -> tuple[complex, float]:
+    """The actual padded-bounding-box arithmetic default_dynamical_view
+    uses, factored out as a pure function of a plain point list so it's
+    directly testable without needing a real cdx.RationalMap to coax into
+    producing a specific (in particular, a genuinely DEGENERATE/all-
+    excluded) set of critical/fixed points -- the same reason
+    app.sandbox._orbit_line_segments/drawable_polyline_segments exist as
+    their own testable functions rather than being buried inside a paint
+    method.
+    """
+    finite_points = [p for p in points
+                     if math.isfinite(p.real) and math.isfinite(p.imag)
+                     and abs(p) < _DYNAMICAL_VIEW_MAGNITUDE_CAP]
+    if not finite_points:
+        return _DYNAMICAL_VIEW_FALLBACK
+
+    min_re = min(p.real for p in finite_points)
+    max_re = max(p.real for p in finite_points)
+    min_im = min(p.imag for p in finite_points)
+    max_im = max(p.imag for p in finite_points)
+    center = complex((min_re + max_re) / 2.0, (min_im + max_im) / 2.0)
+    half_width = max(max_re - min_re, max_im - min_im) / 2.0
+    scale = max(half_width * _DYNAMICAL_VIEW_PADDING, _DYNAMICAL_VIEW_MIN_SCALE)
+    return center, scale
+
+
+def default_view_for_mode(rational_map: cdx.RationalMap, param: complex,
+                          render_mode: str) -> tuple[complex, float]:
+    """The single entry point every pane-viewport reset should go through
+    (Stage 2): a-space framing (default_view_for, keyed on the map's own
+    NAME) for a PARAMETER_PLANE_MODE, z-space framing
+    (default_dynamical_view, which needs the actual map+param) for a
+    dynamical one -- routes on render_mode so call sites never have to
+    remember which table applies to which plane themselves.
+    """
+    if render_mode in PARAMETER_PLANE_MODES:
+        return default_view_for(rational_map.name)
+    return default_dynamical_view(rational_map, param)
 
 
 class LibraryPanel(QWidget):
@@ -182,9 +269,8 @@ class LibraryPanel(QWidget):
         # Viewport reset to this family's default used to happen HERE, but
         # session no longer owns a viewport (see app.pane.Pane) -- on_load
         # (app/sandbox.py's _on_family_loaded) does it now, for whichever
-        # pane(s) it owns, via default_view_for(self.session.map.name)
-        # (equivalent to default_view_for(name) here, since load_from_
-        # library just set session.map to this same name's map).
+        # pane(s) it owns, via default_view_for_mode(self.session.map, ...)
+        # -- MODE-aware per pane (Stage 2), not just name-keyed.
         name = self._selected_name()
         if name is None:
             return

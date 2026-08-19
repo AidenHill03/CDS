@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 from app.colour import PALETTES
-from app.library_panel import default_view_for
+from app.library_panel import default_dynamical_view, default_view_for
 from app.pane import Pane
 from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
                          drawable_polyline_segments)
@@ -1229,15 +1229,30 @@ def main() -> None:
     print("\nReset View:")
     # window.session.map.name is "renamed-live" at this point (set just
     # above) -- not a name default_view_for recognizes, so it falls back to
-    # the generic view. Using a renamed map here is deliberate: if Reset
-    # View still restored a frozen startup snapshot (the Stage 1/pre-Stage-2
-    # bug), it would land on DEFAULT_PARAMETER_VIEW_CENTER/SCALE instead of
-    # this fallback, so this distinguishes "family default" from "frozen
-    # snapshot" instead of the two coincidentally agreeing.
-    expected_center, expected_scale = default_view_for(window.session.map.name)
-    check(expected_center == complex(0, 0) and expected_scale == 2.0,
+    # the generic (a-space) view. Using a renamed map here is deliberate:
+    # if Reset View still restored a frozen startup snapshot (the
+    # pre-Stage-2 bug), it would land on DEFAULT_PARAMETER_VIEW_CENTER/
+    # SCALE instead of this fallback, so this distinguishes "family
+    # default" from "frozen snapshot" instead of the two coincidentally
+    # agreeing.
+    expected_param_center, expected_param_scale = default_view_for(window.session.map.name)
+    check(expected_param_center == complex(0, 0) and expected_param_scale == 2.0,
           "sanity: 'renamed-live' isn't a recognized family name, so default_view_for "
           "falls back to the generic view")
+
+    # window.pane is on "julia" (dynamical) here (last set by the mode
+    # selector section above) -- Reset View on it must frame the JULIA
+    # SET's own default (default_dynamical_view), never default_view_for's
+    # a-space table -- reusing that table for a dynamical pane's reset was
+    # exactly Stage 2's bug (it jumped a Julia-set pane onto whatever
+    # window makes the PARAMETER plane legible instead).
+    check(window.pane.render_mode == "julia", "sanity: pane A is dynamical here")
+    expected_dyn_center, expected_dyn_scale = default_dynamical_view(window.session.map,
+                                                                     window.session.param)
+    check((expected_dyn_center, expected_dyn_scale)
+          != (expected_param_center, expected_param_scale),
+          "sanity: the dynamical and parameter-plane default framings are genuinely "
+          "different windows here, so the two checks below can't pass by coincidence")
 
     # Resolution stays at new_resolution (from the Settings Apply above) --
     # only center/scale are thrown away here, to isolate what Reset View
@@ -1245,22 +1260,34 @@ def main() -> None:
     window.pane.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
     window._reset_view()
     vp = window.pane.viewport
-    check(close(vp.center, expected_center) and abs(vp.scale - expected_scale) < 1e-12,
-          "Reset View resets to this map's mode-appropriate default framing "
-          "(default_view_for), NOT a frozen viewport captured at startup -- "
-          "that was the pre-Stage-2 bug")
+    check(close(vp.center, expected_dyn_center) and abs(vp.scale - expected_dyn_scale) < 1e-9,
+          "Reset View on a DYNAMICAL pane frames the Julia set (default_dynamical_view), "
+          "NOT a frozen viewport captured at startup and NOT the parameter plane's own "
+          "window -- the pre-Stage-2 and Stage 2 bugs, respectively")
     check(vp.resolution == new_resolution,
           "Reset View does NOT revert resolution -- that is a Settings concern (see the last "
           "Apply above), not part of 'the view' pan/zoom resets")
+
+    # Switch that SAME pane to a parameter-plane mode and confirm Reset
+    # View correctly switches which table it consults too.
+    window.mode_combo.setCurrentText("parameter")
+    window.pane.viewport = cdx.Viewport(complex(5, 5), 0.001, new_resolution)
+    window._reset_view()
+    vp_param = window.pane.viewport
+    check(close(vp_param.center, expected_param_center) and
+          abs(vp_param.scale - expected_param_scale) < 1e-9,
+          "Reset View on a PARAMETER-plane pane still gives default_view_for's own framing")
+    window.mode_combo.setCurrentText("julia")   # restore for the sections below
 
     # Reset View acts on the FOCUSED pane, not always pane A.
     window.pane2.viewport = cdx.Viewport(complex(7, 7), 0.002, window.pane2.viewport.resolution)
     window._set_focused_pane(window.pane2)
     pane_center_before = window.pane.viewport.center
     window._reset_view()
-    check(close(window.pane2.viewport.center, expected_center) and
-          abs(window.pane2.viewport.scale - expected_scale) < 1e-12,
-          "Reset View acts on the FOCUSED pane -- here pane2, once it is focused")
+    check(close(window.pane2.viewport.center, expected_dyn_center) and
+          abs(window.pane2.viewport.scale - expected_dyn_scale) < 1e-9,
+          "Reset View acts on the FOCUSED pane -- here pane2 (also dynamical), once it is "
+          "focused")
     check(window.pane.viewport.center == pane_center_before,
           "...and leaves the OTHER (unfocused) pane's viewport completely untouched")
     window._set_focused_pane(window.pane)   # restore focus to pane A for the sections below
@@ -1292,9 +1319,14 @@ def main() -> None:
     check(window.session.param == complex(2, -3),
           "committing the field is the SAME source of truth session.param reads")
     check(param_committed == [], "field commit does not go through the plane-click signal path")
-    check(close(window.pane.viewport.center, complex(-0.5, 0.0)) and
-          abs(window.pane.viewport.scale - 1.5) < 1e-9,
-          "the dynamical-plane viewport resets to this map's own default on a param change")
+    # The dynamical-plane's OWN default (default_dynamical_view), not
+    # default_view_for's a-space table -- Stage 2's fix.
+    expected_field_center, expected_field_scale = default_dynamical_view(window.session.map,
+                                                                         window.session.param)
+    check(close(window.pane.viewport.center, expected_field_center) and
+          abs(window.pane.viewport.scale - expected_field_scale) < 1e-9,
+          "the dynamical-plane viewport resets to this map's own DYNAMICAL-plane default on "
+          "a param change, not the parameter plane's")
     check(window.pane.render_mode == "julia",
           "committing the FIELD (not a plane click) does not switch planes on its own")
 
@@ -1332,10 +1364,17 @@ def main() -> None:
     check(close(window.param_field.value, window.session.param, 1e-2),
           "the field is populated with the SAME value the click just set -- the two never diverge")
 
-    expected_center, expected_scale = default_view_for(window.session.map.name)
+    # pane2 is dynamical ("julia"), so this MUST be default_dynamical_view's
+    # own critical-/fixed-point-derived framing (via the mode-aware
+    # dispatcher _apply_param_change now routes through), not
+    # default_view_for's a-space table -- Stage 2's fix, exercised here
+    # through the Stage 3 coupling path specifically.
+    expected_center, expected_scale = default_dynamical_view(window.session.map,
+                                                              window.session.param)
     check(close(window.pane2.viewport.center, expected_center) and
           abs(window.pane2.viewport.scale - expected_scale) < 1e-9,
-          "the PARTNER dynamical pane's viewport resets to this map's own default framing")
+          "the PARTNER dynamical pane's viewport resets to this map's own DYNAMICAL-plane "
+          "default framing, not the parameter plane's")
     check(window.pane2.viewport.center != pane2_viewport_before.center or
           abs(window.pane2.viewport.scale - pane2_viewport_before.scale) > 1e-15,
           "sanity: the partner's viewport genuinely changed, not coincidentally already there")
