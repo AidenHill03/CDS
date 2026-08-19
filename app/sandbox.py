@@ -22,6 +22,7 @@ import os
 import sys
 
 import numpy as np
+import shiboken6
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
@@ -235,9 +236,33 @@ class RenderSignals(QObject):
     """QRunnable isn't itself a QObject and so cannot emit signals; this is
     the companion object RenderTask uses instead. Created on the GUI thread
     (in RenderTask.__init__, before the task is handed to the thread pool),
-    emitted from the worker thread -- Qt detects the cross-thread emission
-    automatically and queues delivery to the GUI thread's event loop, which
-    is what makes it safe to update widgets from the connected slots.
+    emitted from the worker thread.
+
+    Qt only queues a cross-thread emission to the GUI thread's event loop
+    when it can determine the RECEIVER's thread affinity -- which requires
+    an actual QObject receiver, not a bare function/lambda. A crash was
+    once traced to exactly this: SandboxWindow._start_render used to
+    connect these signals to context-less lambdas, so PySide had no
+    receiver to check and fell back to a DIRECT (same-thread, i.e.
+    worker-thread) call -- which ran widget-touching slot code off the GUI
+    thread AND, worse, let a worker-thread slot invocation pop the task's
+    own entry from Pane.pending_tasks (the last thing keeping this very
+    RenderSignals object alive) from INSIDE its own emit() call, on the
+    worker thread. Once that reference (and _Runnable's, autoDelete'd by
+    QThreadPool right after run() returns, also worker-thread-side) both
+    dropped, this QObject's C++ destructor could run mid-emit, on the
+    worker thread, racing the GUI thread's event loop trying to deliver a
+    still-pending posted event to it -- EXC_BAD_ACCESS in Shiboken's
+    QObjectWrapper::event.
+
+    The fix (see SandboxWindow._start_render/_on_partial_ready/
+    _on_full_ready/_on_render_failed): connect these signals ONLY to
+    genuine bound methods of a QObject living on the GUI thread (self, the
+    window) -- PySide then correctly detects the cross-thread case and
+    queues delivery, which both runs the slot body on the GUI thread AND
+    means Pane.pending_tasks.pop() (the release of the GUI side's own
+    reference) happens on the GUI thread too, so this object's last
+    reference is never dropped from the worker thread.
     """
     partial_ready = Signal(int, object, object)   # request_id, render_map() payload, buffer viewport
     full_ready = Signal(int, object, object)       # request_id, render_map() payload, buffer viewport
@@ -1047,23 +1072,38 @@ class SandboxWindow(QMainWindow):
         # app.pane.Pane) to keep results from crossing between them; the
         # pool executing the work is one app-wide resource regardless.
         self._thread_pool = QThreadPool()
-        # RenderTask (and the RenderSignals QObject it owns) has no other
-        # Python-side strong reference once _start_render() returns -- the
-        # QRunnable adapter is only reachable from QThreadPool's C++ side.
-        # Without this, Python's GC can (and does: this was a real crash,
-        # not a theoretical one -- "RuntimeError: Signal source has been
-        # deleted") collect the task while its worker thread is still
-        # running and about to emit through it. Entries for a task that
-        # completes (or fails) normally are removed when its final signal
-        # fires. A CANCELLED task emits nothing at all (see RenderTask.run),
-        # so its entry is instead swept on the NEXT _start_render() call for
-        # THAT PANE, once cancellation (which per-column checking bounds to
-        # roughly one column's worth of work, not the full render) has had
-        # a full round to actually finish -- the same "good enough, not
-        # provably instant" tradeoff closeEvent below makes explicitly for
-        # the same reason. Lives on each Pane now (pane.pending_tasks), not
-        # here -- see this whole comment's own point: results must never
-        # cross between panes, and neither should their bookkeeping.
+        # Pane.pending_tasks (populated in _start_render) is the GUI-side
+        # owner of every in-flight RenderTask -- NOT the _Runnable adapter
+        # QThreadPool holds (that one is setAutoDelete(True) and gets torn
+        # down from the WORKER thread the instant run() returns, which must
+        # never be the thing that drops a RenderTask/RenderSignals' last
+        # reference -- see RenderSignals' own docstring for the crash this
+        # caused). pending_tasks keeps the task alive until a GUI-thread
+        # handler (_on_full_ready/_on_render_failed, or the stale-sweep
+        # below for a cancelled task that never emits a terminal signal at
+        # all) explicitly releases it, which is also where
+        # task.signals.deleteLater() posts the actual C++ teardown back to
+        # the GUI thread's event loop rather than leaving it to whichever
+        # thread's refcounting happens to hit zero last. Entries for a task
+        # that completes (or fails) normally are removed when its final
+        # signal is DELIVERED (queued to the GUI thread -- see
+        # _on_full_ready/_on_render_failed). A CANCELLED task emits nothing
+        # at all (see RenderTask.run), so its entry is instead swept on the
+        # NEXT _start_render() call for THAT PANE, once cancellation (which
+        # per-column checking bounds to roughly one column's worth of work,
+        # not the full render) has had a full round to actually finish --
+        # the same "good enough, not provably instant" tradeoff closeEvent
+        # below makes explicitly for the same reason. Lives on each Pane
+        # (pane.pending_tasks), not here -- results must never cross
+        # between panes, and neither should their bookkeeping.
+        #
+        # request_id is GLOBAL (drawn from this one counter), not per-pane,
+        # even though each pane only ever compares against its OWN latest
+        # id (see Pane.request_id) -- a globally-unique id is what lets
+        # _pane_for_render_id resolve which pane a signal's request_id
+        # belongs to with a plain pending_tasks-membership scan, including
+        # for a STALE id no pane currently considers current.
+        self._next_render_id = 0
 
         # One debounce timer PER PANE -- an ambient edit (scroll/drag) on
         # one pane must not restart, or be satisfied by, a render of the
@@ -1738,11 +1778,18 @@ class SandboxWindow(QMainWindow):
     # for one pane must never paint a different one, and this is what
     # makes that true even once a second pane exists (Stage 2). The
     # thread pool stays shared (one app-wide resource); each RenderTask's
-    # signals are connected via a small lambda that closes over WHICH pane
-    # this particular render was for, so _on_partial_ready/_on_full_ready/
-    # _on_render_failed know which pane's request_id/pending_tasks/
-    # image_view to check and update, without RenderTask/RenderSignals
-    # needing to carry a pane id of their own.
+    # signals are connected to plain BOUND METHODS of this window (a
+    # QObject living on the GUI thread), never to a context-less lambda --
+    # see RenderSignals' own docstring for the crash that caused. The
+    # handlers below resolve which pane a signal belongs to via
+    # _pane_for_render_id (request_id is GLOBALLY unique -- see
+    # self._next_render_id) rather than a lambda closing over `pane`.
+    def _pane_for_render_id(self, request_id: int) -> Pane | None:
+        for pane in self.panes:
+            if request_id in pane.pending_tasks:
+                return pane
+        return None   # already cleaned up (or, in a test, never dispatched by this window at all)
+
     def _start_render(self, pane: Pane) -> None:
         # Every still-pending task FOR THIS PANE is now stale -- cancel it
         # immediately rather than letting it run to completion only to be
@@ -1755,6 +1802,15 @@ class SandboxWindow(QMainWindow):
         for stale_id, stale_task in list(pane.pending_tasks.items()):
             if stale_task.cancel.is_cancelled:
                 del pane.pending_tasks[stale_id]
+                # This IS the GUI thread (every _start_render caller is a
+                # GUI-thread handler), so this deletion already satisfies
+                # RenderSignals' "destroyed on the GUI thread" requirement
+                # on its own -- deleteLater() is still used, not a bare
+                # `del`, purely for the same defense-in-depth reason
+                # _on_full_ready/_on_render_failed use it below: it posts
+                # the actual C++ teardown through Qt's own event queue
+                # instead of depending on Python refcount timing.
+                stale_task.signals.deleteLater()
             else:
                 stale_task.cancel.cancel()
 
@@ -1767,8 +1823,9 @@ class SandboxWindow(QMainWindow):
             pane.image_view.update()
             return
 
-        pane.request_id += 1
-        request_id = pane.request_id
+        self._next_render_id += 1
+        request_id = self._next_render_id
+        pane.request_id = request_id
 
         vp = pane.viewport
         viewport_snapshot = cdx.Viewport(vp.center, vp.scale, vp.resolution)
@@ -1778,34 +1835,56 @@ class SandboxWindow(QMainWindow):
         task = RenderTask(request_id, self.session.map, self.session.param,
                           viewport_snapshot, settings_snapshot, pane.render_mode,
                           cdx.CancelToken(), self.session.cache)
-        task.signals.partial_ready.connect(
-            lambda rid, payload, bvp, p=pane: self._on_partial_ready(p, rid, payload, bvp))
-        task.signals.full_ready.connect(
-            lambda rid, payload, bvp, p=pane: self._on_full_ready(p, rid, payload, bvp))
-        task.signals.failed.connect(
-            lambda rid, message, p=pane: self._on_render_failed(p, rid, message))
+        # Bound methods, not lambdas: PySide resolves `self` (this window,
+        # a QObject on the GUI thread) as the receiver and correctly
+        # queues delivery across threads -- see RenderSignals' docstring.
+        task.signals.partial_ready.connect(self._on_partial_ready)
+        task.signals.full_ready.connect(self._on_full_ready)
+        task.signals.failed.connect(self._on_render_failed)
         pane.pending_tasks[request_id] = task
         self._thread_pool.start(_Runnable(task))
 
-    def _on_partial_ready(self, pane: Pane, request_id: int, payload,
-                          buffer_viewport: cdx.Viewport) -> None:
+    def _on_partial_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
+        pane = self._pane_for_render_id(request_id)
+        if pane is None:
+            return   # unknown/already-cleaned-up request -- nothing to do
         if request_id != pane.request_id:
             return   # superseded by a newer request for THIS pane; discard
+        if not shiboken6.isValid(pane.image_view):
+            return   # this pane's widget is already torn down (e.g. window closing)
         pane.image_view.set_image(payload, buffer_viewport)
         self._update_status_bar()
 
-    def _on_full_ready(self, pane: Pane, request_id: int, payload,
-                       buffer_viewport: cdx.Viewport) -> None:
-        pane.pending_tasks.pop(request_id, None)   # this task is done; safe to release
+    def _on_full_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
+        pane = self._pane_for_render_id(request_id)
+        if pane is None:
+            return
+        # This IS the GUI thread (bound-method connection -- see
+        # _start_render), so popping here (releasing the GUI side's own
+        # reference) and the deleteLater() below both genuinely happen on
+        # the GUI thread, closing the race RenderSignals' docstring
+        # describes.
+        task = pane.pending_tasks.pop(request_id, None)
+        if task is not None:
+            task.signals.deleteLater()
         if request_id != pane.request_id:
+            return   # superseded by a newer request for THIS pane; discard
+        if not shiboken6.isValid(pane.image_view):
             return
         pane.image_view.set_image(payload, buffer_viewport)
         self._update_status_bar()
 
-    def _on_render_failed(self, pane: Pane, request_id: int, message: str) -> None:
-        pane.pending_tasks.pop(request_id, None)
+    def _on_render_failed(self, request_id: int, message: str) -> None:
+        pane = self._pane_for_render_id(request_id)
+        if pane is None:
+            return
+        task = pane.pending_tasks.pop(request_id, None)
+        if task is not None:
+            task.signals.deleteLater()
         if request_id != pane.request_id:
             return
+        if not shiboken6.isValid(self):
+            return   # the window itself is already torn down
         self.statusBar().showMessage(f"render failed: {message}")
 
     # ---- status bar: scale + precision-floor warning ----------------------------

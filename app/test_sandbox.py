@@ -23,6 +23,7 @@ import threading
 import time
 
 import numpy as np
+import shiboken6
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
@@ -958,12 +959,106 @@ def main() -> None:
     check(current_id != stale_id, "a new request gets a new id")
 
     window.image_view._pixmap = None
-    window._on_full_ready(window.pane, stale_id, np.zeros((10, 10)), cdx.Viewport())
+    window._on_full_ready(stale_id, np.zeros((10, 10)), cdx.Viewport())
     check(window.image_view._pixmap is None,
           "a result tagged with a superseded request id is discarded, not displayed")
 
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "the current (non-superseded) request still completes normally")
+
+    # ---- RenderSignals lifetime: GUI-thread release + deleteLater teardown ----------
+    # This offscreen suite calls every handler directly, on this one thread
+    # -- it CANNOT reproduce the actual cross-thread race Stage 1 exists
+    # for (see RenderSignals' own docstring for the crash: a context-less
+    # lambda connection let a worker thread run these handlers inline,
+    # including the pending_tasks.pop() that drops the object's own last
+    # reference, mid-emit, off the GUI thread). Calling _on_full_ready/
+    # _on_render_failed directly here IS, from the object's own
+    # perspective, indistinguishable from a genuinely-queued cross-thread
+    # delivery landing on the GUI thread -- which is exactly the property
+    # under test (release + teardown happen wherever this call runs, and
+    # the fix's whole point is that a real cross-thread emission is now
+    # QUEUED to land HERE rather than running inline on the worker
+    # thread). The actual race -- rapid pan/zoom/mode-switch while renders
+    # churn on a low-core machine -- needs real on-machine stress testing;
+    # this suite cannot exercise a genuine cross-thread emission at all.
+    print("\nRenderSignals lifetime (GUI-thread release, deleteLater teardown):")
+    probe_id = 10_000_001   # a request_id no real render has ever used
+    check(window._pane_for_render_id(probe_id) is None,
+          "_pane_for_render_id returns None for a request_id no pane is tracking -- the "
+          "'unknown/already-cleaned-up request' no-op path")
+
+    probe_task = RenderTask(probe_id, window.session.map, window.session.param,
+                            window.pane.viewport, window.session.render_settings, "julia",
+                            cdx.CancelToken())
+    window.pane.pending_tasks[probe_id] = probe_task
+    window.pane.request_id = probe_id
+    check(window._pane_for_render_id(probe_id) is window.pane,
+          "_pane_for_render_id resolves a pending request id to the pane whose pending_tasks "
+          "actually holds it")
+
+    signals_ref = probe_task.signals
+    check(shiboken6.isValid(signals_ref), "sanity: the signals object starts out valid")
+    window._on_full_ready(probe_id, np.zeros((4, 4)), cdx.Viewport())
+    check(probe_id not in window.pane.pending_tasks,
+          "_on_full_ready releases the GUI side's own reference (pops pending_tasks) when "
+          "its handler runs")
+    check(shiboken6.isValid(signals_ref),
+          "deleteLater() only SCHEDULES teardown -- the object is still valid immediately "
+          "after the handler returns, not synchronously destroyed")
+    QTest.qWait(20)   # a bare processEvents() call doesn't reliably flush a DeferredDelete
+    check(not shiboken6.isValid(signals_ref),
+          "...and is actually torn down once the event loop processes the deferred delete -- "
+          "on THIS (the GUI) thread, never the worker thread")
+
+    # Same release+teardown path for the failure signal.
+    probe_id2 = 10_000_002
+    probe_task2 = RenderTask(probe_id2, window.session.map, window.session.param,
+                             window.pane.viewport, window.session.render_settings, "julia",
+                             cdx.CancelToken())
+    window.pane.pending_tasks[probe_id2] = probe_task2
+    signals_ref2 = probe_task2.signals
+    window._on_render_failed(probe_id2, "synthetic failure for this test")
+    check(probe_id2 not in window.pane.pending_tasks,
+          "_on_render_failed releases pending_tasks' reference too, not just _on_full_ready's")
+    QTest.qWait(20)   # a bare processEvents() call doesn't reliably flush a DeferredDelete
+    check(not shiboken6.isValid(signals_ref2), "...and its RenderSignals is torn down the same way")
+
+    # A stale request id resolves to the RIGHT pane even when it belongs to
+    # pane2, not pane -- the global id space (self._next_render_id) is what
+    # makes plain pending_tasks-membership scanning unambiguous across panes.
+    window.pane2.viewport = cdx.Viewport(complex(0, 0), 1.5, 40)
+    window._start_render(window.pane2)
+    pane2_request_id = window.pane2.request_id
+    check(window._pane_for_render_id(pane2_request_id) is window.pane2,
+          "_pane_for_render_id resolves pane2's own request id to pane2, not pane -- ids are "
+          "globally unique across both panes' independent per-pane counters")
+    wait_for(lambda: pane2_request_id not in window.pane2.pending_tasks, timeout_ms=10000)
+
+    # Torn-down-widget guard: a result delivered for a pane whose ImageView is
+    # already gone (e.g. mid-shutdown) is a no-op, not a crash.
+    guard_session = Session()
+    guard_session.map = cdx.RationalMap.mandelbrot()
+    guard_pane, guard_view = _pane_view(guard_session, complex(0, 0), 1.5, 40, "julia")
+    guard_id = 10_000_003
+    guard_task = RenderTask(guard_id, guard_session.map, guard_session.param,
+                            guard_pane.viewport, guard_session.render_settings, "julia",
+                            cdx.CancelToken())
+    guard_pane.pending_tasks[guard_id] = guard_task
+    guard_pane.request_id = guard_id
+    guard_view.deleteLater()
+    QTest.qWait(20)   # a bare processEvents() call doesn't reliably flush a DeferredDelete
+    check(not shiboken6.isValid(guard_view), "sanity: the pane's ImageView is now really torn down")
+    original_panes = window.panes
+    window.panes = [guard_pane]   # so _pane_for_render_id (scans self.panes) can find it
+    try:
+        window._on_full_ready(guard_id, np.zeros((4, 4)), cdx.Viewport())   # must not raise
+        check(True, "_on_full_ready no-ops (doesn't crash) when the pane's widget is already "
+                   "torn down, instead of touching a dead C++ object")
+    except Exception as exc:
+        check(False, f"_on_full_ready raised on a torn-down pane's result: {exc!r}")
+    finally:
+        window.panes = original_panes
 
     # ---- Settings tab: Apply reaches the session and triggers a real re-render ------
     print("\nsettings tab:")
