@@ -760,6 +760,56 @@ def main() -> None:
     check(about.windowTitle() == "About ComplexDynamics", "the dialog's own title matches too")
     about.close()
 
+    # ---- View menu: mirrors the toolbar's own controls, bidirectionally (Stage 3) ---
+    print("\nView menu:")
+    check(menu_titles == ["File", "View", "Help"],
+          "the menu bar is File, View, Help, in that order")
+    view_action_texts = [a.text() for a in window.view_menu.actions() if a.text()]
+    check(view_action_texts == ["Reset View", "Coupled View", "Critical Points",
+                                "Trace Orbits", "Connect Orbit Points"],
+          "the View menu has exactly the toolbar's own view controls, in order "
+          "(blank entries are separators, filtered out above)")
+
+    check(window.reset_view_action.isCheckable() is False,
+          "Reset View is a plain triggerable action, not a checkable toggle")
+    coupled_before = window.coupled_checkbox.isChecked()
+    window.reset_view_action.trigger()
+    check(window.coupled_checkbox.isChecked() == coupled_before,
+          "triggering Reset View from the menu doesn't touch unrelated toolbar state")
+
+    # Checkbox -> action, for every mirrored toggle.
+    for checkbox, action, label in (
+        (window.coupled_checkbox, window.coupled_view_action, "Coupled View"),
+        (window.critical_points_checkbox, window.critical_points_action, "Critical Points"),
+        (window.trace_orbits_checkbox, window.trace_orbits_action, "Trace Orbits"),
+        (window.orbit_connect_lines_checkbox, window.orbit_connect_lines_action,
+         "Connect Orbit Points"),
+    ):
+        before = checkbox.isChecked()
+        checkbox.setChecked(not before)
+        check(action.isChecked() == (not before),
+              f"toggling the '{label}' TOOLBAR checkbox updates the menu action to match")
+        checkbox.setChecked(before)   # restore
+        check(action.isChecked() == before,
+              f"...and toggling it back restores the menu action too")
+
+    # Action -> checkbox, and (for the two overlay toggles) the REAL
+    # behavior they're wired to, not just each other's checked state.
+    window.critical_points_action.setChecked(True)
+    check(window.critical_points_checkbox.isChecked() is True,
+          "toggling the 'Critical Points' MENU action updates the toolbar checkbox to match")
+    check(window.image_view._show_critical_points is True and
+          window.image_view2._show_critical_points is True,
+          "...and the menu action genuinely reaches the real per-pane flag, through the "
+          "checkbox it's bound to -- not just a second copy of the checked state")
+    window.critical_points_action.setChecked(False)
+
+    coupled_via_action_before = window.coupled_checkbox.isChecked()
+    window.coupled_view_action.setChecked(not coupled_via_action_before)
+    check(window.coupled_checkbox.isChecked() == (not coupled_via_action_before),
+          "toggling the 'Coupled View' menu action updates the toolbar checkbox too")
+    window.coupled_view_action.setChecked(coupled_via_action_before)   # restore
+
     # ---- render is off the GUI thread: a slow render must not block processEvents --
     # Fast built-in family (not a term-based custom map: slower per pixel,
     # and unnecessarily so for what this is testing), single render thread,

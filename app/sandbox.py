@@ -1312,6 +1312,53 @@ class SandboxWindow(QMainWindow):
         self.open_experiment_action = self.file_menu.addAction("Open Experiment...")
         self.open_experiment_action.triggered.connect(self._on_open_experiment)
 
+        # ---- View menu: mirrors the toolbar's own view controls (Stage 3) -------
+        # Same store-on-self reason as file_menu/help_menu -- see help_menu's own
+        # comment below. The toolbar stays for now (its fate is a separate,
+        # later redesign); this menu doesn't replace it, it MIRRORS it -- every
+        # checkable action here is bound BIDIRECTIONALLY to its toolbar
+        # checkbox (each one's toggled signal sets the other's checked state,
+        # which Qt no-ops when the value doesn't actually change, so this
+        # can't loop). The checkbox stays the ONE place the actual behavior
+        # (set_show_critical_points etc., _relayout_panes) is wired to; each
+        # menu action is purely a second control surface for that SAME state,
+        # never a parallel copy that could drift out of sync with it.
+        #
+        # No Experiment/Map menu for mode selection: with TWO independent
+        # per-pane mode combos (Stage 2) rather than one window-level mode,
+        # "the map's mode" isn't a single menu-shaped concept any more --
+        # which pane would a single menu control? Left on the per-pane
+        # combos, as the spec's own "otherwise skip" allows.
+        self.view_menu = self.menuBar().addMenu("View")
+        self.reset_view_action = self.view_menu.addAction("Reset View")
+        self.reset_view_action.triggered.connect(self._reset_view)
+        self.view_menu.addSeparator()
+
+        self.coupled_view_action = self.view_menu.addAction("Coupled View")
+        self.coupled_view_action.setCheckable(True)
+        self.coupled_view_action.setChecked(self.coupled_checkbox.isChecked())
+        self.coupled_view_action.toggled.connect(self.coupled_checkbox.setChecked)
+        self.coupled_checkbox.toggled.connect(self.coupled_view_action.setChecked)
+        self.view_menu.addSeparator()
+
+        self.critical_points_action = self.view_menu.addAction("Critical Points")
+        self.critical_points_action.setCheckable(True)
+        self.critical_points_action.setChecked(self.critical_points_checkbox.isChecked())
+        self.critical_points_action.toggled.connect(self.critical_points_checkbox.setChecked)
+        self.critical_points_checkbox.toggled.connect(self.critical_points_action.setChecked)
+
+        self.trace_orbits_action = self.view_menu.addAction("Trace Orbits")
+        self.trace_orbits_action.setCheckable(True)
+        self.trace_orbits_action.setChecked(self.trace_orbits_checkbox.isChecked())
+        self.trace_orbits_action.toggled.connect(self.trace_orbits_checkbox.setChecked)
+        self.trace_orbits_checkbox.toggled.connect(self.trace_orbits_action.setChecked)
+
+        self.orbit_connect_lines_action = self.view_menu.addAction("Connect Orbit Points")
+        self.orbit_connect_lines_action.setCheckable(True)
+        self.orbit_connect_lines_action.setChecked(self.orbit_connect_lines_checkbox.isChecked())
+        self.orbit_connect_lines_action.toggled.connect(self.orbit_connect_lines_checkbox.setChecked)
+        self.orbit_connect_lines_checkbox.toggled.connect(self.orbit_connect_lines_action.setChecked)
+
         # On macOS, Qt moves a menu titled "Help" (and any action inside
         # named "About <AppName>") into the system application menu
         # automatically -- this is the standard, idiomatic way to get a
