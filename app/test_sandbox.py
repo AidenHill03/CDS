@@ -35,8 +35,8 @@ import app.sandbox as sandbox_module
 from app.colour import PALETTES
 from app.library_panel import _DYNAMICAL_VIEW_FALLBACK, default_dynamical_view, default_view_for
 from app.pane import Pane
-from app.sandbox import (ImageView, RenderTask, SandboxWindow, array_to_qimage,
-                         drawable_polyline_segments)
+from app.sandbox import (ExportImageDialog, ImageView, RenderTask, SandboxWindow,
+                         array_to_qimage, compose_export_image, drawable_polyline_segments)
 from app.session import Session, render_map
 from app.settings import Settings
 
@@ -1712,6 +1712,74 @@ def main() -> None:
         sandbox_module.QMessageBox.critical = original_critical_export
     check(len(critical_calls_export) == 1,
           "...and shows exactly one explanatory error dialog instead of a silent no-op")
+    window.mode_combo.setCurrentText("julia")
+    window.session.map = cdx.RationalMap.mandelbrot()
+
+    # ---- File > Export: chosen overlays actually land in the exported bytes (Stage B) --
+    # ExportImageDialog itself opens a real modal QDialog (.exec()) that can't be driven
+    # offscreen -- so what's tested directly here is compose_export_image, the exact
+    # function both the dialog's live preview and _do_export_image call, plus
+    # ExportImageDialog's own checkbox-applicability logic (constructing it doesn't
+    # require .exec()).
+    print("\nFile > Export: overlays compose into the image, and the dialog only offers "
+          "checkboxes that apply:")
+    window.session.map = cdx.RationalMap.mandelbrot()
+    window.mode_combo.setCurrentText("julia")
+    window._set_focused_pane(window.pane)
+    window.pane.viewport = cdx.Viewport(complex(0.0, 0.0), 1.5, 100)
+
+    clean = compose_export_image(window.session.map, window.session.param, window.pane.viewport,
+                                 window.pane.render_mode, window.session.settings,
+                                 window.session.render_settings, 48)
+    with_critical = compose_export_image(
+        window.session.map, window.session.param, window.pane.viewport, window.pane.render_mode,
+        window.session.settings, window.session.render_settings, 48,
+        show_critical_points=True, critical_points=[0j])
+    check(clean.constBits().tobytes() != with_critical.constBits().tobytes(),
+          "compose_export_image with the critical-point overlay enabled produces different "
+          "pixel bytes than the same call with no overlays -- the overlay genuinely lands "
+          "in the exported image, not just in an ignored kwarg")
+    check(clean.width() == 48 and clean.height() == 48
+          and with_critical.width() == 48 and with_critical.height() == 48,
+          "compose_export_image renders at the CHOSEN resolution regardless of overlays, "
+          "matching what File > Export's own resolution spinbox controls")
+
+    window.pane.image_view.orbit_tracker.clear()   # earlier sections may have left one seeded
+
+    dynamical_dialog = ExportImageDialog(window.session, window.pane, window)
+    check(dynamical_dialog._critical_points_checkbox is not None
+          and dynamical_dialog._trace_orbits_checkbox is not None,
+          "a dynamical-plane pane's Export dialog offers critical-point and traced-orbit "
+          "checkboxes")
+    check(dynamical_dialog._param_marker_checkbox is None,
+          "...but no parameter-marker checkbox -- there's no parameter marker on a "
+          "dynamical plane")
+    check(dynamical_dialog._orbit_checkbox is None and dynamical_dialog._connect_lines_checkbox is None,
+          "and, with no orbit currently seeded on this pane, no orbit/connect-lines "
+          "checkboxes either -- an empty toggle for a nonexistent orbit has nothing to "
+          "control")
+    dynamical_dialog.close()
+
+    window.pane.image_view.orbit_tracker.seed(window.session.map, window.session.param,
+                                               complex(0.1, 0.1))
+    seeded_dialog = ExportImageDialog(window.session, window.pane, window)
+    check(seeded_dialog._orbit_checkbox is not None
+          and seeded_dialog._connect_lines_checkbox is not None,
+          "...but once an orbit IS seeded, the same pane's Export dialog offers both the "
+          "orbit and connect-lines checkboxes")
+    seeded_dialog.close()
+    window.pane.image_view.orbit_tracker.clear()
+
+    window.mode_combo.setCurrentText("parameter")
+    window._set_focused_pane(window.pane)
+    param_dialog = ExportImageDialog(window.session, window.pane, window)
+    check(param_dialog._param_marker_checkbox is not None,
+          "a parameter-plane pane's Export dialog offers a parameter-marker checkbox")
+    check(param_dialog._critical_points_checkbox is None
+          and param_dialog._trace_orbits_checkbox is None,
+          "...but no critical-point/traced-orbit checkboxes -- those are dynamical-plane-"
+          "only concepts")
+    param_dialog.close()
     window.mode_combo.setCurrentText("julia")
     window.session.map = cdx.RationalMap.mandelbrot()
 

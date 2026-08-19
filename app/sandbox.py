@@ -27,9 +27,10 @@ import shiboken6
 from PySide6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
                             QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton,
-                               QSplitter, QTabWidget, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QPushButton, QSpinBox, QSplitter, QTabWidget, QToolBar,
+                               QVBoxLayout, QWidget)
 
 import cdx
 from app.about_dialog import AboutDialog
@@ -97,6 +98,26 @@ PRECISION_WARN_MULTIPLE = 100
 # refresh_critical_points), not per paint.
 CRITICAL_ORBIT_TRACE_STEPS = 60
 
+
+def trace_critical_orbit(rational_map: cdx.RationalMap, param: complex,
+                         z0: complex) -> list[complex]:
+    """The forward orbit of `z0` under (rational_map, param), up to
+    CRITICAL_ORBIT_TRACE_STEPS or an infinite/NaN escape, whichever comes
+    first -- a module-level pure function (ImageView._trace_orbit is now a
+    thin wrapper) so File > Export's preview dialog can compute a traced-
+    orbit overlay for its OWN chosen critical points without needing a
+    live ImageView instance's cached state.
+    """
+    points = [z0]
+    z = z0
+    for _ in range(CRITICAL_ORBIT_TRACE_STEPS):
+        if math.isinf(z.real) or math.isinf(z.imag) or math.isnan(z.real) or math.isnan(z.imag):
+            break   # infinity (or a NaN escape) has no further finite orbit to draw
+        z = rational_map.eval(z, param)
+        points.append(z)
+    return points
+
+
 CRITICAL_POINT_MARKER_RADIUS = 5.0
 
 # How far outside the visible widget rect a mapped orbit/trace point may
@@ -145,6 +166,142 @@ def drawable_polyline_segments(points: list[complex], pixel_points: list,
         if drawable(i) and drawable(i + 1):
             segments.append((pixel_points[i], pixel_points[i + 1]))
     return segments
+
+
+def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int) -> QPointF:
+    """The exact inverse of ImageView._pixel_to_complex, generalized to an
+    ARBITRARY (viewport, width, height) instead of reading a live widget's
+    pane.viewport/self.width()/self.height() -- what makes overlay
+    compositing (see paint_overlays below) usable for an export image at
+    its own chosen resolution, not just the on-screen widget. Same square-
+    centered ("letterboxed" inside a non-square width/height) convention
+    ImageView._display_rect uses; for a SQUARE width==height (every export
+    -- see SandboxWindow._do_export_image) there is no letterboxing at all.
+
+    ImageView._complex_to_display_pixel is now a thin wrapper around this,
+    passing its own pane.viewport/self.width()/self.height() -- kept as an
+    instance method (not deleted) because it's directly exercised by
+    existing tests and by every other overlay/click-handling call site
+    that reads a point's screen position off THIS pane specifically.
+    """
+    side = min(width, height)
+    x = (width - side) // 2
+    y = (height - side) // 2
+    rel_x = (w.real - (viewport.center.real - viewport.scale)) / (2.0 * viewport.scale)
+    rel_y = (viewport.center.imag + viewport.scale - w.imag) / (2.0 * viewport.scale)
+    return QPointF(x + rel_x * side, y + rel_y * side)
+
+
+def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height: int,
+                   render_mode: str, *,
+                   show_critical_points: bool = False,
+                   critical_points: "list[complex]" = (),
+                   show_traced_orbits: bool = False,
+                   orbit_traces: "list[list[complex]] | None" = None,
+                   show_orbit: bool = False,
+                   orbit_connect_lines: bool = True,
+                   orbit_state=None,
+                   show_param_marker: bool = False,
+                   param: "complex | None" = None) -> None:
+    """Draws every overlay CURRENTLY requested (the show_* flags) that is
+    also VALID for `render_mode` -- critical points, traced (post-critical-
+    point) orbits, and the seeded orbit itself are all dynamical-plane-only
+    (PARAMETER_PLANE_MODES); the param crosshair marker is parameter-plane-
+    only -- exactly the SAME mode-gating ImageView's own overlay painters
+    already enforced (_should_draw_critical_points, _orbit_line_segments,
+    _param_marker_pixel), just no longer coupled to a live widget:
+    `viewport`/`width`/`height` are the caller's OWN (ImageView.paintEvent
+    passes its pane.viewport/self.width()/self.height(), unchanged
+    behavior; SandboxWindow._do_export_image/the export preview dialog
+    pass the EXPORT image's own viewport/resolution instead).
+
+    show_orbit is a genuinely NEW top-level toggle export introduces: the
+    live view has no "hide the seeded orbit entirely" checkbox (an orbit,
+    once seeded, is always drawn) -- ImageView.paintEvent always passes
+    show_orbit=True to preserve that, while the export dialog offers it as
+    a real, uncheckable-until-an-orbit-exists choice. orbit_connect_lines
+    is the SAME sub-toggle ImageView._orbit_connect_lines already is --
+    governs the connecting LINES only; the dots and seed marker are drawn
+    whenever show_orbit is on, regardless (see ImageView.
+    set_orbit_connect_lines's own docstring for why).
+
+    show_traced_orbits is gated behind show_critical_points, exactly as
+    the original code's own nesting had it (traced orbits are a critical-
+    point-overlay sub-feature, not independently drawable) -- not a new
+    coupling, preserved intentionally.
+    """
+    is_dynamical = render_mode not in PARAMETER_PLANE_MODES
+
+    def finite(w: complex) -> bool:
+        return math.isfinite(w.real) and math.isfinite(w.imag)
+
+    bounds = QRectF(0, 0, width, height)
+    inflated_rect = bounds.adjusted(-OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
+                                    OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
+
+    if show_critical_points and is_dynamical:
+        if show_traced_orbits and orbit_traces:
+            trace_pen = QPen(QColor(255, 255, 255, 160))
+            trace_pen.setWidth(1)
+            painter.setPen(trace_pen)
+            for trace in orbit_traces:
+                pixel_points = [complex_to_pixel(w, viewport, width, height) for w in trace]
+                for a, b in drawable_polyline_segments(trace, pixel_points, inflated_rect):
+                    painter.drawLine(a, b)
+
+        marker_pen = QPen(QColor(0, 0, 0))
+        marker_pen.setWidth(2)
+        painter.setPen(marker_pen)
+        painter.setBrush(QColor(255, 255, 255))
+        r = CRITICAL_POINT_MARKER_RADIUS
+        for w in critical_points:
+            if finite(w):   # infinity is a valid critical point but has no finite screen position
+                painter.drawEllipse(complex_to_pixel(w, viewport, width, height), r, r)
+
+    if show_orbit and is_dynamical and orbit_state is not None:
+        pixel_points = [complex_to_pixel(w, viewport, width, height) for w in orbit_state.history]
+        # Lines are the only thing orbit_connect_lines governs -- dots and
+        # the seed marker below are cheap, never sweep, and stay on
+        # regardless (see ImageView.set_orbit_connect_lines's own
+        # docstring).
+        if orbit_connect_lines:
+            line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from white/black
+            line_pen.setWidth(1)
+            painter.setPen(line_pen)
+            for a, b in drawable_polyline_segments(orbit_state.history, pixel_points,
+                                                   inflated_rect):
+                painter.drawLine(a, b)
+
+        dot_pen = QPen(QColor(0, 0, 0))
+        dot_pen.setWidth(1)
+        painter.setPen(dot_pen)
+        painter.setBrush(QColor(255, 120, 0))
+        dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
+        for w, pixel in zip(orbit_state.history, pixel_points):   # visually subordinate
+            if finite(w) and inflated_rect.contains(pixel):
+                painter.drawEllipse(pixel, dot_r, dot_r)
+
+        # The SEED (history[0]) gets its own larger, distinct marker -- the
+        # one point in the trace the user actually chose, not one the
+        # orbit passed through.
+        seed_pixel = complex_to_pixel(orbit_state.z0, viewport, width, height)
+        if finite(orbit_state.z0) and inflated_rect.contains(seed_pixel):
+            seed_pen = QPen(QColor(0, 0, 0))
+            seed_pen.setWidth(2)
+            painter.setPen(seed_pen)
+            painter.setBrush(QColor(255, 255, 0))
+            painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
+                                CRITICAL_POINT_MARKER_RADIUS)
+
+    if show_param_marker and not is_dynamical and param is not None and finite(param):
+        pixel = complex_to_pixel(param, viewport, width, height)
+        if bounds.contains(pixel):
+            r = CRITICAL_POINT_MARKER_RADIUS
+            pen = QPen(QColor(255, 0, 0))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
+            painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
 
 
 def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
@@ -488,12 +645,14 @@ class ImageView(QWidget):
         and nothing here ever assigns pane.viewport -- see CLAUDE.md's
         note on the MATLAB prototype's overlay-expands-the-axes bug this
         is written to not repeat.
+
+        A thin wrapper around the module-level complex_to_pixel (see its
+        own docstring) -- kept as an instance method since it's directly
+        exercised by existing tests and by every click-handling call site
+        that means "this pane's own current screen position," not because
+        the actual math lives here.
         """
-        rect = self._display_rect()
-        vp = self.pane.viewport
-        rel_x = (w.real - (vp.center.real - vp.scale)) / (2.0 * vp.scale)
-        rel_y = (vp.center.imag + vp.scale - w.imag) / (2.0 * vp.scale)
-        return QPointF(rect.left() + rel_x * rect.width(), rect.top() + rel_y * rect.height())
+        return complex_to_pixel(w, self.pane.viewport, self.width(), self.height())
 
     # ---- overscan buffer mapping: buffer's own viewport, not the display's ------
     def _complex_to_buffer_pixel(self, w: complex) -> QPointF:
@@ -627,14 +786,7 @@ class ImageView(QWidget):
             self._orbit_traces = [self._trace_orbit(z0) for z0 in self._critical_points]
 
     def _trace_orbit(self, z0: complex) -> list[complex]:
-        points = [z0]
-        z = z0
-        for _ in range(CRITICAL_ORBIT_TRACE_STEPS):
-            if math.isinf(z.real) or math.isinf(z.imag) or math.isnan(z.real) or math.isnan(z.imag):
-                break   # infinity (or a NaN escape) has no further finite orbit to draw
-            z = self.session.map.eval(z, self.session.param)
-            points.append(z)
-        return points
+        return trace_critical_orbit(self.session.map, self.session.param, z0)
 
     def set_show_critical_points(self, show: bool) -> None:
         self._show_critical_points = show
@@ -781,9 +933,27 @@ class ImageView(QWidget):
             pen.setWidth(1)
             painter.setPen(pen)
             painter.drawRect(self._rubber_band_rect)
-        self._paint_critical_point_overlay(painter)
-        self._paint_orbit(painter)
-        self._paint_param_marker(painter)
+        # The actual overlay drawing is the module-level paint_overlays
+        # (Stage B) -- this pane's own state, translated into its flags/
+        # data, exactly reproducing what _paint_critical_point_overlay/
+        # _paint_orbit/_paint_param_marker used to do directly (now
+        # removed; see paint_overlays' own docstring). show_orbit/
+        # show_param_marker are always True here -- the live view has no
+        # "hide the orbit/marker entirely" toggle of its own (that choice
+        # only exists for File > Export's preview dialog); paint_overlays'
+        # own mode-gating (PARAMETER_PLANE_MODES) still governs which of
+        # the two actually draws anything for THIS pane's render_mode.
+        paint_overlays(painter, self.pane.viewport, self.width(), self.height(),
+                       self.pane.render_mode,
+                       show_critical_points=self._show_critical_points,
+                       critical_points=self._critical_points,
+                       show_traced_orbits=self._trace_orbits,
+                       orbit_traces=self._orbit_traces,
+                       show_orbit=True,
+                       orbit_connect_lines=self._orbit_connect_lines,
+                       orbit_state=self.orbit_tracker.state,
+                       show_param_marker=True,
+                       param=self.session.param)
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -795,43 +965,13 @@ class ImageView(QWidget):
         # back to a dynamical-plane mode.
         return self._show_critical_points and self.pane.render_mode not in PARAMETER_PLANE_MODES
 
-    def _paint_critical_point_overlay(self, painter: QPainter) -> None:
-        if not self._should_draw_critical_points():
-            return
-
-        def finite(w: complex) -> bool:
-            return math.isfinite(w.real) and math.isfinite(w.imag)
-
-        if self._trace_orbits and self._orbit_traces:
-            trace_pen = QPen(QColor(255, 255, 255, 160))
-            trace_pen.setWidth(1)
-            painter.setPen(trace_pen)
-            inflated_rect = QRectF(self.rect()).adjusted(
-                -OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
-                OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
-            for trace in self._orbit_traces:
-                pixel_points = [self._complex_to_display_pixel(w) for w in trace]
-                for a, b in drawable_polyline_segments(trace, pixel_points, inflated_rect):
-                    painter.drawLine(a, b)
-
-        marker_pen = QPen(QColor(0, 0, 0))
-        marker_pen.setWidth(2)
-        painter.setPen(marker_pen)
-        painter.setBrush(QColor(255, 255, 255))
-        r = CRITICAL_POINT_MARKER_RADIUS
-        for w in self._critical_points:
-            if not finite(w):
-                continue   # infinity is a valid critical point but has no finite screen position
-            pixel = self._complex_to_display_pixel(w)
-            painter.drawEllipse(pixel, r, r)
-
     def _orbit_line_segments(self):
-        """The line segments _paint_orbit would draw for the CURRENT
+        """The line segments paint_overlays would draw for the CURRENT
         orbit, already respecting both the dynamical-plane-only gate and
-        the connect-lines toggle -- factored out of _paint_orbit so this
-        is directly testable without a real QPainter/paint event. Returns
-        [] whenever _paint_orbit would draw no lines at all: no orbit,
-        parameter-plane mode, or the toggle off.
+        the connect-lines toggle -- factored out so this is directly
+        testable without a real QPainter/paint event. Returns [] whenever
+        paint_overlays would draw no lines at all: no orbit, parameter-
+        plane mode, or the toggle off.
         """
         state = self.orbit_tracker.state
         if (state is None or self.pane.render_mode in PARAMETER_PLANE_MODES
@@ -843,56 +983,12 @@ class ImageView(QWidget):
         pixel_points = [self._complex_to_display_pixel(w) for w in state.history]
         return drawable_polyline_segments(state.history, pixel_points, inflated_rect)
 
-    def _paint_orbit(self, painter: QPainter) -> None:
-        state = self.orbit_tracker.state
-        if state is None or self.pane.render_mode in PARAMETER_PLANE_MODES:
-            return   # same dynamical-plane-only gating as critical points, see its own comment
-
-        def finite(w: complex) -> bool:
-            return math.isfinite(w.real) and math.isfinite(w.imag)
-
-        inflated_rect = QRectF(self.rect()).adjusted(
-            -OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
-            OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
-        pixel_points = [self._complex_to_display_pixel(w) for w in state.history]
-
-        # Lines are the only thing the toggle governs -- dots and the seed
-        # marker below are cheap, never sweep, and stay on regardless (see
-        # set_orbit_connect_lines's own docstring).
-        line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from the white/black
-        line_pen.setWidth(1)                        # critical-point markers on any palette
-        painter.setPen(line_pen)
-        for a, b in self._orbit_line_segments():
-            painter.drawLine(a, b)
-
-        dot_pen = QPen(QColor(0, 0, 0))
-        dot_pen.setWidth(1)
-        painter.setPen(dot_pen)
-        painter.setBrush(QColor(255, 120, 0))
-        dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
-        for w, pixel in zip(state.history, pixel_points):   # visually subordinate, not competing
-            if finite(w) and inflated_rect.contains(pixel):
-                painter.drawEllipse(pixel, dot_r, dot_r)
-
-        # The SEED (history[0]) gets its own larger, distinct marker -- the
-        # one point in the trace the user actually chose, not one the
-        # orbit passed through.
-        seed_pixel = self._complex_to_display_pixel(state.z0)
-        if finite(state.z0) and inflated_rect.contains(seed_pixel):
-            seed_pen = QPen(QColor(0, 0, 0))
-            seed_pen.setWidth(2)
-            painter.setPen(seed_pen)
-            painter.setBrush(QColor(255, 255, 0))
-            painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
-                                CRITICAL_POINT_MARKER_RADIUS)
-
     def _param_marker_pixel(self) -> QPointF | None:
         """The screen pixel for session.param's crosshair marker on a
         PARAMETER-plane pane, or None if nothing should be drawn (a
         dynamical-plane mode, a non-finite param, or off the visible
-        rect) -- factored out of _paint_param_marker so this is directly
-        testable without a real QPainter/paint event, the same reason
-        _orbit_line_segments exists.
+        rect) -- factored out so this is directly testable without a real
+        QPainter/paint event, the same reason _orbit_line_segments exists.
 
         Deliberately derived from self.session.param at paint time, not
         separate marker state stored anywhere -- Stage 3's "keep the
@@ -909,17 +1005,6 @@ class ImageView(QWidget):
         if not QRectF(self.rect()).contains(pixel):
             return None
         return pixel
-
-    def _paint_param_marker(self, painter: QPainter) -> None:
-        pixel = self._param_marker_pixel()
-        if pixel is None:
-            return
-        r = CRITICAL_POINT_MARKER_RADIUS
-        pen = QPen(QColor(255, 0, 0))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
-        painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
 
     # ---- scroll zoom, cursor-anchored -------------------------------------------
     def wheelEvent(self, event) -> None:
@@ -1021,6 +1106,203 @@ class ImageView(QWidget):
         vp = self.pane.viewport
         self.pane.viewport = cdx.Viewport(new_center, new_scale, vp.resolution)
         self.viewport_changed.emit()
+
+
+def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
+                         render_mode: str, colour_settings: Settings,
+                         render_settings: cdx.RenderSettings, resolution: int,
+                         **overlay_flags) -> QImage:
+    """Renders (rational_map, param) at `viewport`'s own center/scale but a
+    CHOSEN `resolution` -- via render_map, the SAME free function every
+    on-screen render already goes through, not a downsample/upscale of
+    whatever happens to be on screen -- coloured through the identical
+    array_to_qimage pipeline the display itself uses (same palette/
+    scaling/period, so an export always matches what is actually shown),
+    then composites whichever overlays are requested on top (paint_overlays
+    -- **overlay_flags forwards show_critical_points/critical_points/
+    show_traced_orbits/orbit_traces/show_orbit/orbit_connect_lines/
+    orbit_state/show_param_marker straight through to it, so this
+    function's own signature never has to be kept in sync with that one's).
+    The param MARKER always draws at this SAME `param` -- the one thing
+    the overlay compositing genuinely cannot diverge from what was just
+    rendered -- so `overlay_flags` should never include its own "param"
+    key; this function supplies it.
+
+    ONE function, called by BOTH the export preview dialog (a live, cheap-
+    resolution preview) and SandboxWindow._do_export_image (the actual
+    save) -- so the saved PNG can never show something different from what
+    the preview showed; there is no second copy of "render, colour,
+    composite" logic that could drift out of sync with this one.
+    """
+    export_viewport = cdx.Viewport(viewport.center, viewport.scale, resolution)
+    array = render_map(rational_map, param, export_viewport, render_settings, render_mode)
+    image = array_to_qimage(array, render_mode, colour_settings, render_settings.max_iter)
+    painter = QPainter(image)
+    paint_overlays(painter, export_viewport, resolution, resolution, render_mode,
+                   param=param, **overlay_flags)
+    painter.end()
+    return image
+
+
+# A live preview stays fast (and doesn't need to match the final export's
+# own resolution pixel-for-pixel -- only the composition/overlays it shows
+# need to match) at a small, fixed size, recomposed on every checkbox
+# toggle.
+EXPORT_PREVIEW_RESOLUTION = 240
+
+
+class ExportImageDialog(QDialog):
+    """File > Export Image's preview dialog (Stage B): a resolution input,
+    a checkbox per overlay APPLICABLE to the pane's current mode/state
+    (never one for an overlay that couldn't draw anything -- e.g. no
+    orbit/connect-lines checkboxes at all when no orbit is seeded), and a
+    live preview of the exact composition compose_export_image would
+    produce, updated on every toggle. Save hands the chosen (resolution,
+    overlay flags) back to the caller (SandboxWindow._on_export_image),
+    which still owns the actual QFileDialog + _do_export_image call --
+    this dialog never touches disk itself, matching every other modal-
+    dialog split in this file (see Save/Open Experiment's own comment).
+    """
+
+    def __init__(self, session: Session, pane: Pane, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Image")
+        self._session = session
+        self._pane = pane
+        self._is_dynamical = pane.render_mode not in PARAMETER_PLANE_MODES
+        self._has_orbit = pane.image_view.orbit_tracker.state is not None
+
+        # None for any overlay NOT applicable to this pane's current
+        # mode/state -- checked for None, never assumed present, by
+        # overlay_flags() below.
+        self._critical_points_checkbox: QCheckBox | None = None
+        self._trace_orbits_checkbox: QCheckBox | None = None
+        self._orbit_checkbox: QCheckBox | None = None
+        self._connect_lines_checkbox: QCheckBox | None = None
+        self._param_marker_checkbox: QCheckBox | None = None
+
+        self._build_ui()
+        self._update_preview()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        self._preview_label = QLabel(self)
+        self._preview_label.setFixedSize(EXPORT_PREVIEW_RESOLUTION, EXPORT_PREVIEW_RESOLUTION)
+        layout.addWidget(self._preview_label)
+
+        res_row = QHBoxLayout()
+        res_row.addWidget(QLabel("Resolution (pixels, square):", self))
+        self._resolution_spin = QSpinBox(self)
+        self._resolution_spin.setRange(1, 20000)
+        self._resolution_spin.setValue(self._pane.viewport.resolution)
+        res_row.addWidget(self._resolution_spin)
+        res_row.addStretch(1)
+        layout.addLayout(res_row)
+
+        # Critical points + traced orbits: dynamical-plane-only concepts
+        # (see PARAMETER_PLANE_MODES) -- not offered at all on a
+        # parameter-plane pane, the same "only offer what's applicable"
+        # this whole dialog follows throughout.
+        if self._is_dynamical:
+            view = self._pane.image_view
+            self._critical_points_checkbox = QCheckBox("Critical points", self)
+            self._critical_points_checkbox.setChecked(view._show_critical_points)
+            self._critical_points_checkbox.toggled.connect(self._on_critical_points_toggled)
+            layout.addWidget(self._critical_points_checkbox)
+
+            self._trace_orbits_checkbox = QCheckBox("Traced (post-critical-point) orbits", self)
+            self._trace_orbits_checkbox.setChecked(view._trace_orbits)
+            # A sub-feature of critical points (see paint_overlays' own
+            # docstring on this nesting, preserved from the original
+            # code) -- disabled, not just silently ineffective, whenever
+            # critical points itself is off.
+            self._trace_orbits_checkbox.setEnabled(self._critical_points_checkbox.isChecked())
+            self._trace_orbits_checkbox.toggled.connect(self._update_preview)
+            layout.addWidget(self._trace_orbits_checkbox)
+
+            # Orbit + connect-lines: only offered if an orbit is actually
+            # SEEDED right now -- an empty toggle for a nonexistent orbit
+            # has nothing to control.
+            if self._has_orbit:
+                self._orbit_checkbox = QCheckBox("Seeded orbit", self)
+                self._orbit_checkbox.setChecked(True)   # matches what the pane is CURRENTLY showing
+                self._orbit_checkbox.toggled.connect(self._on_orbit_toggled)
+                layout.addWidget(self._orbit_checkbox)
+
+                self._connect_lines_checkbox = QCheckBox("Connect orbit points", self)
+                self._connect_lines_checkbox.setChecked(view._orbit_connect_lines)
+                self._connect_lines_checkbox.toggled.connect(self._update_preview)
+                layout.addWidget(self._connect_lines_checkbox)
+        else:
+            self._param_marker_checkbox = QCheckBox("Parameter marker", self)
+            self._param_marker_checkbox.setChecked(True)   # matches what the pane is CURRENTLY showing
+            self._param_marker_checkbox.toggled.connect(self._update_preview)
+            layout.addWidget(self._param_marker_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
+                                   | QDialogButtonBox.StandardButton.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_critical_points_toggled(self, checked: bool) -> None:
+        if self._trace_orbits_checkbox is not None:
+            self._trace_orbits_checkbox.setEnabled(checked)
+        self._update_preview()
+
+    def _on_orbit_toggled(self, checked: bool) -> None:
+        if self._connect_lines_checkbox is not None:
+            self._connect_lines_checkbox.setEnabled(checked)
+        self._update_preview()
+
+    def overlay_flags(self) -> dict:
+        """The paint_overlays-shaped kwargs for whatever is CURRENTLY
+        checked -- shared by the live preview and, via
+        SandboxWindow._on_export_image, the actual saved export, so the
+        two can never show something different from each other. Traced-
+        orbit data is computed HERE, on demand, only when that checkbox is
+        actually checked (see trace_critical_orbit) -- not read off the
+        live pane's own _orbit_traces cache, which may not exist at all if
+        the live "Trace Orbits" toolbar checkbox was never turned on.
+
+        Deliberately never includes a "param" key -- see
+        compose_export_image's own docstring for why that one specific
+        flag is ALWAYS supplied by the caller (the rendered param and the
+        marker's own param can never be allowed to diverge), not by this
+        dict.
+        """
+        flags: dict = {}
+        view = self._pane.image_view
+        if self._critical_points_checkbox is not None:
+            show_critical = self._critical_points_checkbox.isChecked()
+            flags["show_critical_points"] = show_critical
+            flags["critical_points"] = view._critical_points
+            show_traced = (self._trace_orbits_checkbox is not None
+                          and self._trace_orbits_checkbox.isChecked())
+            flags["show_traced_orbits"] = show_traced
+            if show_traced:
+                flags["orbit_traces"] = [
+                    trace_critical_orbit(self._session.map, self._session.param, z0)
+                    for z0 in view._critical_points]
+        if self._orbit_checkbox is not None:
+            flags["show_orbit"] = self._orbit_checkbox.isChecked()
+            flags["orbit_connect_lines"] = (self._connect_lines_checkbox is not None
+                                            and self._connect_lines_checkbox.isChecked())
+            flags["orbit_state"] = view.orbit_tracker.state
+        if self._param_marker_checkbox is not None:
+            flags["show_param_marker"] = self._param_marker_checkbox.isChecked()
+        return flags
+
+    def resolution(self) -> int:
+        return self._resolution_spin.value()
+
+    def _update_preview(self) -> None:
+        image = compose_export_image(
+            self._session.map, self._session.param, self._pane.viewport, self._pane.render_mode,
+            self._session.settings, self._session.render_settings, EXPORT_PREVIEW_RESOLUTION,
+            **self.overlay_flags())
+        self._preview_label.setPixmap(QPixmap.fromImage(image))
 
 
 class SandboxWindow(QMainWindow):
@@ -1580,41 +1862,43 @@ class SandboxWindow(QMainWindow):
             self._start_render(pane)
         self._sync_orbit_panel()
 
-    # ---- File > Export: PNG at a chosen resolution, or a JSON fact sheet --------
+    # ---- File > Export: PNG (any combination of overlays) or a JSON fact sheet --
     # Same _on_*/_do_* split as Save/Open Experiment above (see that
-    # section's own comment): QInputDialog.getInt/QFileDialog both block on
-    # a real event loop, so _on_export_image gathers both, then hands off to
-    # _do_export_image for the actual (directly testable) logic.
+    # section's own comment): the ExportImageDialog itself (Stage B) and
+    # QFileDialog both block on a real event loop, so _on_export_image
+    # drives both, then hands off to _do_export_image for the actual
+    # (directly testable) save logic.
     def _on_export_image(self) -> None:
         pane = self._focused_pane
-        resolution, ok = QInputDialog.getInt(
-            self, "Export Image", "Resolution (pixels, square):",
-            value=pane.viewport.resolution, minValue=1, maxValue=20000)
-        if not ok:
+        message = pane.image_view.no_effect_parameter_message()
+        if message is not None:
+            # Same guard _start_render uses for the live view -- no point
+            # opening a dialog to preview/export a meaningless uniform
+            # field.
+            QMessageBox.critical(self, "Export Image failed", message)
+            return
+        dialog = ExportImageDialog(self.session, pane, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Image", "", "PNG image (*.png);;All files (*)")
         if path:
-            self._do_export_image(path, resolution)
+            self._do_export_image(path, dialog.resolution(), dialog.overlay_flags())
 
-    def _do_export_image(self, path: str, resolution: int) -> None:
+    def _do_export_image(self, path: str, resolution: int,
+                         overlay_flags: dict | None = None) -> None:
         """Renders the FOCUSED pane's own (map, param, viewport center/
-        scale, mode, settings) FRESH at `resolution` -- via render_map, the
-        same free function every on-screen render already goes through, not
-        a downsample/upscale of whatever happens to be on screen -- coloured
-        through the identical array_to_qimage pipeline the display itself
-        uses (same palette/scaling/period, so the export matches what is
-        actually shown), then saved as a plain PNG.
+        scale, mode, settings) FRESH at `resolution` via compose_export_image
+        -- the SAME function ExportImageDialog's own live preview calls, so
+        the saved file can never show something different from what was
+        previewed -- then saves the result as a plain PNG.
 
-        Exports the clean mathematical field ONLY -- no critical-point
-        markers, orbit trace, or param crosshair overlay. Deliberate, not an
-        oversight: those are interactive/UI artifacts of the LIVE view, not
-        part of the rendered field itself, and baking them into an exported
-        image would silently change what render_map's own output means.
-        Overlay export is a real, deliberately deferred future option (a
-        second QPainter pass over the saved QImage, mirroring
-        ImageView._paint_critical_point_overlay/_paint_orbit/
-        _paint_param_marker), not something this leaves broken.
+        `overlay_flags` (paint_overlays-shaped kwargs -- see
+        ExportImageDialog.overlay_flags) defaults to None/{} -- a clean
+        field with no overlays at all, the original (pre-Stage-B) export
+        behavior -- so a caller that doesn't care about overlays (a test,
+        or any future direct call) still gets exactly that without having
+        to spell out every flag as False.
         """
         if not path.lower().endswith(".png"):
             path += ".png"
@@ -1627,12 +1911,10 @@ class SandboxWindow(QMainWindow):
             # uniform-colour PNG with no indication anything was wrong.
             QMessageBox.critical(self, "Export Image failed", message)
             return
-        vp = pane.viewport
-        export_viewport = cdx.Viewport(vp.center, vp.scale, resolution)
-        rs = self.session.render_settings
-        array = render_map(self.session.map, self.session.param, export_viewport,
-                           rs, pane.render_mode)
-        image = array_to_qimage(array, pane.render_mode, self.session.settings, rs.max_iter)
+        image = compose_export_image(self.session.map, self.session.param, pane.viewport,
+                                     pane.render_mode, self.session.settings,
+                                     self.session.render_settings, resolution,
+                                     **(overlay_flags or {}))
         if not image.save(path, "PNG"):
             QMessageBox.critical(self, "Export Image failed", f"could not write {path!r}")
 
