@@ -292,6 +292,127 @@ int main() {
         // way to prove the parameter is actually threaded through.
     }
 
+    // ---- polynomial_escape_certified (Stage 1) ---------------------------------
+    std::printf("\npolynomial_escape_certified:\n");
+    {
+        check(polynomial_escape_certified(RationalMap::mandelbrot()) == true,
+              "z^2+a (mandelbrot): certified -- no poles, degree 2");
+        check(polynomial_escape_certified(RationalMap::multibrot(5)) == true,
+              "z^5+a (multibrot): certified -- no poles, degree 5");
+        check(polynomial_escape_certified(RationalMap::newton_cubic()) == false,
+              "Newton z^3-1: NOT certified -- has a pole at the origin");
+        check(polynomial_escape_certified(RationalMap::mcmullen(2)) == false,
+              "mcmullen z^2+a/z^2: NOT certified -- has a pole, even though infinity "
+              "happens to be attracting there too (see the next section)");
+
+        // Nova-style hand-built rational map (a pole term present, structurally,
+        // regardless of its strength at any one parameter) -- degree >= 2 alone
+        // is not enough; a pole anywhere disqualifies the fast path.
+        RationalMap nova("nova");
+        nova.add_poly({0.75, 0.0}, 1, 0, "linear");
+        nova.add_pole({0.0, 0.0}, {0.25, 0.0}, 3, 0, "pole");
+        check(polynomial_escape_certified(nova) == false,
+              "a hand-built Nova-style map (linear term + a pole): NOT certified");
+
+        RationalMap linear("linear");
+        linear.add_poly({2.0, 0.0}, 1, 0, "2z");
+        check(polynomial_escape_certified(linear) == false,
+              "a degree-1 polynomial (no poles, but degree < 2): NOT certified -- "
+              "infinity's multiplier there is nonzero (an ORDINARY, not "
+              "superattracting, fixed point), so the escape trap doesn't hold");
+
+        // A legacy negative-exponent PolyTerm (add_poly itself now rejects one --
+        // see test_rational.cpp's own "legacy" test -- but an old deserialized
+        // map can still carry one, pushed directly onto poly_terms() the same
+        // way that test does) also implies a pole at the origin, exactly as
+        // RationalMap::degree's own den_deg logic already treats it.
+        RationalMap negexp("negexp");
+        PolyTerm legacy_term;
+        legacy_term.coeff = {1.0, 0.0};
+        legacy_term.exponent = -3;
+        negexp.poly_terms().push_back(legacy_term);
+        check(polynomial_escape_certified(negexp) == false,
+              "a map whose only term is a legacy negative-exponent PolyTerm: NOT "
+              "certified -- it implies a pole at the origin too");
+    }
+
+    // ---- find_attractors: infinity verified via fixed_points(), not assumed (Stage 1) --
+    std::printf("\nfind_attractors: infinity attractor is VERIFIED, not assumed from a "
+               "large excursion:\n");
+    {
+        // mcmullen(2) at a=1: a RATIONAL map (has a pole at the origin) whose
+        // infinity is nonetheless genuinely superattracting (numerator degree
+        // exceeds denominator degree by 2 after clearing denominators) -- the
+        // positive case: a map WITH poles where find_attractors must still
+        // correctly report infinity as attracting, not just for a certified
+        // polynomial.
+        RationalMap m = RationalMap::mcmullen(2);
+        const Cplx a{1.0, 0.0};
+        const auto cycles = find_attractors(m, a);
+        bool found_inf = false;
+        for (const auto& c : cycles) {
+            if (c.points.size() == 1 && std::isinf(c.points[0].real())) found_inf = true;
+        }
+        check(found_inf,
+              "mcmullen(2) at a=1 (a RATIONAL map, has a pole): infinity is still "
+              "correctly found as attracting -- the fix doesn't just favour "
+              "certified polynomials");
+
+        const auto fp = m.fixed_points(a);
+        bool inf_multiplier_near_zero = false;
+        for (const auto& p : fp) {
+            if (!std::isfinite(p.point.real())) inf_multiplier_near_zero = std::abs(p.multiplier) < 1e-9;
+        }
+        check(inf_multiplier_near_zero,
+              "...and fixed_points() independently confirms its multiplier is ~0 "
+              "(superattracting), consistent with find_attractors' own inclusion");
+    }
+    {
+        // Newton z^4-1 = (3/4)z + (1/4)z^-3: infinity is an ORDINARY (repelling)
+        // fixed point there (multiplier degree/(degree-1) = 4/3, matching the
+        // 3/2 pattern newton_cubic's own z^3-1 case already has) -- the
+        // regression case find_attractors must NOT report as attracting, even
+        // though a naive "orbit got large during burn-in" heuristic could.
+        RationalMap m("newton4");
+        m.add_poly({0.75, 0.0}, 1, 0, "(3/4)z");
+        m.add_pole({0.0, 0.0}, {0.25, 0.0}, 3, 0, "1/(4z^3)");
+        const Cplx a{0.0, 0.0};
+
+        const auto fp = m.fixed_points(a);
+        bool inf_is_repelling = false;
+        for (const auto& p : fp) {
+            if (!std::isfinite(p.point.real())) inf_is_repelling = std::abs(p.multiplier) > 1.0;
+        }
+        check(inf_is_repelling,
+              "sanity: fixed_points() independently confirms infinity is REPELLING "
+              "here (multiplier 4/3), the case that must be rejected");
+
+        const auto cycles = find_attractors(m, a);
+        check(cycles.size() == 4, "Newton z^4-1: exactly 4 attracting cycles");
+        bool any_inf = false;
+        for (const auto& c : cycles) {
+            if (c.points.size() == 1 && !std::isfinite(c.points[0].real())) any_inf = true;
+        }
+        check(!any_inf,
+              "...and NONE of them is infinity -- find_attractors correctly rejects "
+              "it despite infinity's own repelling fixed point sitting arbitrarily "
+              "close to where a large critical-orbit excursion could otherwise be "
+              "mistaken for convergence");
+
+        const std::vector<Cplx> fourth_roots = {
+            {1.0, 0.0}, {-1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}};
+        bool all_found = true;
+        for (Cplx r : fourth_roots) {
+            bool found = false;
+            for (const auto& c : cycles) {
+                if (c.points.size() == 1 && close(c.points[0], r, 1e-4)) found = true;
+            }
+            if (!found) all_found = false;
+        }
+        check(all_found, "...and the four cycles found ARE the four fourth-roots of unity "
+              "(+-1, +-i), each its own attracting fixed point");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

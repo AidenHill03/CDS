@@ -93,6 +93,34 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
         }
 
         if (at_inf) {
+            // A critical orbit exceeding inf_cutoff during burn-in does NOT
+            // by itself prove infinity is attracting -- only that this
+            // particular finite-length numerical orbit got large. A
+            // rational map's behaviour AT infinity can be repelling (e.g.
+            // Newton's method: RationalMap::fixed_points reports infinity
+            // there with multiplier 3/2) or not even a fixed point at all,
+            // in which case a transient excursion past inf_cutoff is a
+            // NUMERICAL ARTIFACT (the true orbit would come back down),
+            // not genuine convergence. Verify algebraically via
+            // fixed_points()' own w=1/z-chart multiplier -- the SAME
+            // exact-degree-comparison computation dynamical_facts() already
+            // trusts for its own infinity multiplier (see its own comment
+            // on why it reuses this instead of re-deriving it) -- rather
+            // than assuming. For a genuine polynomial (or any rational map
+            // whose numerator degree exceeds its denominator degree by
+            // >=2 after clearing denominators) infinity is ALWAYS
+            // superattracting there, so this never rejects a real case;
+            // it only rejects a spurious one.
+            if (opts.verify_multiplier) {
+                bool infinity_attracting = false;
+                for (const FixedPoint& fp : map.fixed_points(a)) {
+                    if (!is_finite_cplx(fp.point) && std::abs(fp.multiplier) < 1.0) {
+                        infinity_attracting = true;
+                        break;
+                    }
+                }
+                if (!infinity_attracting) continue;   // spurious excursion, not a real attractor
+            }
             add_cycle(cycles, {Cplx(kInf, 0.0)}, opts.tol);
             continue;
         }
@@ -141,6 +169,16 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
     }
 
     return cycles;
+}
+
+bool polynomial_escape_certified(const RationalMap& map) {
+    for (const auto& t : map.pole_terms()) {
+        if (t.enabled) return false;
+    }
+    for (const auto& t : map.poly_terms()) {
+        if (t.enabled && t.exponent < 0) return false;   // implies a pole at the origin too
+    }
+    return map.degree(Cplx(0.0, 0.0)) >= 2;   // degree() itself never reads its `a` argument
 }
 
 // =============================================================================

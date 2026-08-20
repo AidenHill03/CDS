@@ -62,6 +62,45 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
                                    const FindAttractorsOptions& opts = {});
 
 // -----------------------------------------------------------------------------
+// Polynomial escape-radius certification.
+//
+// TRUE iff `map` has NO poles anywhere in its STRUCTURE (no enabled
+// PoleTerm, and no enabled PolyTerm with a negative exponent -- a negative
+// exponent implies a pole at the origin too, see RationalMap::degree's own
+// den_deg logic, which this mirrors) and its degree is >= 2. Parameter-
+// independent: which TERMS exist doesn't depend on `a`'s value, only their
+// coefficients do (and RationalMap::degree itself never reads `a` either).
+//
+// With no poles anywhere, infinity is the map's only point sent to itself
+// as |z| grows (R(z) -> infinity as |z| -> infinity, with no OTHER pole to
+// compete for where a large z lands), and for degree >= 2 it is ALWAYS
+// superattracting there (multiplier 0 -- see RationalMap::fixed_points'
+// own w=1/z-chart computation: diff = degree >= 2 forces multiplier
+// exactly 0). The classical |z| > R escape test is therefore a PROVABLY
+// forward-invariant trap for any large enough R: once |z| exceeds it,
+// every later iterate is even larger, so the escaping set -- and the
+// Julia set as its boundary -- is independent of exactly which R was
+// used. This is what makes today's polynomial escape-time fast path
+// correct, not just fast.
+//
+// A rational map WITH poles has no such blanket guarantee: infinity may be
+// repelling (Newton's method: multiplier 3/2), or attracting despite the
+// poles (e.g. RationalMap::mcmullen(n>=2): numerator degree exceeds
+// denominator degree by n after clearing denominators, so infinity is
+// STILL superattracting there even though the map has a pole at the
+// origin) -- either way, a fixed escape radius is not a validated trap in
+// general, so classification must go through the sphere-aware (chordal)
+// path instead of this fast path. This predicate is therefore
+// CONSERVATIVE, not exhaustive: it certifies the case that is always
+// safe (no poles at all), not every case where infinity happens to be
+// attracting. Extending the fast path to cover a rational map with poles
+// whose infinity is PROVABLY attracting (mcmullen-style) is future work,
+// not required here -- the sphere-aware path already handles that case
+// correctly, just not via the fast path's own machinery.
+// -----------------------------------------------------------------------------
+bool polynomial_escape_certified(const RationalMap& map);
+
+// -----------------------------------------------------------------------------
 // 2. Wada-boundary diagnostic on a basin label image (Renderer::render_basin's
 // output: 0 = unresolved, k = basin k). Ports matlab-reference/WadaDiagnostic.m.
 //

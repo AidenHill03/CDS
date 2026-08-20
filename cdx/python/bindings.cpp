@@ -529,6 +529,15 @@ PYBIND11_MODULE(cdx, m) {
           "Discovers attracting cycles via critical orbits (Fatou's theorem). "
           "Returns a list of Cycle, ready to pass to Renderer.render_basin.");
 
+    m.def("polynomial_escape_certified", &polynomial_escape_certified, py::arg("map"),
+          "True iff `map` has no poles anywhere (structurally -- independent of the "
+          "parameter) and degree >= 2, in which case infinity is ALWAYS "
+          "superattracting and a fixed |z|>R escape radius is a provably "
+          "forward-invariant trap -- the condition that makes the classical "
+          "polynomial escape-time fast path valid, not just fast. False for any "
+          "map with a pole (even one whose infinity happens to be attracting too, "
+          "e.g. mcmullen -- see this function's own C++ doc comment for why).");
+
     py::class_<WadaStats>(m, "WadaStats")
         .def(py::init<>())
         .def_readwrite("n_basins",            &WadaStats::n_basins)
