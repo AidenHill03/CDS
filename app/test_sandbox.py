@@ -39,12 +39,13 @@ from app.colour import PALETTES
 from app.library_panel import (_DYNAMICAL_VIEW_FALLBACK, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for)
 from app.pane import Pane
-from app.sandbox import (ATTRACTING_CYCLES_LAYER_KEY, CYCLE_TRACE_KEY, FIXED_POINTS_LAYER_KEY,
-                         ExportImageDialog, ImageView, RenderTask, SandboxWindow,
-                         _attracting_cycles_provider, _attracting_cycles_trace_provider,
-                         _CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR, _cycle_colour,
-                         _fixed_points_provider, _FIXED_POINT_CLASSIFICATION_COLOURS,
-                         _OVERLAY_LAYERS_BY_KEY, array_to_qimage, compose_export_image,
+from app.sandbox import (ATTRACTING_CYCLES_LAYER_KEY, CRITICAL_POINTS_LAYER_KEY, CYCLE_TRACE_KEY,
+                         FIXED_POINTS_LAYER_KEY, ExportImageDialog, ImageView, RenderTask,
+                         SandboxWindow, _attracting_cycles_provider,
+                         _attracting_cycles_trace_provider, _CYCLE_STRONG_COLOUR,
+                         _CYCLE_WEAK_COLOUR, _cycle_colour, _fixed_points_provider,
+                         _FIXED_POINT_CLASSIFICATION_COLOURS, _OVERLAY_LAYERS_BY_KEY,
+                         array_to_qimage, build_legend_entries, compose_export_image,
                          drawable_polyline_segments, paint_registry_layers)
 from app.facts_panel import _classify, _is_inf
 from app.session import Session, render_map
@@ -452,6 +453,86 @@ def main() -> None:
           "Trace Cycle Paths draws NOTHING while Attracting Cycles itself is off, even though "
           "the trace's own enabled flag is True -- it is genuinely gated behind the layer, not "
           "just disabled-looking in the menu")
+
+    # ---- overlay legend (Stage 3): entry-list builder as a pure function -----------
+    print("\noverlay legend:")
+    check(fp_view._show_legend is False, "the legend is off by default")
+
+    no_overlays = build_legend_entries(
+        "julia", layer_enabled={}, layer_trace_enabled={},
+        show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
+    check(no_overlays == [], "nothing enabled/visible -> an empty entry list, not a placeholder")
+
+    fixed_and_cycles = build_legend_entries(
+        "julia",
+        layer_enabled={FIXED_POINTS_LAYER_KEY: True, ATTRACTING_CYCLES_LAYER_KEY: True},
+        layer_trace_enabled={CYCLE_TRACE_KEY: True},
+        show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
+    check([e.label for e in fixed_and_cycles] ==
+          ["Fixed points: attracting / repelling / neutral",
+           "Attracting cycles: coloured by strength", "Cycle paths"],
+          "enabled+visible layers contribute their OWN legend_label, in registry order, "
+          "with a trace's own sub-entry right after its layer's -- built from OVERLAY_LAYERS, "
+          "not a hand-written per-overlay list")
+    check(fixed_and_cycles[0].swatches ==
+          (_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
+           _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
+           _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]),
+          "fixed points' entry carries all three classification swatches")
+    check(len(fixed_and_cycles[1].swatches) == 2,
+          "attracting cycles' entry carries the strength gradient's two ends as swatches")
+    check(fixed_and_cycles[2].swatches == (),
+          "a trace's own entry (a line style, not a marker) carries no point swatches")
+
+    cycles_no_trace = build_legend_entries(
+        "julia", layer_enabled={ATTRACTING_CYCLES_LAYER_KEY: True},
+        layer_trace_enabled={CYCLE_TRACE_KEY: False},   # layer on, its trace off
+        show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
+    check([e.label for e in cycles_no_trace] == ["Attracting cycles: coloured by strength"],
+          "a layer's trace sub-entry is independently gated -- present only when the trace "
+          "itself is enabled too, same as what actually gets DRAWN")
+
+    suppressed_on_parameter = build_legend_entries(
+        "parameter",
+        layer_enabled={FIXED_POINTS_LAYER_KEY: True, ATTRACTING_CYCLES_LAYER_KEY: True,
+                      CRITICAL_POINTS_LAYER_KEY: True},
+        layer_trace_enabled={},
+        show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
+    check(suppressed_on_parameter == [],
+          "every dynamical-plane-gated layer's entry disappears on the PARAMETER plane, even "
+          "while enabled -- only entries for overlays actually shown in the CURRENT mode appear")
+
+    orbit_entry = build_legend_entries(
+        "julia", layer_enabled={}, layer_trace_enabled={},
+        show_orbit=True, orbit_seeded=True, show_param_marker=False, param_set=False)
+    check([e.label for e in orbit_entry] == ["Seeded orbit"],
+          "the seeded orbit -- one of the two overlays OUTSIDE the registry -- gets its own "
+          "entry when it's actually seeded and shown")
+    check(build_legend_entries("julia", layer_enabled={}, layer_trace_enabled={},
+                               show_orbit=True, orbit_seeded=False,
+                               show_param_marker=False, param_set=False) == [],
+          "...but not when show_orbit is on with nothing actually seeded yet")
+    check(build_legend_entries("parameter", layer_enabled={}, layer_trace_enabled={},
+                               show_orbit=True, orbit_seeded=True,
+                               show_param_marker=False, param_set=False) == [],
+          "...nor on the parameter plane, where orbit tracking has no meaning at all")
+
+    marker_entry = build_legend_entries(
+        "parameter", layer_enabled={}, layer_trace_enabled={},
+        show_orbit=False, orbit_seeded=False, show_param_marker=True, param_set=True)
+    check([e.label for e in marker_entry] == ["Parameter marker"],
+          "the parameter marker -- the OTHER overlay outside the registry -- gets its own "
+          "entry on the parameter plane when it's actually shown")
+    check(build_legend_entries("julia", layer_enabled={}, layer_trace_enabled={},
+                               show_orbit=False, orbit_seeded=False,
+                               show_param_marker=True, param_set=True) == [],
+          "...but not on a DYNAMICAL pane, where there is no parameter marker to explain")
+
+    # ---- Legend menu action reaches the real per-pane flag -------------------------
+    fp_view.set_show_legend(True)
+    check(fp_view._show_legend is True, "set_show_legend reaches the flag directly")
+    fp_view.set_show_legend(False)
+    check(fp_view._show_legend is False, "...and back off")
 
     # ---- orbit tracking: click-to-seed, step/clear, painting, staleness -----------
     print("\norbit tracking:")
@@ -922,11 +1003,12 @@ def main() -> None:
     view_action_texts = [a.text() for a in window.view_menu.actions() if a.text()]
     check(view_action_texts == ["Reset View", "Coupled View", "Critical Points", "Trace Orbits",
                                 "Fixed Points", "Attracting Cycles", "Trace Cycle Paths",
-                                "Connect Orbit Points"],
+                                "Connect Orbit Points", "Legend"],
           "the View menu has the toolbar's own view controls PLUS every registry layer's own "
-          "action (and gated trace sub-action), in registry order (blank entries are "
-          "separators, filtered out above) -- Fixed Points/Attracting Cycles/Trace Cycle Paths "
-          "are menu-only (Stage 2), with no toolbar counterpart to mirror")
+          "action (and gated trace sub-action), in registry order, PLUS Legend last (blank "
+          "entries are separators, filtered out above) -- Fixed Points/Attracting Cycles/"
+          "Trace Cycle Paths/Legend are all menu-only (Stage 2/3), with no toolbar counterpart "
+          "to mirror")
 
     check(window.reset_view_action.isCheckable() is False,
           "Reset View is a plain triggerable action, not a checkable toggle")
@@ -961,6 +1043,18 @@ def main() -> None:
           "...and the menu action genuinely reaches the real per-pane flag, through the "
           "checkbox it's bound to -- not just a second copy of the checked state")
     window.critical_points_action.setChecked(False)
+
+    # Legend (Stage 3) is menu-only -- no toolbar checkbox to mirror through,
+    # so its action is wired DIRECTLY to both ImageViews' set_show_legend
+    # (see _build_ui's own comment on why it isn't built via
+    # _build_view_menu_layer_actions).
+    check(window.legend_action.isChecked() is False, "the Legend menu action starts unchecked")
+    window.legend_action.setChecked(True)
+    check(window.image_view._show_legend is True and window.image_view2._show_legend is True,
+          "toggling the 'Legend' menu action reaches BOTH panes' real flag directly")
+    window.legend_action.setChecked(False)
+    check(window.image_view._show_legend is False and window.image_view2._show_legend is False,
+          "...and back off")
 
     coupled_via_action_before = window.coupled_checkbox.isChecked()
     window.coupled_view_action.setChecked(not coupled_via_action_before)

@@ -170,6 +170,10 @@ class OverlayTrace:
     key: str
     label: str
     path_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[list[complex], OverlayColour]]]
+    # Shown in the legend (Stage 3) instead of `label` when non-empty --
+    # e.g. "Traced orbits" reads better there than the menu action's own
+    # "Trace Orbits". Empty means: use `label` as-is (see build_legend_entries).
+    legend_label: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -186,6 +190,16 @@ class OverlayLayer:
     marker_radius: float
     points_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[complex, OverlayColour]]]
     marker_style: str = "circle"   # "circle" | "square" | "diamond" -- see _draw_marker
+    # Legend (Stage 3) text/swatches -- legend_label empty means "use
+    # `label` as-is" (matches critical points, whose legend entry needs no
+    # extra text); legend_swatches is the small set of representative
+    # colours build_legend_entries/draw_legend show beside that text (e.g.
+    # fixed points' three classification colours, or a cycle's two gradient
+    # ends) -- kept as their OWN fields rather than derived from
+    # points_provider's live output, since the legend describes what a
+    # colour MEANS in general, not whatever happens to be on screen right now.
+    legend_label: str = ""
+    legend_swatches: tuple[OverlayColour, ...] = ()
     trace: OverlayTrace | None = None
 
     def is_visible_for(self, render_mode: str) -> bool:
@@ -303,21 +317,29 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
     OverlayLayer(
         key=CRITICAL_POINTS_LAYER_KEY, label="Critical Points", gate="dynamical",
         marker_radius=CRITICAL_POINT_MARKER_RADIUS, points_provider=_critical_points_provider,
-        marker_style="circle",
+        marker_style="circle", legend_swatches=(CRITICAL_POINT_FILL_COLOUR,),
         trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
-                           path_provider=_critical_trace_provider),
+                           path_provider=_critical_trace_provider,
+                           legend_label="Traced orbits"),
     ),
     OverlayLayer(
         key=FIXED_POINTS_LAYER_KEY, label="Fixed Points", gate="dynamical",
         marker_radius=FIXED_POINT_MARKER_RADIUS, points_provider=_fixed_points_provider,
         marker_style="square",
+        legend_label="Fixed points: attracting / repelling / neutral",
+        legend_swatches=(_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
+                         _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
+                         _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]),
     ),
     OverlayLayer(
         key=ATTRACTING_CYCLES_LAYER_KEY, label="Attracting Cycles", gate="dynamical",
         marker_radius=CYCLE_MARKER_RADIUS, points_provider=_attracting_cycles_provider,
         marker_style="diamond",
+        legend_label="Attracting cycles: coloured by strength",
+        legend_swatches=(_CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR),
         trace=OverlayTrace(key=CYCLE_TRACE_KEY, label="Trace Cycle Paths",
-                           path_provider=_attracting_cycles_trace_provider),
+                           path_provider=_attracting_cycles_trace_provider,
+                           legend_label="Cycle paths"),
     ),
 ]
 
@@ -396,6 +418,87 @@ def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int
     return QPointF(x + rel_x * side, y + rel_y * side)
 
 
+# ---- overlay legend (Stage 3) ---------------------------------------------------
+# Representative colours for the two overlays that live OUTSIDE the registry
+# (the seeded orbit, the parameter marker) -- matching (not necessarily byte-
+# identical to every shade paint_overlays' own orbit/marker branches use, just
+# representative of them) so the legend's swatch reads as the same colour a
+# user sees drawn elsewhere on the SAME pane.
+ORBIT_LEGEND_COLOUR: OverlayColour = (255, 120, 0, 255)     # orange -- matches the orbit dots/lines
+PARAM_MARKER_LEGEND_COLOUR: OverlayColour = (255, 0, 0, 255)   # red -- matches the marker crosshair
+
+
+@dataclasses.dataclass(frozen=True)
+class LegendEntry:
+    label: str
+    swatches: tuple[OverlayColour, ...] = ()
+
+
+def build_legend_entries(render_mode: str, *, layer_enabled: dict, layer_trace_enabled: dict,
+                         show_orbit: bool, orbit_seeded: bool,
+                         show_param_marker: bool, param_set: bool) -> list[LegendEntry]:
+    """Which legend entries should appear for the CURRENT render_mode +
+    overlay state -- a PURE function of exactly the same inputs paint_overlays/
+    paint_registry_layers already gate their own drawing on (layer_enabled/
+    layer_trace_enabled + OverlayLayer.is_visible_for for registry layers;
+    show_orbit/orbit_seeded and show_param_marker/param_set for the two
+    overlays outside the registry), so the legend can never claim to explain
+    something that isn't actually being drawn right now, or omit something
+    that is.
+
+    BUILT FROM THE REGISTRY: no per-layer branching here -- each
+    OverlayLayer/OverlayTrace already carries its own legend_label/
+    legend_swatches (see their own docstrings); adding a layer to
+    OVERLAY_LAYERS is enough to give it a legend entry too.
+    """
+    is_dynamical = render_mode not in PARAMETER_PLANE_MODES
+    entries: list[LegendEntry] = []
+    for layer in OVERLAY_LAYERS:
+        if not layer_enabled.get(layer.key, False) or not layer.is_visible_for(render_mode):
+            continue
+        entries.append(LegendEntry(layer.legend_label or layer.label, layer.legend_swatches))
+        if layer.trace is not None and layer_trace_enabled.get(layer.trace.key, False):
+            entries.append(LegendEntry(layer.trace.legend_label or layer.trace.label))
+    if show_orbit and is_dynamical and orbit_seeded:
+        entries.append(LegendEntry("Seeded orbit", (ORBIT_LEGEND_COLOUR,)))
+    if show_param_marker and not is_dynamical and param_set:
+        entries.append(LegendEntry("Parameter marker", (PARAM_MARKER_LEGEND_COLOUR,)))
+    return entries
+
+
+LEGEND_MARGIN = 8.0
+LEGEND_LINE_HEIGHT = 16.0
+LEGEND_SWATCH_SIZE = 10.0
+LEGEND_BOX_WIDTH = 260.0
+
+
+def draw_legend(painter: QPainter, width: int, height: int, entries: list[LegendEntry]) -> None:
+    """A compact, semi-transparent corner box, one line per entry -- a small
+    coloured swatch per meaning (fixed points draw three, side by side, one
+    per classification; most other entries draw one; a trace sub-entry
+    draws none, just its own text) followed by that entry's label. Top-
+    right corner, clear of the cursor-readout text paintEvent's caller
+    shows in the status bar instead of over the image itself.
+    """
+    if not entries:
+        return
+    box_height = LEGEND_MARGIN * 2 + LEGEND_LINE_HEIGHT * len(entries)
+    box_rect = QRectF(width - LEGEND_BOX_WIDTH - LEGEND_MARGIN, LEGEND_MARGIN,
+                      LEGEND_BOX_WIDTH, box_height)
+    painter.fillRect(box_rect, QColor(20, 20, 20, 190))
+    painter.setPen(QColor(230, 230, 230))
+    for i, entry in enumerate(entries):
+        line_top = box_rect.top() + LEGEND_MARGIN + i * LEGEND_LINE_HEIGHT
+        x = box_rect.left() + LEGEND_MARGIN
+        for j, swatch in enumerate(entry.swatches):
+            swatch_rect = QRectF(x + j * (LEGEND_SWATCH_SIZE + 3), line_top,
+                                 LEGEND_SWATCH_SIZE, LEGEND_SWATCH_SIZE)
+            painter.fillRect(swatch_rect, QColor(*swatch))
+        text_x = x + (len(entry.swatches) * (LEGEND_SWATCH_SIZE + 3) + 4 if entry.swatches else 0)
+        text_rect = QRectF(text_x, line_top, box_rect.right() - text_x, LEGEND_LINE_HEIGHT)
+        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter), entry.label)
+
+
 def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height: int,
                    render_mode: str, *,
                    show_critical_points: bool = False,
@@ -406,7 +509,10 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
                    orbit_connect_lines: bool = True,
                    orbit_state=None,
                    show_param_marker: bool = False,
-                   param: "complex | None" = None) -> None:
+                   param: "complex | None" = None,
+                   show_legend: bool = False,
+                   layer_enabled: "dict | None" = None,
+                   layer_trace_enabled: "dict | None" = None) -> None:
     """Draws every overlay CURRENTLY requested (the show_* flags) that is
     also VALID for `render_mode` -- critical points, traced (post-critical-
     point) orbits, and the seeded orbit itself are all dynamical-plane-only
@@ -433,6 +539,18 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
     the original code's own nesting had it (traced orbits are a critical-
     point-overlay sub-feature, not independently drawable) -- not a new
     coupling, preserved intentionally.
+
+    show_legend (Stage 3) draws build_legend_entries' output via
+    draw_legend, LAST, over everything else painted above -- layer_enabled/
+    layer_trace_enabled are ImageView's own per-layer state dicts (see
+    ImageView.paintEvent), needed here ONLY to decide which registry
+    layers' entries to show; they don't affect what the layers THEMSELVES
+    draw (that stays paint_registry_layers' job, a separate call ImageView.
+    paintEvent makes). Both default to None (treated as {}, i.e. no
+    registry-layer entries) so File > Export's existing calls -- which
+    never pass show_legend at all -- are completely unaffected; the
+    moment a caller DOES pass show_legend=True (live view now, Export
+    whenever it chooses to), this same code already knows how to draw one.
     """
     is_dynamical = render_mode not in PARAMETER_PLANE_MODES
 
@@ -506,6 +624,13 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
             painter.setPen(pen)
             painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
             painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
+
+    if show_legend:
+        entries = build_legend_entries(
+            render_mode, layer_enabled=layer_enabled or {}, layer_trace_enabled=layer_trace_enabled or {},
+            show_orbit=show_orbit, orbit_seeded=orbit_state is not None,
+            show_param_marker=show_param_marker, param_set=param is not None and finite(param))
+        draw_legend(painter, width, height, entries)
 
 
 def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
@@ -859,6 +984,9 @@ class ImageView(QWidget):
         # which governs the SEPARATE post-critical-point traces (see
         # set_orbit_connect_lines's own docstring).
         self._orbit_connect_lines: bool = True
+        # Legend (Stage 3) -- off by default, matching every other overlay's
+        # own starting state.
+        self._show_legend: bool = False
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
@@ -1163,6 +1291,10 @@ class ImageView(QWidget):
         self._orbit_connect_lines = on
         self.update()
 
+    def set_show_legend(self, show: bool) -> None:
+        self._show_legend = show
+        self.update()
+
     # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
     def refresh_orbit_staleness(self) -> None:
         """Called at the same map/param-change points refresh_layers is
@@ -1309,7 +1441,10 @@ class ImageView(QWidget):
                        orbit_connect_lines=self._orbit_connect_lines,
                        orbit_state=self.orbit_tracker.state,
                        show_param_marker=True,
-                       param=self.session.param)
+                       param=self.session.param,
+                       show_legend=self._show_legend,
+                       layer_enabled=self._layer_enabled,
+                       layer_trace_enabled=self._layer_trace_enabled)
         # The registry's OWN layers (Stage 2 onward: fixed points,
         # attracting cycles, ...) -- a SEPARATE call, not folded into
         # paint_overlays above, so Export's existing kwargs stay untouched
@@ -2113,6 +2248,18 @@ class SandboxWindow(QMainWindow):
         self.orbit_connect_lines_action.setChecked(self.orbit_connect_lines_checkbox.isChecked())
         self.orbit_connect_lines_action.toggled.connect(self.orbit_connect_lines_checkbox.setChecked)
         self.orbit_connect_lines_checkbox.toggled.connect(self.orbit_connect_lines_action.setChecked)
+        self.view_menu.addSeparator()
+
+        # Legend (Stage 3) -- menu-only, like Fixed Points/Attracting Cycles/
+        # Trace Cycle Paths: no toolbar checkbox exists or is planned for it,
+        # so it's wired directly to both ImageViews' set_show_legend rather
+        # than going through _build_view_menu_layer_actions (which is for
+        # OVERLAY_LAYERS entries specifically -- the legend isn't a data
+        # layer with its own points/gate, just a compositor-level toggle).
+        self.legend_action = self.view_menu.addAction("Legend")
+        self.legend_action.setCheckable(True)
+        self.legend_action.toggled.connect(self.image_view.set_show_legend)
+        self.legend_action.toggled.connect(self.image_view2.set_show_legend)
 
         # On macOS, Qt moves a menu titled "Help" (and any action inside
         # named "About <AppName>") into the system application menu
