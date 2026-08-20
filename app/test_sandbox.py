@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import shiboken6
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QAction, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -1360,20 +1360,37 @@ def main() -> None:
     finally:
         window.panes = original_panes
 
-    # ---- Settings tab: Apply reaches the session and triggers a real re-render ------
-    print("\nsettings tab:")
-    check(window.tabs.count() == 5 and window.tabs.tabText(0) == "View"
+    # ---- Settings dialog (Stage 5): menu-opened, not a tab -------------------------
+    print("\nsettings dialog:")
+    check(window.tabs.count() == 4 and window.tabs.tabText(0) == "View"
           and window.tabs.tabText(1) == "Terms" and window.tabs.tabText(2) == "Facts"
-          and window.tabs.tabText(3) == "Library" and window.tabs.tabText(4) == "Settings",
-          "the window has View, Terms, Facts, Library, and Settings tabs, in that order")
+          and window.tabs.tabText(3) == "Library",
+          "the window has View, Terms, Facts, and Library tabs, in that order -- Settings is "
+          "no longer one of them")
     check(window.tabs.widget(1) is window.term_editor_panel,
           "the Terms tab holds the actual TermEditorPanel instance")
     check(window.tabs.widget(2) is window.facts_panel,
           "the Facts tab holds the actual FactsPanel instance")
     check(window.tabs.widget(3) is window.library_panel,
           "the Library tab holds the actual LibraryPanel instance")
-    check(window.tabs.widget(4) is window.settings_panel,
-          "the Settings tab holds the actual SettingsPanel instance")
+
+    check(window.settings_action.isCheckable() is False,
+          "'Settings...' is a plain triggerable action, opening a dialog, not a toggle")
+    check(window.settings_action.menuRole() == QAction.MenuRole.PreferencesRole,
+          "its MenuRole is PreferencesRole, so macOS relocates it into the app menu (Cmd+,)")
+    check(window.settings_dialog.isModal() is False,
+          "the dialog is NON-modal -- Apply, see the re-render, and adjust again all without "
+          "closing it")
+    check(window.settings_panel.parent() is window.settings_dialog,
+          "the Settings dialog holds the actual SettingsPanel instance")
+    check(not window.settings_dialog.isVisible(), "the dialog starts hidden, not shown at launch")
+
+    window._on_open_settings()
+    check(window.settings_dialog.isVisible(), "triggering 'Settings...' shows the dialog")
+    reopened_dialog = window.settings_dialog
+    window._on_open_settings()
+    check(window.settings_dialog is reopened_dialog,
+          "triggering it again re-shows the SAME dialog instance, not a second stacked one")
 
     window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
     window._start_render(window.pane)
@@ -1385,7 +1402,7 @@ def main() -> None:
     window.settings_panel._apply()
 
     check(window.pane.viewport.resolution == new_resolution,
-          "Apply updates the pane's viewport resolution")
+          "Apply THROUGH THE DIALOG still updates the pane's viewport resolution")
     check(window.session.render_settings.threads == 1,
           "Apply updates the session's render_settings too, not just resolution")
 
@@ -1393,7 +1410,7 @@ def main() -> None:
                  and window.image_view._buffer_viewport.resolution == round(new_resolution * 1.3),
                  timeout_ms=10000)
     check(ok, "Apply triggers an immediate re-render at the NEW resolution -- not the debounce, "
-          "and not the old one")
+          "and not the old one -- exactly as it did as a tab")
 
     # ---- mode selector: switching modes reaches the session and re-renders ------------
     print("\nmode selector:")

@@ -3,9 +3,10 @@
 Single window, driven by app.session.Session, with tabs: the image pane
 (render pipeline: threaded, progressive, cursor-anchored zoom, overscan
 buffer, correct orientation), a term editor (app/term_editor_panel.py), a
-read-only dynamical-facts panel (app/facts_panel.py), a family library
-(app/library_panel.py), and a Settings panel (app/settings_panel.py) for
-render/cache configuration.
+read-only dynamical-facts panel (app/facts_panel.py), and a family library
+(app/library_panel.py). Render/cache configuration (app/settings_panel.py)
+lives outside the tab strip, in a non-modal dialog opened from File >
+Settings... (see SandboxWindow._build_settings_dialog).
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -29,7 +30,7 @@ import numpy as np
 import shiboken6
 from PySide6.QtCore import (QBuffer, QIODevice, QObject, QPoint, QPointF, QRect, QRectF,
                             QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QTabWidget, QToolBar,
@@ -2098,11 +2099,13 @@ class SandboxWindow(QMainWindow):
         view_layout.addWidget(self.orbit_panel)
 
         # A QTabWidget as the central widget, not the bare view container --
-        # this is what makes room for the Settings tab (and whatever tab
-        # comes after it) without redesigning the window. The toolbar stays
-        # a QMainWindow-level toolbar, not per-tab: Reset View only means
-        # anything on the View tab, but QMainWindow toolbars are independent
-        # of which central-widget tab is showing either way.
+        # this is what makes room for Terms/Facts/Library (and whatever tab
+        # comes after them) without redesigning the window. Settings is NOT
+        # one of these tabs (Stage 5) -- see _build_settings_dialog's own
+        # docstring for why it lives in a menu-opened dialog instead. The
+        # toolbar stays a QMainWindow-level toolbar, not per-tab: Reset View
+        # only means anything on the View tab, but QMainWindow toolbars are
+        # independent of which central-widget tab is showing either way.
         self.tabs = QTabWidget(self)
         self.tabs.addTab(self.view_container, "View")
         self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
@@ -2113,10 +2116,10 @@ class SandboxWindow(QMainWindow):
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
                                           self._on_library_changed, self)
         self.tabs.addTab(self.library_panel, "Library")
-        self.settings_panel = SettingsPanel(self.session, self._on_settings_applied, self)
-        self.tabs.addTab(self.settings_panel, "Settings")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
+
+        self._build_settings_dialog()
 
         toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
@@ -2178,6 +2181,17 @@ class SandboxWindow(QMainWindow):
         self.export_image_action.triggered.connect(self._on_export_image)
         self.export_facts_action = self.export_menu.addAction("Export Facts (JSON)...")
         self.export_facts_action.triggered.connect(self._on_export_facts)
+        self.file_menu.addSeparator()
+
+        # Settings (Stage 5): opens self.settings_dialog (built by
+        # _build_settings_dialog, called just above) rather than a tab --
+        # see that method's own docstring. PreferencesRole is what makes
+        # Qt relocate this out of File and into the app menu on macOS
+        # (Cmd+,) regardless of where it's added in code; File is just
+        # where it lives on platforms that don't do that relocation.
+        self.settings_action = self.file_menu.addAction("Settings...")
+        self.settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        self.settings_action.triggered.connect(self._on_open_settings)
 
         # ---- View menu: the SOLE control for every toggle below (Stage 4) -------
         # Same store-on-self reason as file_menu/help_menu -- see help_menu's own
@@ -2256,6 +2270,41 @@ class SandboxWindow(QMainWindow):
 
         self._update_pane_focus_styling()
         self._sync_orbit_panel()
+
+    def _build_settings_dialog(self) -> None:
+        """Settings (Stage 5) lives in a NON-MODAL dialog opened from a
+        menu action, not a tab -- unlike View/Terms/Facts/Library,
+        adjusting render/cache settings is an occasional, deliberate
+        action, not something worth a permanently-visible tab slot; a
+        dialog you can leave open WHILE looking at the re-rendered image
+        (Apply -> see the result -> adjust, without closing anything) is
+        also a more natural fit for that workflow than switching tabs back
+        and forth would be. Built ONCE here (not per-open) and stored on
+        self.settings_dialog -- the same GC-safety reason help_menu/
+        about_action are stored on self (see that comment): a local-only
+        QDialog would be eligible for Python to collect the moment
+        _build_ui returns, and re-showing it via .show() after that garbage
+        collection would just no-op invisibly instead of raising an
+        obvious error. _on_open_settings re-shows this SAME instance on
+        every trigger, never constructing a second one -- multiple Settings
+        windows stacking up would be its own bug, not a feature.
+
+        SettingsPanel itself is UNCHANGED (Apply -> Session.apply_settings/
+        per-pane resolution/save_settings/immediate re-render, all still
+        exactly _on_settings_applied's own job) -- it doesn't know or care
+        whether its parent is a QTabWidget page or a QDialog.
+        """
+        self.settings_dialog = QDialog(self)
+        self.settings_dialog.setWindowTitle("Settings")
+        dialog_layout = QVBoxLayout(self.settings_dialog)
+        self.settings_panel = SettingsPanel(self.session, self._on_settings_applied,
+                                            self.settings_dialog)
+        dialog_layout.addWidget(self.settings_panel)
+
+    def _on_open_settings(self) -> None:
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
 
     def _build_view_menu_layer_actions(self) -> None:
         """One checkable QAction per OVERLAY_LAYERS entry (plus, for a layer
@@ -2690,7 +2739,7 @@ class SandboxWindow(QMainWindow):
         self._debounce_timers[pane].stop()
         self._start_render(pane)
 
-    # ---- settings: apply on demand, from the Settings tab -----------------------
+    # ---- settings: apply on demand, from the Settings dialog (Stage 5) ----------
     def _on_settings_applied(self, new_settings: Settings) -> None:
         # Already validated by SettingsPanel before this is ever called
         # (see its _apply) -- this just carries the effects: update the
