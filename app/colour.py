@@ -308,46 +308,20 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
 
 
 # ---- Julia, RATIONAL classification (Stage 2 of the sphere-aware milestone) ------------
-
-def colour_julia_rational(values: np.ndarray, labels: np.ndarray, band_width: float = 1.0,
-                          period_bands: float = 12.0, eps: float = 1e-9) -> np.ndarray:
-    """Julia colouring for a RATIONAL map's sphere-aware classification --
-    the SAME (smooth value, basin label) pair colour_basin's own (primary,
-    shading) split uses, deliberately visualized DIFFERENTLY: hue = which
-    attractor was reached (labels, the SAME golden-angle scheme colour_basin
-    uses, so the two modes agree on "basin X's colour"), but brightness is
-    CYCLICALLY BANDED via the smooth chordal approach-rate (values) --
-    reusing scale_scalar_field's own log+modulo banding (the same machinery
-    colour_scalar_field uses for Green's equipotential rings) instead of
-    colour_basin's flat, monotonic single fade-to-black. The result is the
-    familiar "concentric approach bands tightening onto the set" escape-
-    time look, boundary-emphasizing, rather than basin's flatter
-    categorical read -- same classifier, genuinely different picture, per
-    the milestone's own "keep them visually distinct" direction.
-
-    Unresolved pixels (label == 0, matching colour_basin's own "0 =
-    unresolved" convention) are always flat UNRESOLVED_BASIN_RGB, regardless
-    of whatever `values` happens to hold there (0, per
-    Renderer::render_julia_rational's own "0 = unresolved" convention too).
-    """
-    labels = np.asarray(labels)
-    resolved = labels > 0
-    rgb = np.zeros(labels.shape + (3,), dtype=np.uint8)
-    if not np.any(resolved):
-        return rgb
-
-    base = np.zeros(labels.shape + (3,), dtype=float)
-    for basin_id in np.unique(labels[resolved]).astype(np.int64):
-        base[labels == basin_id] = _hue_to_rgb_255(_golden_hue(int(basin_id)))
-
-    bands = scale_scalar_field(values, band_width, eps)
-    t = np.mod(bands, period_bands) / period_bands if period_bands > 0 else np.zeros_like(bands)
-    brightness = 0.3 + 0.7 * t   # oscillates within [0.3, 1.0] every band -- genuine banding,
-    shaded = base * brightness[..., None]   # not colour_basin's own monotonic single fade
-
-    rgb = shaded.round().clip(0, 255).astype(np.uint8)
-    rgb[~resolved] = UNRESOLVED_BASIN_RGB
-    return rgb
+#
+# Deliberately NOT a bespoke colourer here. A rational map's "julia" render
+# colours through colour_escape_time -- the SAME function a certified
+# polynomial's does -- using only the smooth chordal approach-rate (the
+# stacked payload's own values layer; see cdx::Renderer::render_julia's own
+# doc comment). The basin LABEL a pixel reached is still computed and kept
+# available (for the cursor readout -- see ImageView._sample_at_pixel), just
+# never used for colouring: which basin a pixel is in is BASIN mode's own
+# question, not Julia's. A per-attractor hue scheme was tried here first and
+# reverted -- it changed Julia's own COLOURING PHILOSOPHY (palette + scaling,
+# honoured by every other escape-time-shaped mode) into something bespoke,
+# which is exactly what this milestone's own governing principle rules out:
+# the sphere-aware revamp changes CLASSIFICATION and the SCALAR a pixel
+# produces, never a mode's colouring philosophy.
 
 
 # ---- scalar field (Green's-function-shaped data) ---------------------------------------

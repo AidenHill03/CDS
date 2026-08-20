@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 import cdx
 from app.about_dialog import AboutDialog
-from app.colour import colour_basin, colour_escape_time, colour_julia_rational, colour_scalar_field
+from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
@@ -739,15 +739,34 @@ def array_to_qimage(payload, mode: str, settings: Settings,
 
     Dispatches to app.colour by render mode: "parameter" is always escape-
     time (colour_escape_time, using `settings`' palette/scaling/period);
-    "julia" is escape-time too UNLESS it's a RATIONAL map's render (Stage
-    2 -- see below); "basin" is categorical + SHADED basin colouring (hue =
-    basin id, brightness = convergence speed); "greens"/"parameter_greens"
-    are scalar-field equipotential banding (colour_scalar_field, using
+    "julia" is escape-time too, ALWAYS -- see below for what changes (and
+    what deliberately does not) for a RATIONAL map's render (Stage 2);
+    "basin" is categorical + SHADED basin colouring (hue = basin id,
+    brightness = convergence speed); "greens"/"parameter_greens" are
+    scalar-field equipotential banding (colour_scalar_field, using
     `settings`' greens_band_width/greens_period_bands/greens_contour) --
     the SAME display treatment for both, since they're the same KIND of
     data (a non-negative potential) even though they live on different
     planes (see cdx::Renderer::render_parameter_greens' own header comment
     on why the two are computed by genuinely different kernels).
+
+    GOVERNING PRINCIPLE: the sphere-aware milestone changes CLASSIFICATION
+    and the SCALAR a pixel produces; it must never change a mode's
+    COLOURING PHILOSOPHY. A rational map's "julia" render must look like
+    the SAME KIND of image a polynomial's does -- palette + scaling +
+    period, exactly like colour_escape_time already gives every other
+    escape-time-shaped render -- not a bespoke scheme. Concretely: the
+    smooth chordal approach-rate (index 0 of the stacked payload) is the
+    direct analog of smooth escape time (fast approach = low value = the
+    SAME palette end fast escape already lands at), and an unresolved
+    pixel (0, per Renderer::render_julia_rational's own "0 = unresolved"
+    convention) flows into colour_escape_time's existing "0 = never
+    escaped" branch unmodified -- no special-casing needed at all, since
+    both conventions already agree. Labels (index 1) are extracted and
+    kept available to the caller (see ImageView._sample_at_pixel) for the
+    cursor readout to still report which basin a pixel is in; only the
+    COLOURING ignores them -- which basin was reached is BASIN mode's own
+    job, not Julia's.
 
     "basin" mode's payload is STACKED (see render_map's own docstring):
     shape (2, height, width), index 0 = labels, index 1 = iterations --
@@ -760,10 +779,11 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     SAME way, but only for a RATIONAL map (see render_map's own docstring)
     -- distinguished here by `payload.ndim` (3 = stacked/rational, 2 =
     plain/certified-polynomial) rather than a separate flag, since that IS
-    exactly what render_map's own return shape already encodes.
-    "greens"/"parameter_greens" payloads are a plain 2D array like
-    "parameter" (and a certified-polynomial "julia"), just with a
-    different colour treatment (see below).
+    exactly what render_map's own return shape already encodes; only the
+    VALUES layer (index 0) is actually coloured, exactly like a plain 2D
+    escape-time array would be. "greens"/"parameter_greens" payloads are a
+    plain 2D array like "parameter" (and a certified-polynomial "julia"),
+    just with a different colour treatment (see below).
 
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
@@ -776,12 +796,6 @@ def array_to_qimage(payload, mode: str, settings: Settings,
                            period=settings.colour_period or None,
                            scaling=settings.colour_scaling)
         return _rgb_to_qimage(rgb)
-    if mode == "julia" and np.asarray(payload).ndim == 3:
-        values = np.flipud(payload[0])
-        labels = np.flipud(payload[1])
-        rgb = colour_julia_rational(values, labels, band_width=settings.greens_band_width,
-                                    period_bands=settings.greens_period_bands)
-        return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
         flipped = np.flipud(payload)
         rgb = colour_scalar_field(flipped, palette=settings.colour_palette,
@@ -789,6 +803,13 @@ def array_to_qimage(payload, mode: str, settings: Settings,
                                   period_bands=settings.greens_period_bands,
                                   contour=settings.greens_contour)
         return _rgb_to_qimage(rgb)
+    # A RATIONAL "julia" payload is stacked (values, labels) -- colour ONLY
+    # the values layer, through the exact SAME colour_escape_time call a
+    # plain (certified-polynomial) payload already goes through below; see
+    # this function's own "GOVERNING PRINCIPLE" paragraph for why labels
+    # never reach the colourer.
+    if mode == "julia" and np.asarray(payload).ndim == 3:
+        payload = payload[0]
     flipped = np.flipud(payload)
     if mode in ("julia", "parameter"):
         rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,

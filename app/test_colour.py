@@ -15,8 +15,8 @@ from __future__ import annotations
 import numpy as np
 
 from app.colour import (NEVER_ESCAPED_RGB, PALETTE_NAMES, PALETTES, UNRESOLVED_BASIN_RGB,
-                        colour_basin, colour_escape_time, colour_julia_rational,
-                        colour_scalar_field, scale_histogram_eq, scale_log1p, scale_scalar_field)
+                        colour_basin, colour_escape_time, colour_scalar_field,
+                        scale_histogram_eq, scale_log1p, scale_scalar_field)
 
 failures = 0
 
@@ -199,34 +199,13 @@ def main() -> None:
           "with no iterations array, the scaling mode has no effect at all -- same flat "
           "colour regardless of 'scaling'")
 
-    # ---- colour_julia_rational: hue by basin, CYCLICALLY banded brightness ----------
-    print("\ncolour_julia_rational (Stage 2 -- rational Julia classification):")
-    jlabels = np.array([0, 1, 1, 1, 2, 2])
-    jvalues = np.array([0.0, 1.0, 2.0, 3.0, 1.0, 2.0])
-    jimg = colour_julia_rational(jvalues, jlabels, band_width=1.0, period_bands=12.0)
-    check(tuple(jimg[0]) == UNRESOLVED_BASIN_RGB,
-          "an unresolved (label 0) pixel is flat black, matching colour_basin's own convention")
-    check(tuple(jimg[1]) != tuple(jimg[4]),
-          "two different basin ids (1 vs 2) get visually distinct hues, the SAME golden-angle "
-          "scheme colour_basin uses")
-    check(tuple(jimg[1]) != tuple(jimg[2]) or tuple(jimg[2]) != tuple(jimg[3]),
-          "within the SAME basin, different approach-rate values produce genuinely "
-          "different shading -- not a flat wash across the whole basin")
-
-    # Cyclic banding: values one full period apart (band_width=1,
-    # period_bands=12 -> a period of e^12 in raw value) land at the SAME
-    # brightness within the SAME basin -- the concentric-ring signature,
-    # not colour_basin's own monotonic single fade.
-    period_labels = np.array([1, 1])
-    period_values = np.array([1.0, float(np.e ** 12)])
-    pimg = colour_julia_rational(period_values, period_labels, band_width=1.0, period_bands=12.0)
-    check(tuple(pimg[0]) == tuple(pimg[1]),
-          "values one full band period apart land at the same shading within the same "
-          "basin -- genuine cyclic banding, not a monotonic fade")
-
-    all_unresolved_j = colour_julia_rational(np.zeros(4), np.zeros(4, dtype=int))
-    check(np.all(all_unresolved_j == 0),
-          "an all-unresolved (label 0 everywhere) array is entirely black, no crash")
+    # Rational Julia (Stage 2) has NO bespoke colourer at this layer any more
+    # -- it colours through colour_escape_time directly (see app/sandbox.py's
+    # array_to_qimage, "GOVERNING PRINCIPLE"), so there is nothing new to
+    # unit-test here beyond colour_escape_time's own existing coverage above;
+    # see app/test_sandbox.py for the integration-level check that a
+    # rational map's julia render actually goes through it (palette-
+    # sensitive, label-blind).
 
     # ---- colour_scalar_field: every pixel coloured, cyclic banding ------------------
     print("\ncolour_scalar_field:")

@@ -157,12 +157,17 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         RATIONAL map (Stage 2: has poles, not cdx.polynomial_escape_
         certified) -- index 0 is the smooth chordal approach-rate value (0
         = unresolved), index 1 is which attractor (Cycle.id) each pixel
-        reached (0 = unresolved), for the SAME "hue from the label,
-        shading from the rate" split colour_basin already does (see
-        app/colour.py's colour_julia_rational). For a CERTIFIED polynomial
-        (the common case), still a plain 2D array -- today's escape-time
-        values, UNCHANGED -- since there is no basin/label concept on that
-        path at all (see cdx::Renderer::render_julia's own doc comment).
+        reached (0 = unresolved). ONLY index 0 is actually coloured
+        (through colour_escape_time, the SAME palette/scaling pipeline a
+        certified polynomial's plain array already goes through -- see
+        app/sandbox.py's array_to_qimage, "GOVERNING PRINCIPLE"); index 1
+        is kept only for the cursor readout to report which basin a pixel
+        is in (see ImageView._sample_at_pixel) -- which basin was reached
+        is BASIN mode's own question, not something Julia colours by. For
+        a CERTIFIED polynomial (the common case), still a plain 2D array
+        -- today's escape-time values, UNCHANGED -- since there is no
+        label concept on that path at all (see cdx::Renderer::
+        render_julia's own doc comment).
       - "basin" returns a STACKED 3D array, shape (2, height, width):
         index 0 is the label (0 = unresolved, else the basin/cycle id, per
         cdx::Renderer::render_basin), index 1 is the iteration count each

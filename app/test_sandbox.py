@@ -35,7 +35,7 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 import app.settings as settings_module
-from app.colour import PALETTES
+from app.colour import NEVER_ESCAPED_RGB, PALETTES
 from app.library_panel import (_DYNAMICAL_VIEW_FALLBACK, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for)
 from app.pane import Pane
@@ -223,26 +223,54 @@ def main() -> None:
           "settings.colour_period reaches basin mode too -- values one period apart land at "
           "the same shading")
 
-    # Stage 2: a RATIONAL map's "julia" render is ALSO stacked (2, height,
-    # width) -- values then labels -- distinguished from the certified-
-    # polynomial plain-2D case by ndim alone (see array_to_qimage's own
-    # docstring), not a separate flag.
-    rational_julia_values = np.array([[0.0, 1.0, 2.0, 1.0]])
-    rational_julia_labels = np.array([[0.0, 1.0, 1.0, 2.0]])
+    # Stage 2 (corrected): a RATIONAL map's "julia" render is stacked (2,
+    # height, width) -- values then labels -- distinguished from the
+    # certified-polynomial plain-2D case by ndim alone (see
+    # array_to_qimage's own docstring), not a separate flag. GOVERNING
+    # PRINCIPLE: only the VALUES layer is coloured, through the exact same
+    # colour_escape_time pipeline a plain escape-time array already uses --
+    # labels never reach the colourer at all (that's basin mode's own job).
+    # pixel 0: unresolved (value=0, label=0). pixels 1&2: the SAME value
+    # (100) but DIFFERENT labels (1 vs 2) -- must land at the SAME colour,
+    # proving colouring is label-blind. pixel 3: the SAME label as pixel 1
+    # (1) but a DIFFERENT value (199) -- must land at a DIFFERENT colour,
+    # proving colouring follows the smooth value like ordinary escape time.
+    rational_julia_values = np.array([[0.0, 100.0, 100.0, 199.0]])
+    rational_julia_labels = np.array([[0.0, 1.0, 2.0, 1.0]])
     rational_julia_array = np.stack([rational_julia_values, rational_julia_labels])
     check(rational_julia_array.shape == (2, 1, 4),
           "sanity: the stacked rational-julia test array has the expected shape")
     rational_julia_img = array_to_qimage(rational_julia_array, "julia", settings, max_iter=200)
     check(rational_julia_img.format() == QImage.Format.Format_RGB888,
-          "rational julia mode also produces RGB, via the SAME stacked-array path basin uses")
+          "rational julia mode also produces RGB, via the SAME colour_escape_time path a "
+          "certified polynomial's plain array uses")
     check(rational_julia_img.width() == 4 and rational_julia_img.height() == 1,
           "output dimensions match the STACKED array's own (height, width), not (2, height, width)")
     unresolved_j = rational_julia_img.pixelColor(0, 0)
-    check((unresolved_j.red(), unresolved_j.green(), unresolved_j.blue()) == (0, 0, 0),
-          "rational julia: an unresolved (label 0) pixel is flat black")
-    j1, j3 = rational_julia_img.pixelColor(1, 0), rational_julia_img.pixelColor(3, 0)
+    check((unresolved_j.red(), unresolved_j.green(), unresolved_j.blue()) == NEVER_ESCAPED_RGB,
+          "rational julia: an unresolved (value=0) pixel gets colour_escape_time's own "
+          "NEVER_ESCAPED_RGB sentinel, the SAME flat colour a never-escaped polynomial pixel "
+          "gets -- not a separate 'unresolved basin' treatment")
+    j1, j2, j3 = (rational_julia_img.pixelColor(1, 0), rational_julia_img.pixelColor(2, 0),
+                 rational_julia_img.pixelColor(3, 0))
+    check((j1.red(), j1.green(), j1.blue()) == (j2.red(), j2.green(), j2.blue()),
+          "rational julia: two pixels with the SAME smooth value but DIFFERENT basin labels "
+          "get the IDENTICAL colour -- colouring genuinely ignores which attractor was reached")
     check((j1.red(), j1.green(), j1.blue()) != (j3.red(), j3.green(), j3.blue()),
-          "rational julia: two different basin ids get visually distinct colours")
+          "...but two pixels with the SAME label and DIFFERENT smooth values get DIFFERENT "
+          "colours -- colouring follows the value, exactly like ordinary escape time")
+
+    # Palette-sensitivity: changing settings.colour_palette must change a
+    # rational julia render's output, the same as it would for a certified
+    # polynomial's -- proving this genuinely goes through colour_escape_time
+    # (palette-aware) and not some palette-blind bespoke path.
+    magma_settings = Settings(colour_palette="magma", colour_scaling="log1p", colour_period=0.0)
+    rational_julia_magma = array_to_qimage(rational_julia_array, "julia", magma_settings,
+                                           max_iter=200)
+    check(rational_julia_magma.constBits().tobytes() != rational_julia_img.constBits().tobytes(),
+          "rational julia: changing settings.colour_palette changes the rendered bytes -- "
+          "settings.colour_palette/colour_scaling/colour_period are genuinely honoured, "
+          "exactly as the governing principle requires")
 
     # render_map's "greens"/"parameter_greens" return a plain 2D array (see
     # its own docstring) -- array_to_qimage must be fed that same shape.
