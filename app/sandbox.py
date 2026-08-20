@@ -767,7 +767,8 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         labels = np.flipud(payload[0])
         iterations = np.flipud(payload[1])
         rgb = colour_basin(labels, iterations, max_iter=max_iter,
-                           period=settings.colour_period or None)
+                           period=settings.colour_period or None,
+                           scaling=settings.colour_scaling)
         return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
         flipped = np.flipud(payload)

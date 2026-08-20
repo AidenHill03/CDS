@@ -251,14 +251,25 @@ def _hue_to_rgb_255(h: float, s: float = 0.75, v: float = 1.0) -> tuple[float, f
 
 
 def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
-                 max_iter: int = 1, period: float | None = None) -> np.ndarray:
+                 max_iter: int = 1, period: float | None = None,
+                 scaling: str = "log1p") -> np.ndarray:
     """Hue = basin index (golden-angle rotation, see _golden_hue), brightness
-    = convergence speed when `iterations` is given -- the SAME scale_log1p
-    machinery escape-time uses, since basin iteration counts have the
-    identical skew CLAUDE.md's measurement describes for escape counts.
-    Unresolved pixels (label == 0, per cdx::Renderer::render_basin's own
-    "0 = unresolved" convention) are always flat UNRESOLVED_BASIN_RGB,
-    regardless of shading.
+    = convergence speed when `iterations` is given -- the SAME scale_log1p/
+    scale_histogram_eq machinery escape-time uses (colour_escape_time),
+    since basin iteration counts have the identical skew CLAUDE.md's
+    measurement describes for escape counts. Unresolved pixels (label == 0,
+    per cdx::Renderer::render_basin's own "0 = unresolved" convention) are
+    always flat UNRESOLVED_BASIN_RGB, regardless of shading.
+
+    `scaling` picks between the two exactly as colour_escape_time does:
+    "log1p" (default, comparable across renders, `period` gives the cyclic
+    banded look) or "histogram" (scale_histogram_eq, ranked against just
+    THIS image's own resolved pixels via `mask=resolved` -- unresolved
+    pixels take no part in the ranking, the same "restricted to real data"
+    treatment colour_escape_time's own histogram branch gives escaped
+    pixels). `period` only has meaning for "log1p" -- scale_histogram_eq
+    has no periodic concept, exactly as colour_escape_time's own histogram
+    branch already ignores it.
 
     Brighter = converged FASTER (a small iteration count): points deep in
     a basin, far from the boundary, typically resolve almost immediately;
@@ -269,6 +280,8 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
     stays visually distinct from an UNRESOLVED pixel, which is exactly and
     only black.
     """
+    if scaling not in SCALING_MODES:
+        raise ValueError(f"unknown scaling {scaling!r}; must be one of {SCALING_MODES}")
     labels = np.asarray(labels)
     resolved = labels > 0
     rgb = np.zeros(labels.shape + (3,), dtype=np.uint8)
@@ -282,7 +295,10 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
     if iterations is None:
         shaded = base
     else:
-        t = scale_log1p(iterations, max_iter, period)
+        if scaling == "log1p":
+            t = scale_log1p(iterations, max_iter, period)
+        else:
+            t = scale_histogram_eq(iterations, resolved)
         brightness = 0.15 + 0.85 * (1.0 - t)   # fast convergence (t near 0) -> bright
         shaded = base * brightness[..., None]
 

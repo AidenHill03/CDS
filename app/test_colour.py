@@ -154,6 +154,51 @@ def main() -> None:
     all_unresolved = colour_basin(np.zeros(5, dtype=int))
     check(np.all(all_unresolved == 0), "an all-unresolved label array is entirely black, no crash")
 
+    # ---- colour_basin: gradient scaling modes (Stage 0) ------------------------------
+    print("\ncolour_basin: gradient scaling modes:")
+    try:
+        colour_basin(labels, iters, max_iter=200, scaling="not-a-real-scaling")
+        check(False, "an unknown scaling name raises")
+    except ValueError as e:
+        check("scaling" in str(e), "ValueError names the bad scaling mode, same as "
+              "colour_escape_time's own validation")
+
+    # One basin, six pixels spanning a REAL range of convergence speed -- not just
+    # the two-sample fast/slow check above -- to confirm the gradient is a genuine
+    # spread across the basin, not a near-flat wash.
+    rich_labels = np.ones(6, dtype=int)
+    rich_iters = np.array([1, 2, 5, 20, 80, 190])
+    for scaling in ("log1p", "histogram"):
+        rimg = colour_basin(rich_labels, rich_iters, max_iter=200, scaling=scaling)
+        brightness = rimg.astype(float).sum(axis=1)   # proportional to the 0.15..1.0 factor
+        check(brightness.max() - brightness.min() > brightness.max() * 0.3,
+              f"{scaling} scaling produces a REAL spread of brightness across iterations "
+              f"1..190 within a single basin, not a near-flat gradient")
+        check(all(brightness[i] >= brightness[i + 1] for i in range(len(brightness) - 1)),
+              f"{scaling} scaling is monotonic -- brightness never increases with slower "
+              f"convergence")
+
+    # A cyclic period reaches basin the same way it already does for escape-time --
+    # values one period apart land at the same brightness.
+    period_labels = np.ones(2, dtype=int)
+    period_iters = np.array([1.0, 11.0])   # one period (10) apart
+    pimg = colour_basin(period_labels, period_iters, max_iter=200, period=10.0)
+    check(tuple(pimg[0]) == tuple(pimg[1]),
+          "a cyclic period reaches basin's log1p scaling too -- values one period apart "
+          "land at the same brightness")
+
+    # Switching scaling mode changes ONLY the shading, never which basin gets which
+    # hue -- distinct-hue and unresolved/flat behavior hold under histogram scaling too.
+    hist_hue_img = colour_basin(labels, iters, max_iter=200, scaling="histogram")
+    check(tuple(hist_hue_img[0]) == UNRESOLVED_BASIN_RGB,
+          "unresolved stays flat black under histogram scaling too")
+    check(tuple(hist_hue_img[1]) != tuple(hist_hue_img[3]),
+          "two different basin ids stay visually distinct under histogram scaling too")
+    hist_flat = colour_basin(labels, iterations=None, scaling="histogram")
+    check(tuple(hist_flat[1]) == tuple(flat[1]),
+          "with no iterations array, the scaling mode has no effect at all -- same flat "
+          "colour regardless of 'scaling'")
+
     # ---- colour_scalar_field: every pixel coloured, cyclic banding ------------------
     print("\ncolour_scalar_field:")
     field = np.array([1e-9, 1.0, np.e ** 12, np.e ** 24])

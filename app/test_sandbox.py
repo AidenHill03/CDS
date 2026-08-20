@@ -197,6 +197,32 @@ def main() -> None:
           "basin mode: within the same basin, the FAST-converging pixel (iters=3) is brighter "
           "than the slow one (iters=190) -- shading actually reaches the displayed image")
 
+    # Stage 0: settings.colour_scaling/colour_period reach basin mode too, not just
+    # escape-time/greens -- array_to_qimage's basin branch must actually forward them.
+    basin_hist_settings = Settings(colour_palette="viridis", colour_scaling="histogram",
+                                   colour_period=0.0)
+    basin_hist_img = array_to_qimage(basin_array, "basin", basin_hist_settings, max_iter=200)
+    log_pixels = [basin_img.pixelColor(x, 0) for x in range(4)]
+    hist_pixels = [basin_hist_img.pixelColor(x, 0) for x in range(4)]
+    check(any((lp.red(), lp.green(), lp.blue()) != (hp.red(), hp.green(), hp.blue())
+             for lp, hp in zip(log_pixels, hist_pixels)),
+          "settings.colour_scaling='histogram' actually reaches basin mode's rendered pixels, "
+          "producing DIFFERENT bytes than the default 'log1p' -- not silently ignored")
+    unresolved_hist = basin_hist_img.pixelColor(0, 0)
+    check((unresolved_hist.red(), unresolved_hist.green(), unresolved_hist.blue()) == (0, 0, 0),
+          "...and the unresolved pixel stays flat black under histogram scaling too")
+
+    basin_period_settings = Settings(colour_palette="viridis", colour_scaling="log1p",
+                                     colour_period=10.0)
+    period_labels = np.array([[1.0, 1.0]])
+    period_iters = np.array([[1.0, 11.0]])   # one period (10) apart
+    period_array = np.stack([period_labels, period_iters])
+    basin_period_img = array_to_qimage(period_array, "basin", basin_period_settings, max_iter=200)
+    p0, p1 = basin_period_img.pixelColor(0, 0), basin_period_img.pixelColor(1, 0)
+    check((p0.red(), p0.green(), p0.blue()) == (p1.red(), p1.green(), p1.blue()),
+          "settings.colour_period reaches basin mode too -- values one period apart land at "
+          "the same shading")
+
     # render_map's "greens"/"parameter_greens" return a plain 2D array (see
     # its own docstring) -- array_to_qimage must be fed that same shape.
     greens_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
