@@ -413,6 +413,126 @@ int main() {
               "(+-1, +-i), each its own attracting fixed point");
     }
 
+    // ---- MILESTONE ACCEPTANCE TEST: rational Julia is escape_radius-INVARIANT --------
+    // (Stage 2) -- the Julia set is an invariant of the MAP, so escape_radius
+    // must no longer touch rational classification at all; a polynomial's
+    // fast path is unaffected either way. Baked as a hard test per the
+    // milestone's own instruction -- must pass now and stay passing.
+    std::printf("\nMILESTONE ACCEPTANCE TEST: rational Julia is escape_radius-invariant, "
+               "polynomial Julia unchanged:\n");
+    {
+        RationalMap newton4("newton4");   // (3/4)z + (1/4)z^-3 -- Newton's method for z^4-1
+        newton4.add_poly({0.75, 0.0}, 1, 0, "(3/4)z");
+        newton4.add_pole({0.0, 0.0}, {0.25, 0.0}, 3, 0, "1/(4z^3)");
+        const Cplx a{0.0, 0.0};
+        check(polynomial_escape_certified(newton4) == false,
+              "sanity: Newton z^4-1 genuinely takes the rational path");
+        const auto cycles = find_attractors(newton4, a);
+        check(cycles.size() == 4, "sanity: 4 attracting cycles (the 4 fourth-roots of unity)");
+
+        const Viewport v{{0.0, 0.0}, 2.0, 121};
+        Renderer r2(Map::custom(newton4, a), v, RenderSettings{100, 2.0, 1e-6, 1});
+        Renderer r10(Map::custom(newton4, a), v, RenderSettings{100, 10.0, 1e-6, 1});
+        Image labels2, labels10;
+        const Image vals2 = r2.render_julia(nullptr, cycles, &labels2);
+        const Image vals10 = r10.render_julia(nullptr, cycles, &labels10);
+
+        bool values_identical = true, labels_identical = true;
+        for (std::size_t i = 0; i < vals2.data.size(); ++i) {
+            if (vals2.data[i] != vals10.data[i]) values_identical = false;
+            if (labels2.data[i] != labels10.data[i]) labels_identical = false;
+        }
+        check(values_identical,
+              "ACCEPTANCE: rational Julia (Newton z^4-1) at escape_radius=2 and "
+              "escape_radius=10 produces BYTE-IDENTICAL smooth values");
+        check(labels_identical,
+              "ACCEPTANCE: ...and byte-identical basin labels too, not just the "
+              "smooth channel");
+
+        // Newton z^4-1 classifies the 4 root basins, with the Julia set (the
+        // common boundary) as unresolved pixels -- not one dominant basin,
+        // not everything unresolved.
+        int counts[5] = {0, 0, 0, 0, 0};   // index 0 = unresolved, 1..4 = the 4 roots
+        for (double v : labels2.data) {
+            const int k = static_cast<int>(v);
+            if (k >= 0 && k <= 4) ++counts[k];
+        }
+        const int total = static_cast<int>(labels2.data.size());
+        check(counts[1] > 0 && counts[2] > 0 && counts[3] > 0 && counts[4] > 0,
+              "Newton z^4-1 Julia: all 4 root basins are actually present in the image, "
+              "not just discovered by find_attractors");
+        check(counts[0] > 0 && counts[0] < total,
+              "...and SOME pixels are unresolved (the Julia set boundary itself), but not "
+              "the whole image -- a real classification, not everything-or-nothing");
+
+        // Polynomial Julia (mandelbrot) is UNCHANGED: same escape-time values
+        // regardless of what cycles/labels are passed (both ignored on the
+        // certified path), and produces the SAME output the pre-Stage-2 code
+        // did (compared directly against a call with the OLD, cycles-free
+        // signature shape -- both defaulted here).
+        RationalMap mandel = RationalMap::mandelbrot();
+        const Cplx pa{-0.7269, 0.1889};
+        check(polynomial_escape_certified(mandel) == true,
+              "sanity: mandelbrot is certified -- takes the unchanged fast path");
+        Renderer rp(Map::custom(mandel, pa), Viewport{{0.0, 0.0}, 1.5, 121},
+                   RenderSettings{200, 2.0, 1e-6, 1});
+        Image poly_labels;
+        const Image poly_vals_with_cycles =
+            rp.render_julia(nullptr, find_attractors(mandel, pa), &poly_labels);
+        const Image poly_vals_default = rp.render_julia();   // no cycles/labels at all
+        bool poly_identical = true;
+        for (std::size_t i = 0; i < poly_vals_with_cycles.data.size(); ++i) {
+            if (poly_vals_with_cycles.data[i] != poly_vals_default.data[i]) poly_identical = false;
+        }
+        check(poly_identical,
+              "ACCEPTANCE: a certified polynomial's Julia render is IDENTICAL whether or "
+              "not cycles/labels are passed -- the fast path genuinely ignores them, not "
+              "just happens to agree this run");
+        bool poly_labels_all_zero = true;
+        for (double v : poly_labels.data) if (v != 0.0) poly_labels_all_zero = false;
+        check(poly_labels_all_zero,
+              "...and `labels` stays all-zero for the certified path -- no basin concept "
+              "there, matching escape-time's own single-channel output");
+    }
+
+    // ---- infinity-attracting rational Julia routes infinity as a basin -------------
+    std::printf("\ninfinity-attracting rational Julia: infinity is a genuine basin, not a "
+               "false |z|>R ring:\n");
+    {
+        // z^3 + a/z^2 -- a custom rational map with no built-in equivalent,
+        // whose only attracting cycle (for this a) is infinity itself (see
+        // test_custom.cpp's own identical construction).
+        RationalMap m("mixed");
+        m.add_poly({1.0, 0.0}, 3, 0, "z^3");
+        m.add_pole({0.0, 0.0}, {1.0, 0.0}, 2, 1, "a/z^2");
+        const Cplx a{0.4, 0.3};
+        const auto cycles = find_attractors(m, a);
+        check(cycles.size() == 1 && !std::isfinite(cycles[0].points[0].real()),
+              "sanity: infinity is this map's only attracting cycle at this parameter");
+
+        const Viewport v{{0.0, 0.0}, 2.0, 101};
+        Renderer r2(Map::custom(m, a), v, RenderSettings{100, 2.0, 1e-6, 1});
+        Renderer r10(Map::custom(m, a), v, RenderSettings{100, 10.0, 1e-6, 1});
+        Image labels2, labels10;
+        const Image vals2 = r2.render_julia(nullptr, cycles, &labels2);
+        const Image vals10 = r10.render_julia(nullptr, cycles, &labels10);
+
+        bool any_resolved = false;
+        for (double v2 : labels2.data) if (v2 > 0.0) any_resolved = true;
+        check(any_resolved,
+              "infinity is captured as a genuine, labelled basin -- not left unresolved "
+              "the way an unmodelled escape would be");
+
+        bool identical = true;
+        for (std::size_t i = 0; i < labels2.data.size(); ++i) {
+            if (labels2.data[i] != labels10.data[i]) identical = false;
+            if (vals2.data[i] != vals10.data[i]) identical = false;
+        }
+        check(identical,
+              "...and identically so regardless of escape_radius (2 vs 10) -- infinity's "
+              "own basin membership is decided by the chordal metric, never a |z|>R test");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

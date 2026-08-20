@@ -223,6 +223,27 @@ def main() -> None:
           "settings.colour_period reaches basin mode too -- values one period apart land at "
           "the same shading")
 
+    # Stage 2: a RATIONAL map's "julia" render is ALSO stacked (2, height,
+    # width) -- values then labels -- distinguished from the certified-
+    # polynomial plain-2D case by ndim alone (see array_to_qimage's own
+    # docstring), not a separate flag.
+    rational_julia_values = np.array([[0.0, 1.0, 2.0, 1.0]])
+    rational_julia_labels = np.array([[0.0, 1.0, 1.0, 2.0]])
+    rational_julia_array = np.stack([rational_julia_values, rational_julia_labels])
+    check(rational_julia_array.shape == (2, 1, 4),
+          "sanity: the stacked rational-julia test array has the expected shape")
+    rational_julia_img = array_to_qimage(rational_julia_array, "julia", settings, max_iter=200)
+    check(rational_julia_img.format() == QImage.Format.Format_RGB888,
+          "rational julia mode also produces RGB, via the SAME stacked-array path basin uses")
+    check(rational_julia_img.width() == 4 and rational_julia_img.height() == 1,
+          "output dimensions match the STACKED array's own (height, width), not (2, height, width)")
+    unresolved_j = rational_julia_img.pixelColor(0, 0)
+    check((unresolved_j.red(), unresolved_j.green(), unresolved_j.blue()) == (0, 0, 0),
+          "rational julia: an unresolved (label 0) pixel is flat black")
+    j1, j3 = rational_julia_img.pixelColor(1, 0), rational_julia_img.pixelColor(3, 0)
+    check((j1.red(), j1.green(), j1.blue()) != (j3.red(), j3.green(), j3.blue()),
+          "rational julia: two different basin ids get visually distinct colours")
+
     # render_map's "greens"/"parameter_greens" return a plain 2D array (see
     # its own docstring) -- array_to_qimage must be fed that same shape.
     greens_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
@@ -787,6 +808,25 @@ def main() -> None:
     greens_text = readout_view.cursor_readout_text(QPoint(200, 200))
     check("potential = " in greens_text,
           "greens mode's cursor readout samples the potential, not escape/basin formatting")
+
+    # Stage 2: a RATIONAL map's "julia" render is stacked too -- the cursor
+    # readout must sample it the SAME way basin's own stacked array is
+    # sampled, not crash trying to unpack a 3D array's .shape into (h, w).
+    readout_pane.set_render_mode("julia")
+    readout_session.map = cdx.RationalMap.newton_cubic()   # has a pole -- takes the rational path
+    readout_session.param = 0j
+    rational_julia_array = render_map(readout_session.map, readout_session.param,
+                                      readout_pane.viewport, readout_session.render_settings,
+                                      "julia")
+    check(rational_julia_array.ndim == 3,
+          "sanity: newton_cubic's own julia render really is stacked (not certified)")
+    readout_view.set_image(rational_julia_array, readout_pane.viewport)
+    rational_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check("basin = " in rational_text or "unresolved" in rational_text,
+          "a rational map's julia cursor readout samples the LABEL layer, formatted like "
+          "basin's own -- not the escape-time format, and no crash on the stacked shape")
+    readout_session.map = cdx.RationalMap.mandelbrot()   # restore for later sections
+    readout_session.param = -1 + 0j
 
     # ---- cursor readout: leaveEvent clears it --------------------------------------
     print("\ncursor readout (leaveEvent):")

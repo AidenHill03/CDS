@@ -8,6 +8,7 @@
 // parameter rather than the one bound to the Map). Modest resolutions
 // throughout -- these are correctness checks, not the benchmark.
 // =============================================================================
+#include "cdx/analysis.hpp"
 #include "cdx/renderer.hpp"
 #include "cdx/rational.hpp"
 
@@ -167,23 +168,44 @@ int main() {
     std::printf("\na map with no built-in equivalent still renders sensibly:\n");
     {
         // z^3 + a/z^2 -- mixed positive/negative exponents, not one of the
-        // built-in families.
+        // built-in families. Has a pole (the a/z^2 term), so NOT certified
+        // (Stage 2) -- render_julia now takes the sphere-aware chordal path
+        // for it, which needs find_attractors' own cycles to classify
+        // anything at all (an empty `cycles` list, the pre-Stage-2 call
+        // this test used to make, is now a deliberate all-unresolved no-op
+        // -- see Renderer::render_julia_rational's own early return -- not
+        // a bug to route around).
         RationalMap m("mixed");
         m.add_poly({1, 0}, 3, 0, "z^3");
         m.add_pole({0, 0}, {1, 0}, 2, 1, "a/z^2");
+        const Cplx a{0.4, 0.3};
+
+        check(polynomial_escape_certified(m) == false,
+              "sanity: this map genuinely has a pole, so it takes the rational path");
+        const auto cycles = find_attractors(m, a);
+        check(!cycles.empty(),
+              "sanity: find_attractors discovers at least one attractor for it "
+              "(infinity, for this particular map -- its critical orbit escapes)");
 
         Viewport v{{0.0, 0.0}, 2.0, 151};
         RenderSettings s{150, 2.0, 1e-6, 0};
-        Renderer r(Map::custom(m, {0.4, 0.3}), v, s);
+        Renderer r(Map::custom(m, a), v, s);
 
-        const Image img = r.render_julia();
-        bool any_nonzero = false, any_finite = false;
+        Image labels;
+        const Image img = r.render_julia(nullptr, cycles, &labels);
+        bool any_nonzero = false, any_finite = false, any_labelled = false;
         for (double val : img.data) {
             if (val != 0.0) any_nonzero = true;
             if (std::isfinite(val)) any_finite = true;
         }
-        check(any_nonzero, "a non-preset custom map produces a non-degenerate image");
+        for (double val : labels.data) if (val > 0.0) any_labelled = true;
+        check(any_nonzero, "a non-preset custom RATIONAL map produces a non-degenerate image "
+              "once given its own found attractors");
         check(any_finite, "...with finite (non-NaN/inf) values");
+        check(any_labelled,
+              "...and at least some pixels are actually classified (a real basin label, "
+              "not just an unresolved 0 everywhere) -- infinity routes as a genuine basin, "
+              "not a false |z|>R ring, since escape_radius plays no role in this path at all");
     }
 
     // ---- benchmark / regression guard: no per-pixel root-find, no redundant
@@ -378,6 +400,15 @@ int main() {
         const Cplx a{-0.7269, 0.1889};
         const RenderSettings s{200, 2.0, 1e-6, 1};   // single-threaded: deterministic
 
+        // general_poles HAS poles (Stage 2: not escape_certified), so its own
+        // render_julia now takes the sphere-aware chordal path, which needs
+        // find_attractors' own cycles to do any real per-pixel work at all --
+        // computed ONCE, outside the timed loop below (this benchmark is
+        // about render_julia's OWN per-pixel cost, not find_attractors').
+        // general_poly has no poles at all (still fully escape_certified), so
+        // it keeps using the UNCHANGED escape-time fast path and needs none.
+        const auto general_poles_cycles = find_attractors(general_poles, a);
+
         // 7 trials, not 3: this development machine shows real scheduling
         // noise at this benchmark's scale (repeat runs of the SAME config
         // varied by several ratio-points in early measurements) -- more
@@ -413,7 +444,8 @@ int main() {
             const double t_compiled   = min_time_s([&] { compiled.render_julia(); });
             const double t_fastpath   = min_time_s([&] { fastpath.render_julia(); });
             const double t_gen_poly   = min_time_s([&] { gen_poly.render_julia(); });
-            const double t_gen_poles  = min_time_s([&] { gen_poles.render_julia(); });
+            const double t_gen_poles  = min_time_s(
+                [&] { gen_poles.render_julia(nullptr, general_poles_cycles); });
 
             std::printf("  %6d  %9.3f s  %13.3fx  %15.3fx  %13.3fx  %13.3fx\n",
                         res, t_hard, t_compiled / t_hard, t_fastpath / t_hard,

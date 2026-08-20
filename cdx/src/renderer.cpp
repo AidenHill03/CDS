@@ -3,6 +3,8 @@
 // =============================================================================
 #include "cdx/renderer.hpp"
 
+#include "cdx/analysis.hpp"   // polynomial_escape_certified -- see Map::escape_certified below
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -150,6 +152,20 @@ int Map::degree() const {
         case Family::Custom:    break;      // handled above
     }
     return 2;
+}
+
+bool Map::escape_certified() const {
+    if (family_ == Family::Custom) return polynomial_escape_certified(*custom_);
+    switch (family_) {
+        case Family::Quadratic: return true;    // z^2+a
+        case Family::Cubic:     return true;    // z^3+a
+        case Family::Quintic:   return true;    // z^5+a
+        case Family::McMullen2: return false;   // z^2+a/z^2 -- a pole at the origin
+        case Family::McMullen3: return false;   // z^3+a/z^3 -- a pole at the origin
+        case Family::Newton3:   return false;   // (2/3)z + (1/3)z^-2 -- a pole at the origin
+        case Family::Custom:    break;          // handled above
+    }
+    return true;
 }
 
 void Map::step_with(Family f, double pr, double pi, double& zr, double& zi) {
@@ -378,7 +394,14 @@ StepPlan make_step_plan(const Map& m) {
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
-Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
+// The pre-Stage-2 escape-time path, UNCHANGED, extracted so
+// Renderer::render_julia's own dispatch reads as "certified -> this;
+// rational -> the chordal path below" rather than one function trying to
+// be both. escape_radius-based; correct and fast for a CERTIFIED
+// polynomial (see Map::escape_certified/polynomial_escape_certified's own
+// doc comments for why that certification is what makes it correct, not
+// just conventional).
+Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
     const double R2 = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -412,6 +435,115 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel) const {
         }
     }, cancel);
     return img;
+}
+
+// The Stage-2 sphere-aware path for a map WITH poles -- structured like
+// Renderer::render_basin (chordal_distance to each found attractor,
+// including infinity as an ordinary point when it's one of `cycles`), but
+// producing a SMOOTH value per pixel instead of just a discrete iteration
+// count, the rational analog of render_julia_polynomial's own smooth
+// escape-time nu. NO escape_radius anywhere here -- see render_julia's
+// own header doc comment.
+//
+// SMOOTHING: once a pixel's chordal distance to its eventual attractor
+// drops below tol at iteration n, its LOCAL contraction rate is estimated
+// from the ratio of the last two distances straddling tol (d at n-1, d at
+// n) via the same log-log interpolation idea render_julia_polynomial's
+// own double-log formula uses for escape, just in "distance shrinking
+// toward a point" space instead of "modulus growing away from one":
+// treating d_k ~= C * |lambda|^k locally, log|lambda| is estimated as
+// log(d_n) - log(d_{n-1}), and the fractional iteration n* where d
+// crosses tol solves out to (n-1) + (log(tol) - log(d_{n-1})) /
+// (log(d_n) - log(d_{n-1})). This needs the PREVIOUS iteration's distance
+// to the SAME attractor the pixel eventually reaches -- if the closest
+// attractor changed between n-1 and n (rare, near a boundary between two
+// basins), there is no valid local rate to interpolate from, so the pixel
+// falls back to the plain integer count n+1 (matching
+// render_julia_polynomial's own is_bad/degenerate-case fallback
+// philosophy: punt to something reasonable rather than propagate a NaN
+// from a near-zero or negative log-ratio).
+Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
+                                      const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (labels) *labels = Image(res, res);
+    if (cycles.empty()) return img;   // nothing to classify against -- every pixel unresolved
+
+    // Flatten to parallel arrays, same reasoning as render_basin's own.
+    std::vector<double> ar, ai;
+    std::vector<int>    aid;
+    for (const auto& cyc : cycles) {
+        for (const auto& pt : cyc.points) {
+            ar.push_back(pt.real());
+            ai.push_back(pt.imag());
+            aid.push_back(cyc.id);
+        }
+    }
+    const int nattr = static_cast<int>(ar.size());
+    const double tol = settings_.tol;
+    const double log_tol = std::log(tol);
+
+    const StepPlan plan = make_step_plan(map_);
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx c = view_.coord(col, row);
+            double zr = c.real(), zi = c.imag();
+            double out = 0.0, label = 0.0;
+
+            int prev_attractor = -1;
+            double prev_dist = 0.0;
+            bool have_prev = false;
+
+            for (int n = 0; n < settings_.max_iter; ++n) {
+                plan.step(zr, zi);
+                if (is_bad(zr) || is_bad(zi)) break;   // genuine overflow -- stays unresolved
+
+                int closest = -1;
+                double closest_dist = kHuge;
+                for (int k = 0; k < nattr; ++k) {
+                    const double d = chordal_distance(zr, zi, ar[k], ai[k]);
+                    if (d < closest_dist) { closest_dist = d; closest = k; }
+                }
+
+                if (closest_dist < tol) {
+                    label = static_cast<double>(aid[closest]);
+                    // Log-log interpolation IFF the previous iteration's
+                    // closest attractor was this SAME one and genuinely
+                    // farther away (a real contraction to interpolate
+                    // between) -- otherwise fall back to the plain count.
+                    double nu = static_cast<double>(n + 1);
+                    if (have_prev && prev_attractor == closest && prev_dist > closest_dist &&
+                        closest_dist > 0.0) {
+                        const double log_prev = std::log(prev_dist);
+                        const double log_curr = std::log(closest_dist);
+                        const double denom = log_curr - log_prev;
+                        if (denom < 0.0 && std::isfinite(denom)) {
+                            const double interpolated =
+                                static_cast<double>(n - 1) + (log_tol - log_prev) / denom;
+                            if (std::isfinite(interpolated)) nu = interpolated;
+                        }
+                    }
+                    out = nu;
+                    break;
+                }
+
+                prev_attractor = closest;
+                prev_dist = closest_dist;
+                have_prev = true;
+            }
+
+            img.at(col, row) = out;
+            if (labels) labels->at(col, row) = label;
+        }
+    }, cancel);
+    return img;
+}
+
+Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<Cycle>& cycles,
+                             Image* labels) const {
+    if (map_.escape_certified()) return render_julia_polynomial(cancel);
+    return render_julia_rational(cycles, labels, cancel);
 }
 
 // -----------------------------------------------------------------------------

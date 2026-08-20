@@ -430,18 +430,35 @@ PYBIND11_MODULE(cdx, m) {
              "Smallest half-width the double grid still resolves.")
 
         .def("render_julia",
-             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
+                const std::vector<Cycle>& cycles) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::gil_scoped_release release;   // let other threads run
-                 Image img = r.render_julia(cp);
-                 py::gil_scoped_acquire acquire;
-                 return image_to_numpy(std::move(img));
+                 Image labels;
+                 py::array_t<double> values_arr, labels_arr;
+                 {
+                     py::gil_scoped_release release;   // let other threads run
+                     Image img = r.render_julia(cp, cycles, &labels);
+                     py::gil_scoped_acquire acquire;
+                     values_arr = image_to_numpy(std::move(img));
+                     labels_arr = image_to_numpy(std::move(labels));
+                 }
+                 return py::make_tuple(values_arr, labels_arr);
              },
-             py::arg("cancel") = nullptr,
-             "Escape-time Julia set; 0 means the orbit never escaped. "
-             "Pass a CancelToken to make this interruptible from another "
-             "thread; on cancellation the (partial) result should be "
-             "discarded, not displayed.")
+             py::arg("cancel") = nullptr, py::arg("cycles") = std::vector<Cycle>{},
+             "Julia set of the bound map -- TWO PATHS (see Renderer::render_julia's "
+             "own doc comment): a CERTIFIED polynomial (Renderer.polynomial_"
+             "escape_certified... see the module-level cdx.polynomial_escape_"
+             "certified) ignores `cycles` entirely and returns today's smooth "
+             "escape-time values (0 = never escaped) with an all-zero labels "
+             "array (no basin concept there); a RATIONAL map (has poles) needs "
+             "`cycles` (cdx.find_attractors' own output, including infinity when "
+             "it's attracting) and returns (smooth chordal approach-rate values, "
+             "0 = unresolved; labels = which attractor's Cycle.id each pixel "
+             "reached, 0 = unresolved) -- the SAME (primary, shading-channel) "
+             "split render_basin already returns, for the SAME reason (per-basin "
+             "hue + rate-based shading). Pass a CancelToken to make this "
+             "interruptible from another thread; on cancellation the (partial) "
+             "result should be discarded, not displayed.")
 
         .def("render_parameter",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {

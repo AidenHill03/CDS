@@ -99,6 +99,16 @@ public:
     // Degree of the map as a rational map of the sphere.
     int degree() const;
 
+    // Stage 1's polynomial_escape_certified, family-aware -- true for the
+    // three polynomial built-ins (Quadratic/Cubic/Quintic: z^n+a, no
+    // poles), false for the three rational built-ins (McMullen2/McMullen3:
+    // poles at 0 and infinity's own chart; Newton3: a pole at the origin),
+    // and for Custom delegates to polynomial_escape_certified(*custom_map())
+    // (see cdx/analysis.hpp -- implemented in renderer.cpp, which includes
+    // analysis.hpp itself, rather than pulled in here, to avoid a header
+    // cycle: analysis.hpp already includes renderer.hpp for Cycle/Image).
+    bool escape_certified() const;
+
     // One iteration. Hot path: takes and returns components by reference to
     // avoid constructing complex temporaries in the inner loop.
     void step(double& zr, double& zi) const;
@@ -236,9 +246,43 @@ public:
     // it, not display it. cancel may be nullptr (the default), meaning
     // "never cancel," identical to the pre-cancellation behaviour.
 
-    // Escape-time Julia set of the bound map. Value is the smooth escape
-    // count n + 1 - log(log|z|)/log 2, or 0 for orbits that never escaped.
-    Image render_julia(const std::atomic<bool>* cancel = nullptr) const;
+    // Julia set of the bound map -- TWO PATHS, chosen internally via
+    // Map::escape_certified() (Stage 1's polynomial_escape_certified,
+    // family-aware):
+    //
+    //   CERTIFIED POLYNOMIAL (no poles, degree >= 2 -- infinity is ALWAYS
+    //   superattracting there, so a fixed |z| > escape_radius test is a
+    //   provably forward-invariant trap): today's escape-time fast path,
+    //   UNCHANGED -- `cycles`/`labels` are ignored entirely. Value is the
+    //   smooth escape count n + 1 - log(log|z|)/log 2, or 0 for orbits
+    //   that never escaped.
+    //
+    //   RATIONAL (has poles -- infinity may be repelling, attracting, or
+    //   not even fixed; a fixed escape radius is not a validated trap in
+    //   general): sphere-aware classification against `cycles` (see
+    //   render_basin below -- SAME chordal-metric-against-found-attractors
+    //   idea, including infinity as an ordinary point when it's one of the
+    //   entries), structured the same way. Value is a SMOOTH chordal
+    //   analog of escape-time -- a continuous "approach rate" toward
+    //   whichever attractor the orbit reached, log-log-interpolated
+    //   between the iteration where the chordal distance was still above
+    //   `settings().tol` and the one where it first dropped below --
+    //   or 0 for pixels that never resolved (matching the polynomial
+    //   path's own "0 = never escaped/resolved" convention). If `labels`
+    //   is given, it is replaced with an Image the same size as the
+    //   result, holding which attractor (Cycle::id) each pixel reached (0
+    //   = unresolved) -- for PER-BASIN-HUE colouring, the same (label,
+    //   rate) split render_basin already returns as (primary, iterations).
+    //   escape_radius plays NO role anywhere in this path.
+    //
+    // NO escape_radius anywhere in the rational path -- unlike the
+    // certified-polynomial path, whose SET is R-invariant already (any
+    // large-enough R gives the identical escaping set, hence identical
+    // classification), a rational map has no such blanket guarantee, so
+    // this path never reads settings().escape_radius at all: the Julia
+    // set is an invariant of the MAP, not of an arbitrary numeric cutoff.
+    Image render_julia(const std::atomic<bool>* cancel = nullptr,
+                       const std::vector<Cycle>& cycles = {}, Image* labels = nullptr) const;
 
     // Parameter plane: each pixel is a parameter value, the orbit starts at
     // that map's critical point. Reproduces the Mandelbrot/multibrot sets and
@@ -320,6 +364,15 @@ private:
     // itself clear or own `cancel` -- purely a check.
     template <typename F>
     void parallel_columns(F body, const std::atomic<bool>* cancel = nullptr) const;
+
+    // render_julia's own two paths (see its own doc comment for what each
+    // is) -- split out so the dispatcher itself (render_julia) just picks
+    // one, rather than one function trying to be both. Both are private:
+    // parallel_columns is, and both need it, the same as every other
+    // render_* method already gets it via being a Renderer method itself.
+    Image render_julia_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
+                                const std::atomic<bool>* cancel) const;
 
     Map            map_;
     Viewport       view_;

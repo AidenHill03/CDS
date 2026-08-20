@@ -307,6 +307,49 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
     return rgb
 
 
+# ---- Julia, RATIONAL classification (Stage 2 of the sphere-aware milestone) ------------
+
+def colour_julia_rational(values: np.ndarray, labels: np.ndarray, band_width: float = 1.0,
+                          period_bands: float = 12.0, eps: float = 1e-9) -> np.ndarray:
+    """Julia colouring for a RATIONAL map's sphere-aware classification --
+    the SAME (smooth value, basin label) pair colour_basin's own (primary,
+    shading) split uses, deliberately visualized DIFFERENTLY: hue = which
+    attractor was reached (labels, the SAME golden-angle scheme colour_basin
+    uses, so the two modes agree on "basin X's colour"), but brightness is
+    CYCLICALLY BANDED via the smooth chordal approach-rate (values) --
+    reusing scale_scalar_field's own log+modulo banding (the same machinery
+    colour_scalar_field uses for Green's equipotential rings) instead of
+    colour_basin's flat, monotonic single fade-to-black. The result is the
+    familiar "concentric approach bands tightening onto the set" escape-
+    time look, boundary-emphasizing, rather than basin's flatter
+    categorical read -- same classifier, genuinely different picture, per
+    the milestone's own "keep them visually distinct" direction.
+
+    Unresolved pixels (label == 0, matching colour_basin's own "0 =
+    unresolved" convention) are always flat UNRESOLVED_BASIN_RGB, regardless
+    of whatever `values` happens to hold there (0, per
+    Renderer::render_julia_rational's own "0 = unresolved" convention too).
+    """
+    labels = np.asarray(labels)
+    resolved = labels > 0
+    rgb = np.zeros(labels.shape + (3,), dtype=np.uint8)
+    if not np.any(resolved):
+        return rgb
+
+    base = np.zeros(labels.shape + (3,), dtype=float)
+    for basin_id in np.unique(labels[resolved]).astype(np.int64):
+        base[labels == basin_id] = _hue_to_rgb_255(_golden_hue(int(basin_id)))
+
+    bands = scale_scalar_field(values, band_width, eps)
+    t = np.mod(bands, period_bands) / period_bands if period_bands > 0 else np.zeros_like(bands)
+    brightness = 0.3 + 0.7 * t   # oscillates within [0.3, 1.0] every band -- genuine banding,
+    shaded = base * brightness[..., None]   # not colour_basin's own monotonic single fade
+
+    rgb = shaded.round().clip(0, 255).astype(np.uint8)
+    rgb[~resolved] = UNRESOLVED_BASIN_RGB
+    return rgb
+
+
 # ---- scalar field (Green's-function-shaped data) ---------------------------------------
 
 def colour_scalar_field(values: np.ndarray, palette: str = "viridis", band_width: float = 1.0,

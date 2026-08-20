@@ -153,6 +153,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
 
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
     convention; plot with origin='lower'), except:
+      - "julia" returns a STACKED 3D array, shape (2, height, width), for a
+        RATIONAL map (Stage 2: has poles, not cdx.polynomial_escape_
+        certified) -- index 0 is the smooth chordal approach-rate value (0
+        = unresolved), index 1 is which attractor (Cycle.id) each pixel
+        reached (0 = unresolved), for the SAME "hue from the label,
+        shading from the rate" split colour_basin already does (see
+        app/colour.py's colour_julia_rational). For a CERTIFIED polynomial
+        (the common case), still a plain 2D array -- today's escape-time
+        values, UNCHANGED -- since there is no basin/label concept on that
+        path at all (see cdx::Renderer::render_julia's own doc comment).
       - "basin" returns a STACKED 3D array, shape (2, height, width):
         index 0 is the label (0 = unresolved, else the basin/cycle id, per
         cdx::Renderer::render_basin), index 1 is the iteration count each
@@ -180,7 +190,24 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     renderer = cdx.Renderer(map=cdx.Map.custom(rational_map, param), viewport=viewport,
                             settings=settings)
     if mode == "julia":
-        array = renderer.render_julia(cancel)
+        # Stage 2: cycles are only computed (a real cost -- find_attractors
+        # iterates every critical orbit) when the map genuinely needs them
+        # -- a certified polynomial's fast path ignores them entirely, so
+        # skipping find_attractors for it isn't just an optimization, it's
+        # what keeps that path's performance IDENTICAL to before Stage 2
+        # existed (the milestone's own acceptance requirement).
+        # The binding ALWAYS returns (values, labels) -- labels is simply
+        # all-zero for a certified polynomial (no basin concept on that
+        # path at all; see cdx::Renderer::render_julia's own doc comment)
+        # -- so unpacking is unconditional; only whether `array` ends up
+        # STACKED (rational) or plain (certified polynomial) differs.
+        if cdx.polynomial_escape_certified(rational_map):
+            values, _labels = renderer.render_julia(cancel)
+            array = values
+        else:
+            cycles = cdx.find_attractors(rational_map, param)
+            values, labels = renderer.render_julia(cancel, cycles)
+            array = np.stack([values, labels])
     elif mode == "parameter":
         array = renderer.render_parameter(cancel)
     elif mode == "basin":

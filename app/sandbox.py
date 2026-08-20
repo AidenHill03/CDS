@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 import cdx
 from app.about_dialog import AboutDialog
-from app.colour import colour_basin, colour_escape_time, colour_scalar_field
+from app.colour import colour_basin, colour_escape_time, colour_julia_rational, colour_scalar_field
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
@@ -737,11 +737,12 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     itself, once, here, is what rules that class of bug out entirely rather
     than relying on every caller remembering an origin='lower'-equivalent.
 
-    Dispatches to app.colour by render mode: "julia"/"parameter" are
-    escape-time (colour_escape_time, using `settings`' palette/scaling/
-    period); "basin" is categorical + SHADED basin colouring (hue = basin
-    id, brightness = convergence speed); "greens"/"parameter_greens" are
-    scalar-field equipotential banding (colour_scalar_field, using
+    Dispatches to app.colour by render mode: "parameter" is always escape-
+    time (colour_escape_time, using `settings`' palette/scaling/period);
+    "julia" is escape-time too UNLESS it's a RATIONAL map's render (Stage
+    2 -- see below); "basin" is categorical + SHADED basin colouring (hue =
+    basin id, brightness = convergence speed); "greens"/"parameter_greens"
+    are scalar-field equipotential banding (colour_scalar_field, using
     `settings`' greens_band_width/greens_period_bands/greens_contour) --
     the SAME display treatment for both, since they're the same KIND of
     data (a non-negative potential) even though they live on different
@@ -755,9 +756,14 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     3D stacked array is the LAYER axis, not the row axis; flipping the
     unpacked 2D layers individually (axis 0 IS the row axis there) is what
     actually produces a correctly oriented image instead of silently
-    swapping labels and iterations. "greens"/"parameter_greens" payloads
-    are a plain 2D array like "julia"/"parameter", just with a different
-    colour treatment (see below).
+    swapping labels and iterations. "julia" mode's payload is STACKED the
+    SAME way, but only for a RATIONAL map (see render_map's own docstring)
+    -- distinguished here by `payload.ndim` (3 = stacked/rational, 2 =
+    plain/certified-polynomial) rather than a separate flag, since that IS
+    exactly what render_map's own return shape already encodes.
+    "greens"/"parameter_greens" payloads are a plain 2D array like
+    "parameter" (and a certified-polynomial "julia"), just with a
+    different colour treatment (see below).
 
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
@@ -769,6 +775,12 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         rgb = colour_basin(labels, iterations, max_iter=max_iter,
                            period=settings.colour_period or None,
                            scaling=settings.colour_scaling)
+        return _rgb_to_qimage(rgb)
+    if mode == "julia" and np.asarray(payload).ndim == 3:
+        values = np.flipud(payload[0])
+        labels = np.flipud(payload[1])
+        rgb = colour_julia_rational(values, labels, band_width=settings.greens_band_width,
+                                    period_bands=settings.greens_period_bands)
         return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
         flipped = np.flipud(payload)
@@ -1123,7 +1135,12 @@ class ImageView(QWidget):
 
         mode = self._buffer_mode
         payload = self._buffer_payload
-        if mode == "basin":
+        # "basin" is ALWAYS stacked; "julia" is stacked only for a RATIONAL
+        # map's render (Stage 2 -- see render_map/array_to_qimage's own
+        # docstrings, distinguished the SAME way there: ndim, not a second
+        # flag threaded through).
+        stacked = mode == "basin" or (mode == "julia" and payload.ndim == 3)
+        if stacked:
             height, width = payload[0].shape
         else:
             height, width = payload.shape
@@ -1133,6 +1150,11 @@ class ImageView(QWidget):
                           # differently) buffer's own real pixels -- nothing to sample
         raw_row = height - 1 - row_top   # buffer is top-down; the array itself is row-0-bottom
 
+        if mode == "julia" and stacked:
+            value = payload[0][raw_row, col]
+            label = payload[1][raw_row, col]
+            return ("unresolved" if label == 0.0
+                    else f"basin = {int(label)}, approach rate = {value:.4g}")
         if mode in ("julia", "parameter"):
             value = payload[raw_row, col]
             return "never escaped" if value == 0.0 else f"escape = {value:.4g}"

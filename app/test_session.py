@@ -77,6 +77,47 @@ def main() -> None:
     check(pgreens_array.shape == (41, 41),
           "parameter_greens render also matches viewport resolution")
 
+    # ---- Stage 2: rational Julia is STACKED, escape_radius-invariant ------------
+    print("\nrender mode dispatch: rational Julia (Stage 2 sphere-aware classification):")
+    newton4 = cdx.RationalMap("newton4")   # (3/4)z + (1/4)z^-3 -- Newton's method for z^4-1
+    newton4.add_poly(complex(0.75, 0.0), 1, 0, "(3/4)z")
+    newton4.add_pole(complex(0.0, 0.0), complex(0.25, 0.0), 3, 0, "1/(4z^3)")
+    check(cdx.polynomial_escape_certified(newton4) is False,
+          "sanity: Newton z^4-1 genuinely takes the rational path")
+
+    s_rational = Session()
+    s_rational.map = newton4
+    s_rational.param = 0j
+    rational_vp = cdx.Viewport(complex(0, 0), 2.0, 41)
+    s_rational.render_settings = cdx.RenderSettings(80, 2.0, 1e-6, 1)
+    rational_julia = s_rational.render(rational_vp, "julia")
+    check(rational_julia.shape == (2, 41, 41),
+          "a RATIONAL map's julia render is STACKED: (2, height, width) -- smooth values, "
+          "then basin labels -- the SAME shape basin's own render already has")
+    values, labels = rational_julia[0], rational_julia[1]
+    check(len(np.unique(labels[labels > 0])) >= 2,
+          "Newton z^4-1's Julia render finds more than one basin (more than one root "
+          "captures pixels)")
+
+    # ACCEPTANCE TEST at the full Session.render level: escape_radius must
+    # not affect a rational map's classification AT ALL.
+    s_rational.render_settings = cdx.RenderSettings(80, 10.0, 1e-6, 1)
+    rational_julia_r10 = s_rational.render(rational_vp, "julia")
+    check(np.array_equal(rational_julia, rational_julia_r10),
+          "ACCEPTANCE: Session.render(..., 'julia') for a rational map is BYTE-IDENTICAL "
+          "at escape_radius=2 vs escape_radius=10 -- through the FULL app dispatch, not "
+          "just the bare cdx.Renderer call")
+
+    # A certified polynomial's OWN Julia render must still be plain (unchanged
+    # shape/values) -- the rational path's introduction must not leak into it.
+    s_rational.map = cdx.RationalMap.mandelbrot()
+    s_rational.param = complex(-0.7269, 0.1889)
+    s_rational.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
+    poly_julia = s_rational.render(rational_vp, "julia")
+    check(poly_julia.shape == (41, 41),
+          "ACCEPTANCE: a certified polynomial's julia render is STILL a plain 2D array, "
+          "not stacked -- Stage 2 didn't change its shape or meaning")
+
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
     s.map = cdx.RationalMap.mandelbrot()
