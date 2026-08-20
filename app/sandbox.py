@@ -2076,7 +2076,7 @@ class SandboxWindow(QMainWindow):
         # Side by side in a splitter, not two fixed halves -- the user can
         # drag the divider to give one pane more room. Coupled (both
         # visible) is the natural instrument default (see
-        # self.coupled_checkbox below); single-view collapses to just
+        # self.coupled_view_action below); single-view collapses to just
         # whichever pane is currently focused (see _relayout_panes).
         self.view_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.view_splitter.addWidget(self.pane_column)
@@ -2121,14 +2121,6 @@ class SandboxWindow(QMainWindow):
         toolbar = QToolBar("Controls", self)
         toolbar.setMovable(False)
 
-        # Coupled (both panes visible) is the natural instrument default
-        # -- see _relayout_panes for what unchecking this actually does
-        # (collapse to just the focused pane, not always pane A).
-        self.coupled_checkbox = QCheckBox("Coupled view", self)
-        self.coupled_checkbox.setChecked(True)
-        self.coupled_checkbox.toggled.connect(lambda _checked: self._relayout_panes())
-        toolbar.addWidget(self.coupled_checkbox)
-
         # Two always-visible complex-number fields -- NOT buried in the
         # Terms tab -- the typed half of P6's "symmetry of input": a and
         # z0 are each settable by typing here OR by clicking a plane (see
@@ -2151,33 +2143,18 @@ class SandboxWindow(QMainWindow):
         reset_button.clicked.connect(self._reset_view)
         toolbar.addWidget(reset_button)
 
-        # GLOBAL, not per-pane -- acceptable for now (per-pane would be
-        # more correct: e.g. tracing orbits only on the pane you're
-        # actually looking at), but these three toggles are visual
-        # preferences a user sets once and expects to stick regardless of
-        # which pane they're looking at, and per-pane versions would mean
-        # SIX checkboxes crowding the toolbar instead of three. Revisit if
-        # that tradeoff stops holding.
-        # Not wired to the ImageViews directly here (unlike
-        # orbit_connect_lines_checkbox below) -- since Stage 1, the View-menu
-        # action built for this layer (see the registry-driven loop below) is
-        # what's actually wired to set_show_critical_points/set_trace_orbits;
-        # these two checkboxes just mirror that action bidirectionally, the
-        # same "second control surface, never a parallel copy" relationship
-        # the View menu has always had with the toolbar, just inverted which
-        # side is authoritative now that a registry, not a hand-written
-        # checkbox, is what the menu is built from.
-        self.critical_points_checkbox = QCheckBox("Critical Points", self)
-        toolbar.addWidget(self.critical_points_checkbox)
-        self.trace_orbits_checkbox = QCheckBox("Trace Orbits", self)
-        toolbar.addWidget(self.trace_orbits_checkbox)
-        self.orbit_connect_lines_checkbox = QCheckBox("Connect orbit points", self)
-        self.orbit_connect_lines_checkbox.setChecked(True)
-        self.orbit_connect_lines_checkbox.toggled.connect(self.image_view.set_orbit_connect_lines)
-        self.orbit_connect_lines_checkbox.toggled.connect(self.image_view2.set_orbit_connect_lines)
-        toolbar.addWidget(self.orbit_connect_lines_checkbox)
-
         self.addToolBar(toolbar)
+
+        # Coupled view / Critical Points / Trace Orbits / Connect Orbit
+        # Points used to be toolbar checkboxes here too (Stage 1-3 kept them
+        # as a second control surface, mirroring the View-menu action
+        # bidirectionally). Stage 4 removes them: the View menu is now the
+        # SOLE control for all four -- see its own construction below, where
+        # each action is wired DIRECTLY to the real behavior a checkbox
+        # would have driven (coupled_view_action -> _relayout_panes,
+        # orbit_connect_lines_action -> set_orbit_connect_lines; the two
+        # registry-layer actions were ALREADY wired directly since Stage 1,
+        # so removing their mirror checkboxes needed no rewiring at all).
 
         # A full reproducible EXPERIMENT (map + parameter + view + mode +
         # render settings + orbit) -- separate from the Library tab, which
@@ -2202,14 +2179,13 @@ class SandboxWindow(QMainWindow):
         self.export_facts_action = self.export_menu.addAction("Export Facts (JSON)...")
         self.export_facts_action.triggered.connect(self._on_export_facts)
 
-        # ---- View menu: mirrors the toolbar's own view controls (Stage 3) -------
+        # ---- View menu: the SOLE control for every toggle below (Stage 4) -------
         # Same store-on-self reason as file_menu/help_menu -- see help_menu's own
-        # comment below. The toolbar stays for now (its fate is a separate,
-        # later redesign); this menu doesn't replace it, it MIRRORS it -- every
-        # checkable action here is bound BIDIRECTIONALLY to its toolbar
-        # checkbox where one exists (each one's toggled signal sets the
-        # other's checked state, which Qt no-ops when the value doesn't
-        # actually change, so this can't loop).
+        # comment below. Through Stage 3 this menu MIRRORED a parallel set of
+        # toolbar checkboxes (each one's toggled signal set the other's
+        # checked state); Stage 4 removed those checkboxes entirely, so
+        # every checkable action here is now wired DIRECTLY to the real
+        # behavior a checkbox used to drive -- no more mirror, one owner.
         #
         # No Experiment/Map menu for mode selection: with TWO independent
         # per-pane mode combos (Stage 2) rather than one window-level mode,
@@ -2221,33 +2197,31 @@ class SandboxWindow(QMainWindow):
         self.reset_view_action.triggered.connect(self._reset_view)
         self.view_menu.addSeparator()
 
+        # Coupled (both panes visible) is the natural instrument default --
+        # see _relayout_panes for what unchecking this actually does
+        # (collapse to just the focused pane, not always pane A).
         self.coupled_view_action = self.view_menu.addAction("Coupled View")
         self.coupled_view_action.setCheckable(True)
-        self.coupled_view_action.setChecked(self.coupled_checkbox.isChecked())
-        self.coupled_view_action.toggled.connect(self.coupled_checkbox.setChecked)
-        self.coupled_checkbox.toggled.connect(self.coupled_view_action.setChecked)
+        self.coupled_view_action.setChecked(True)
+        self.coupled_view_action.toggled.connect(lambda _checked: self._relayout_panes())
         self.view_menu.addSeparator()
 
         # ---- overlay-layer actions: built FROM the registry (Stage 1), not
         # hand-written per overlay -- adding a layer to OVERLAY_LAYERS is
         # enough to give it a View-menu toggle (and its trace a gated sub-
-        # toggle), with NO changes needed here. Unlike coupled_view_action
-        # above, the ACTION is what's wired directly to
-        # image_view[2].set_layer_enabled/set_trace_enabled -- a toolbar
-        # checkbox, where this layer still has one (critical_points/
-        # trace_orbits only, for now -- see _build_ui's own comment), just
-        # mirrors the action bidirectionally, same as coupled_view_action
-        # mirrors coupled_checkbox, just the other direction: the toolbar
-        # checkbox predates the registry and is going away (a later,
-        # separate toolbar redesign), so the action -- not a widget the
-        # registry doesn't know about -- is what actually owns the state.
+        # toggle), with NO changes needed here. Each action is wired
+        # DIRECTLY to image_view[2].set_layer_enabled/set_trace_enabled --
+        # always has been, since Stage 1, which is why removing critical_
+        # points_checkbox/trace_orbits_checkbox in Stage 4 needed no
+        # rewiring here at all (see _build_view_menu_layer_actions's own
+        # docstring).
         self._build_view_menu_layer_actions()
 
         self.orbit_connect_lines_action = self.view_menu.addAction("Connect Orbit Points")
         self.orbit_connect_lines_action.setCheckable(True)
-        self.orbit_connect_lines_action.setChecked(self.orbit_connect_lines_checkbox.isChecked())
-        self.orbit_connect_lines_action.toggled.connect(self.orbit_connect_lines_checkbox.setChecked)
-        self.orbit_connect_lines_checkbox.toggled.connect(self.orbit_connect_lines_action.setChecked)
+        self.orbit_connect_lines_action.setChecked(True)
+        self.orbit_connect_lines_action.toggled.connect(self.image_view.set_orbit_connect_lines)
+        self.orbit_connect_lines_action.toggled.connect(self.image_view2.set_orbit_connect_lines)
         self.view_menu.addSeparator()
 
         # Legend (Stage 3) -- menu-only, like Fixed Points/Attracting Cycles/
@@ -2286,19 +2260,15 @@ class SandboxWindow(QMainWindow):
     def _build_view_menu_layer_actions(self) -> None:
         """One checkable QAction per OVERLAY_LAYERS entry (plus, for a layer
         with a trace, one more gated sub-action) -- called once from
-        _build_ui, right where the hand-written Critical Points/Trace Orbits
-        actions used to be built directly. Adding a layer to the registry is
-        now enough to give it a View-menu toggle; nothing here needs
-        touching.
+        _build_ui. Adding a layer to the registry is enough to give it a
+        View-menu toggle; nothing here needs touching.
 
         Each action is wired DIRECTLY to both ImageViews'
         set_layer_enabled/set_trace_enabled (GLOBAL, not per-pane -- same
-        "one visual preference, not six checkboxes" reasoning the toolbar's
-        own comment gives). A same-named legacy toolbar checkbox --
-        f"{layer.key}_checkbox"/f"{trace.key}_checkbox" -- is mirrored
-        bidirectionally when one still exists (critical_points/trace_orbits,
-        for now; Stage 4 removes them and every future layer is menu-only
-        from the start, so most layers never have one).
+        "one visual preference, not several checkboxes" reasoning the old
+        toolbar's own comment gave before Stage 4 removed it) -- the View
+        menu is the SOLE control for every layer, with no toolbar mirror to
+        keep in sync any more.
         """
         for layer in OVERLAY_LAYERS:
             action = self.view_menu.addAction(layer.label)
@@ -2308,11 +2278,6 @@ class SandboxWindow(QMainWindow):
             action.toggled.connect(
                 lambda checked, key=layer.key: self.image_view2.set_layer_enabled(key, checked))
             setattr(self, f"{layer.key}_action", action)
-
-            checkbox = getattr(self, f"{layer.key}_checkbox", None)
-            if checkbox is not None:
-                action.toggled.connect(checkbox.setChecked)
-                checkbox.toggled.connect(action.setChecked)
 
             if layer.trace is not None:
                 trace = layer.trace
@@ -2325,11 +2290,6 @@ class SandboxWindow(QMainWindow):
                 trace_action.toggled.connect(
                     lambda checked, key=trace.key: self.image_view2.set_trace_enabled(key, checked))
                 setattr(self, f"{trace.key}_action", trace_action)
-
-                trace_checkbox = getattr(self, f"{trace.key}_checkbox", None)
-                if trace_checkbox is not None:
-                    trace_action.toggled.connect(trace_checkbox.setChecked)
-                    trace_checkbox.toggled.connect(trace_action.setChecked)
 
             self.view_menu.addSeparator()
 
@@ -2361,7 +2321,7 @@ class SandboxWindow(QMainWindow):
         self.metadata_header.refresh()
         self._update_status_bar()
         self._update_pane_focus_styling()
-        if not self.coupled_checkbox.isChecked():
+        if not self.coupled_view_action.isChecked():
             self._relayout_panes()
 
     def _update_pane_focus_styling(self) -> None:
@@ -2377,7 +2337,7 @@ class SandboxWindow(QMainWindow):
         # FOCUSED pane's column is visible -- not always pane A -- the
         # other pane keeps rendering/tracking its own state in the
         # background (nothing about it is torn down), it's just hidden.
-        coupled = self.coupled_checkbox.isChecked()
+        coupled = self.coupled_view_action.isChecked()
         for pane, column in self._pane_columns.items():
             column.setVisible(coupled or pane is self._focused_pane)
 
@@ -2428,7 +2388,7 @@ class SandboxWindow(QMainWindow):
             path += ".cdsx"
         panes = [(p.viewport, p.render_mode) for p in self.panes]
         focused_index = self.panes.index(self._focused_pane)
-        coupled = self.coupled_checkbox.isChecked()
+        coupled = self.coupled_view_action.isChecked()
         orbit_pane = self._current_dynamical_pane()
         orbit = None
         if orbit_pane is not None:
@@ -2486,7 +2446,7 @@ class SandboxWindow(QMainWindow):
                                          # for free, not re-checked for its own sake
             self._mode_combos[pane].setCurrentText(pane.render_mode)
 
-        self.coupled_checkbox.setChecked(coupled)
+        self.coupled_view_action.setChecked(coupled)
         self._set_focused_pane(self.panes[min(focused_index, len(self.panes) - 1)])
         self.param_field.set_value(self.session.param)
 
@@ -2617,7 +2577,7 @@ class SandboxWindow(QMainWindow):
         # ever fire (see _build_ui's own comment), so self._focused_pane
         # is the CLICKED pane.
         clicked_pane = self._focused_pane
-        if not self.coupled_checkbox.isChecked():
+        if not self.coupled_view_action.isChecked():
             # SINGLE-VIEW fallback: only one pane is actually visible, so
             # there is no "partner" to drive -- keep today's pre-Stage-3
             # behavior exactly, the same as a P6 parameter-plane click

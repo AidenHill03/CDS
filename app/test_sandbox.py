@@ -908,7 +908,7 @@ def main() -> None:
 
     check(window._focused_pane is window.pane,
           "focus starts on pane A, matching today's single-view startup")
-    check(window.coupled_checkbox.isChecked(), "coupled view is the default -- both panes visible")
+    check(window.coupled_view_action.isChecked(), "coupled view is the default -- both panes visible")
 
     window.show()   # the visibility checks below need a real, shown top-level window
     check(window.pane_column.isVisible() and window.pane_column2.isVisible(),
@@ -924,10 +924,10 @@ def main() -> None:
     check(window.pane_column2.styleSheet() != "" and window.pane_column.styleSheet() == "",
           "the focus-highlight border moves to the newly-focused pane's column")
 
-    window.coupled_checkbox.setChecked(False)
+    window.coupled_view_action.setChecked(False)
     check(window.pane_column2.isVisible() and not window.pane_column.isVisible(),
           "single-view collapses to just the FOCUSED pane -- pane2 here, not always pane A")
-    window.coupled_checkbox.setChecked(True)
+    window.coupled_view_action.setChecked(True)
     check(window.pane_column.isVisible() and window.pane_column2.isVisible(),
           "re-checking coupled shows both panes again")
 
@@ -1012,37 +1012,36 @@ def main() -> None:
 
     check(window.reset_view_action.isCheckable() is False,
           "Reset View is a plain triggerable action, not a checkable toggle")
-    coupled_before = window.coupled_checkbox.isChecked()
+    coupled_before = window.coupled_view_action.isChecked()
     window.reset_view_action.trigger()
-    check(window.coupled_checkbox.isChecked() == coupled_before,
-          "triggering Reset View from the menu doesn't touch unrelated toolbar state")
+    check(window.coupled_view_action.isChecked() == coupled_before,
+          "triggering Reset View from the menu doesn't touch unrelated state")
 
-    # Checkbox -> action, for every mirrored toggle.
-    for checkbox, action, label in (
-        (window.coupled_checkbox, window.coupled_view_action, "Coupled View"),
-        (window.critical_points_checkbox, window.critical_points_action, "Critical Points"),
-        (window.trace_orbits_checkbox, window.trace_orbits_action, "Trace Orbits"),
-        (window.orbit_connect_lines_checkbox, window.orbit_connect_lines_action,
-         "Connect Orbit Points"),
-    ):
-        before = checkbox.isChecked()
-        checkbox.setChecked(not before)
-        check(action.isChecked() == (not before),
-              f"toggling the '{label}' TOOLBAR checkbox updates the menu action to match")
-        checkbox.setChecked(before)   # restore
-        check(action.isChecked() == before,
-              f"...and toggling it back restores the menu action too")
-
-    # Action -> checkbox, and (for the two overlay toggles) the REAL
-    # behavior they're wired to, not just each other's checked state.
+    # Stage 4: the View menu is the SOLE control for each of these -- no
+    # toolbar checkbox exists any more to mirror against, so what's actually
+    # tested here is that each action reaches its OWN real behavior
+    # directly, both ways (on then off), not just that two widgets agree
+    # with each other.
     window.critical_points_action.setChecked(True)
-    check(window.critical_points_checkbox.isChecked() is True,
-          "toggling the 'Critical Points' MENU action updates the toolbar checkbox to match")
     check(window.image_view._show_critical_points is True and
           window.image_view2._show_critical_points is True,
-          "...and the menu action genuinely reaches the real per-pane flag, through the "
-          "checkbox it's bound to -- not just a second copy of the checked state")
+          "toggling the 'Critical Points' menu action ON reaches BOTH panes' real flag directly")
     window.critical_points_action.setChecked(False)
+    check(window.image_view._show_critical_points is False and
+          window.image_view2._show_critical_points is False,
+          "...and OFF reaches it too")
+
+    window.trace_orbits_action.setChecked(True)
+    check(window.image_view._trace_orbits is True and window.image_view2._trace_orbits is True,
+          "toggling the 'Trace Orbits' menu action reaches BOTH panes' real flag directly")
+    window.trace_orbits_action.setChecked(False)
+
+    orbit_connect_before = window.orbit_connect_lines_action.isChecked()
+    window.orbit_connect_lines_action.setChecked(not orbit_connect_before)
+    check(window.image_view._orbit_connect_lines == (not orbit_connect_before) and
+          window.image_view2._orbit_connect_lines == (not orbit_connect_before),
+          "toggling the 'Connect Orbit Points' menu action reaches BOTH panes' real flag directly")
+    window.orbit_connect_lines_action.setChecked(orbit_connect_before)   # restore
 
     # Legend (Stage 3) is menu-only -- no toolbar checkbox to mirror through,
     # so its action is wired DIRECTLY to both ImageViews' set_show_legend
@@ -1056,11 +1055,10 @@ def main() -> None:
     check(window.image_view._show_legend is False and window.image_view2._show_legend is False,
           "...and back off")
 
-    coupled_via_action_before = window.coupled_checkbox.isChecked()
-    window.coupled_view_action.setChecked(not coupled_via_action_before)
-    check(window.coupled_checkbox.isChecked() == (not coupled_via_action_before),
-          "toggling the 'Coupled View' menu action updates the toolbar checkbox too")
-    window.coupled_view_action.setChecked(coupled_via_action_before)   # restore
+    # coupled_view_action's own real-behavior reach (pane visibility via
+    # _relayout_panes) is already covered end-to-end by the "dual-pane
+    # splitter / focus / coupled toggle" section above -- nothing further
+    # to add here now that there's no separate checkbox left to mirror.
 
     # ---- render is off the GUI thread: a slow render must not block processEvents --
     # Fast built-in family (not a term-based custom map: slower per pixel,
@@ -1453,27 +1451,27 @@ def main() -> None:
           "still no overflow warning at max_iter=2000 -- per-pixel normalization never "
           "comes near double's range regardless of max_iter")
 
-    # ---- critical-point overlay toolbar checkboxes -------------------------------
-    print("\ncritical-point overlay checkboxes:")
+    # ---- critical-point overlay View-menu actions (Stage 4: menu-only) -----------
+    print("\ncritical-point overlay actions:")
     check(window.image_view._show_critical_points is False,
-          "the overlay starts off, matching the unchecked checkbox")
-    window.critical_points_checkbox.setChecked(True)
+          "the overlay starts off, matching the unchecked menu action")
+    window.critical_points_action.setChecked(True)
     check(window.image_view._show_critical_points is True,
-          "checking the toolbar checkbox actually reaches image_view's own flag")
-    window.trace_orbits_checkbox.setChecked(True)
+          "checking the 'Critical Points' menu action actually reaches image_view's own flag")
+    window.trace_orbits_action.setChecked(True)
     check(window.image_view._trace_orbits is True,
-          "checking the trace-orbits checkbox reaches image_view's own flag")
+          "checking the 'Trace Orbits' menu action reaches image_view's own flag")
     check(window.image_view._orbit_traces is not None,
           "checking it also triggers the lazy orbit-trace computation via set_trace_orbits")
-    window.critical_points_checkbox.setChecked(False)
+    window.critical_points_action.setChecked(False)
     check(window.image_view._show_critical_points is False, "unchecking turns it back off")
 
     check(window.image_view._orbit_connect_lines is True,
-          "'Connect orbit points' starts checked, matching image_view's own default")
-    window.orbit_connect_lines_checkbox.setChecked(False)
+          "'Connect Orbit Points' starts checked, matching image_view's own default")
+    window.orbit_connect_lines_action.setChecked(False)
     check(window.image_view._orbit_connect_lines is False,
-          "unchecking 'Connect orbit points' reaches image_view's own flag")
-    window.orbit_connect_lines_checkbox.setChecked(True)
+          "unchecking 'Connect Orbit Points' reaches image_view's own flag")
+    window.orbit_connect_lines_action.setChecked(True)
     check(window.image_view._orbit_connect_lines is True, "re-checking it turns it back on")
 
     # ---- centre-view still switches to the View tab (regression: the View tab's ------
@@ -1651,7 +1649,7 @@ def main() -> None:
     print("\nparameter-plane click (coupled): drives the PARTNER pane, not the clicked one:")
     window.mode_combo.setCurrentText("parameter")
     window._set_focused_pane(window.pane)
-    check(window.coupled_checkbox.isChecked(), "sanity: still in coupled mode for this test")
+    check(window.coupled_view_action.isChecked(), "sanity: still in coupled mode for this test")
     check(window.pane2.render_mode == "julia", "sanity: pane2 is the dynamical partner here")
     pane_a_viewport_before = window.pane.viewport
     # Deliberately perturbed to something the click's own reset couldn't
@@ -1712,7 +1710,7 @@ def main() -> None:
           "the marker moves with a field commit too, not just a plane click")
 
     print("\nsingle-view fallback: click still switches the one visible pane (legacy behavior):")
-    window.coupled_checkbox.setChecked(False)
+    window.coupled_view_action.setChecked(False)
     window._set_focused_pane(window.pane)
     check(window.pane_column.isVisible() and not window.pane_column2.isVisible(),
           "sanity: single-view, pane A is the one visible pane")
@@ -1724,7 +1722,7 @@ def main() -> None:
     check(window.pane.render_mode == "julia",
           "single-view fallback: the one visible pane still switches straight to julia, matching "
           "today's pre-Stage-3 behavior -- there is no partner to drive instead")
-    window.coupled_checkbox.setChecked(True)   # restore coupled view for the rest of the suite
+    window.coupled_view_action.setChecked(True)   # restore coupled view for the rest of the suite
 
     print("\ndescribe_parameter_role reaches the live metadata header:")
     check("coefficient of z^0" in window.metadata_header._label.text(),
@@ -1784,7 +1782,7 @@ def main() -> None:
     window.mode_combo.setCurrentText("julia")
     window.pane2.viewport = cdx.Viewport(complex(-0.3, 0.4), 0.8, 150)
     window.mode_combo2.setCurrentText("parameter")
-    window.coupled_checkbox.setChecked(False)
+    window.coupled_view_action.setChecked(False)
     window._set_focused_pane(window.pane2)
     saved_z0 = complex(0.05, -0.05)
     window.image_view.orbit_tracker.seed(window.session.map, window.session.param, saved_z0)
@@ -1806,7 +1804,7 @@ def main() -> None:
         window.pane2.viewport = cdx.Viewport(complex(8, 8), 8.0, 50)
         window.mode_combo.setCurrentText("parameter")
         window.mode_combo2.setCurrentText("julia")
-        window.coupled_checkbox.setChecked(True)
+        window.coupled_view_action.setChecked(True)
         window._set_focused_pane(window.pane)
         window.image_view.clear_orbit()
 
@@ -1828,7 +1826,7 @@ def main() -> None:
               "...and pane2's mode combo box to ITS restored render_mode")
         check(close(window.param_field.value, complex(0.111, -0.222), 1e-9),
               "Open Experiment syncs the 'Parameter a' field's displayed value too")
-        check(not window.coupled_checkbox.isChecked(),
+        check(not window.coupled_view_action.isChecked(),
               "Open Experiment restores the single/coupled layout flag")
         check(window._focused_pane is window.pane2,
               "Open Experiment restores which pane was focused")
@@ -1850,7 +1848,7 @@ def main() -> None:
     before_param = window.session.param
     before_pane_center = window.pane.viewport.center
     before_pane2_center = window.pane2.viewport.center
-    before_coupled = window.coupled_checkbox.isChecked()
+    before_coupled = window.coupled_view_action.isChecked()
     before_focused = window._focused_pane
 
     # QMessageBox.critical() is a REAL modal -- .exec() starts a nested
@@ -1880,7 +1878,7 @@ def main() -> None:
     check(window.pane.viewport.center == before_pane_center and
           window.pane2.viewport.center == before_pane2_center,
           "...and both panes' viewports too -- rejected before anything is mutated")
-    check(window.coupled_checkbox.isChecked() == before_coupled and
+    check(window.coupled_view_action.isChecked() == before_coupled and
           window._focused_pane is before_focused,
           "...and the layout (coupled flag, focused pane) as well")
 
