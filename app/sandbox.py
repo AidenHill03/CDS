@@ -29,7 +29,7 @@ import numpy as np
 import shiboken6
 from PySide6.QtCore import (QBuffer, QIODevice, QObject, QPoint, QPointF, QRect, QRectF,
                             QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QTabWidget, QToolBar,
@@ -39,7 +39,7 @@ import cdx
 from app.about_dialog import AboutDialog
 from app.colour import colour_basin, colour_escape_time, colour_scalar_field
 from app.complex_field import ComplexField
-from app.facts_panel import FactsPanel, facts_to_dict
+from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
@@ -185,6 +185,7 @@ class OverlayLayer:
     gate: str   # "dynamical" | "parameter" | "always"
     marker_radius: float
     points_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[complex, OverlayColour]]]
+    marker_style: str = "circle"   # "circle" | "square" | "diamond" -- see _draw_marker
     trace: OverlayTrace | None = None
 
     def is_visible_for(self, render_mode: str) -> bool:
@@ -215,12 +216,108 @@ def _critical_trace_provider(rational_map: cdx.RationalMap, param: complex,
     return [(trace_critical_orbit(rational_map, param, z0), CRITICAL_TRACE_COLOUR) for z0 in points]
 
 
+# ---- fixed points (Stage 2) ---------------------------------------------------
+# Colour BY CLASSIFICATION -- app.facts_panel._classify(fp.multiplier), the
+# SAME classification the Facts tab's own Fixed Points table already shows,
+# reused rather than reimplemented here (so this overlay and that table can
+# never disagree about what a given multiplier counts as). _classify returns
+# FOUR labels ("superattracting"/"attracting"/"neutral"/"repelling"), not the
+# three named colours a fixed 3-colour palette implies -- "superattracting"
+# (|multiplier| exactly 0, the common case for e.g. every one of Newton's
+# method's own root fixed points) is the strongest member of the SAME
+# qualitative family as "attracting" (points nearby converge either way), so
+# it shares that family's colour here rather than getting a 4th colour.
+FIXED_POINTS_LAYER_KEY = "fixed_points"
+FIXED_POINT_MARKER_RADIUS = 5.0
+# green / red / yellow -- clear, distinguishable, and conventional for
+# attracting/repelling/neutral without relying on a legend to be readable.
+_FIXED_POINT_CLASSIFICATION_COLOURS: dict[str, OverlayColour] = {
+    "attracting": (60, 200, 60, 255),
+    "superattracting": (60, 200, 60, 255),
+    "repelling": (220, 60, 60, 255),
+    "neutral": (230, 200, 40, 255),
+}
+
+
+def _fixed_points_provider(rational_map: cdx.RationalMap, param: complex,
+                           facts: object) -> list[tuple[complex, OverlayColour]]:
+    if facts is None:
+        return []
+    return [(fp.point, _FIXED_POINT_CLASSIFICATION_COLOURS[_classify(fp.multiplier)])
+           for fp in facts.fixed_points if not _is_inf(fp.point)]
+
+
+# ---- attracting cycles (Stage 2) -----------------------------------------------
+# Colour BY ATTRACTING STRENGTH -- |cyc.multiplier| ranges over [0, 1) for any
+# genuinely attracting cycle (0 = superattracting, approaching 1 = barely
+# attracting), a small two-colour gradient over that range so every point AND
+# the traced path of a given cycle -- both computed from the SAME
+# _cycle_colour(cyc.multiplier) call -- share one colour, making which points
+# belong to which cycle (and how strongly it attracts) visually legible
+# without a separate legend entry per cycle.
+ATTRACTING_CYCLES_LAYER_KEY = "attracting_cycles"
+CYCLE_TRACE_KEY = "trace_cycle_paths"
+CYCLE_MARKER_RADIUS = 5.0
+_CYCLE_STRONG_COLOUR: OverlayColour = (255, 0, 255, 255)    # magenta -- superattracting (|multiplier| = 0)
+_CYCLE_WEAK_COLOUR: OverlayColour = (140, 140, 255, 255)    # pale blue -- |multiplier| approaching 1
+
+
+def _cycle_colour(multiplier: complex) -> OverlayColour:
+    t = min(1.0, abs(multiplier))   # clamp: an attracting cycle's |multiplier| is always < 1, but guard anyway
+    return tuple(int(round(a + (b - a) * t))
+                for a, b in zip(_CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR))
+
+
+def _attracting_cycles_provider(rational_map: cdx.RationalMap, param: complex,
+                                facts: object) -> list[tuple[complex, OverlayColour]]:
+    if facts is None:
+        return []
+    colour_points = []
+    for cyc in facts.attracting_cycles:
+        colour = _cycle_colour(cyc.multiplier)
+        colour_points.extend((pt, colour) for pt in cyc.points if not _is_inf(pt))
+    return colour_points
+
+
+def _attracting_cycles_trace_provider(rational_map: cdx.RationalMap, param: complex,
+                                      facts: object) -> list[tuple[list[complex], OverlayColour]]:
+    if facts is None:
+        return []
+    loops = []
+    for cyc in facts.attracting_cycles:
+        if not cyc.points:
+            continue
+        # Closes the cycle's own ORDERED points into a loop (append
+        # points[0]) -- deliberately NOT pre-filtered for infinity the way
+        # the points_provider above is: drawable_polyline_segments already
+        # breaks (not bridges) any segment touching a non-finite point, the
+        # same handling a critical-point trace ending at infinity already
+        # relies on, so a cycle that happens to include infinity still
+        # draws its finite legs correctly instead of needing a second,
+        # divergent filtering rule here.
+        loops.append((list(cyc.points) + [cyc.points[0]], _cycle_colour(cyc.multiplier)))
+    return loops
+
+
 OVERLAY_LAYERS: list[OverlayLayer] = [
     OverlayLayer(
         key=CRITICAL_POINTS_LAYER_KEY, label="Critical Points", gate="dynamical",
         marker_radius=CRITICAL_POINT_MARKER_RADIUS, points_provider=_critical_points_provider,
+        marker_style="circle",
         trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
                            path_provider=_critical_trace_provider),
+    ),
+    OverlayLayer(
+        key=FIXED_POINTS_LAYER_KEY, label="Fixed Points", gate="dynamical",
+        marker_radius=FIXED_POINT_MARKER_RADIUS, points_provider=_fixed_points_provider,
+        marker_style="square",
+    ),
+    OverlayLayer(
+        key=ATTRACTING_CYCLES_LAYER_KEY, label="Attracting Cycles", gate="dynamical",
+        marker_radius=CYCLE_MARKER_RADIUS, points_provider=_attracting_cycles_provider,
+        marker_style="diamond",
+        trace=OverlayTrace(key=CYCLE_TRACE_KEY, label="Trace Cycle Paths",
+                           path_provider=_attracting_cycles_trace_provider),
     ),
 ]
 
@@ -409,6 +506,81 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
             painter.setPen(pen)
             painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
             painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
+
+
+def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
+                 colour: OverlayColour) -> None:
+    """One overlay-layer marker -- a BLACK 2px outline (matching critical
+    points' own outline treatment, so every layer's markers read as the
+    same visual FAMILY) filled with `colour`, in one of a small set of
+    shapes distinct enough to tell layers apart without reading a legend:
+    circle (critical points), square (fixed points), diamond (attracting
+    cycles).
+    """
+    pen = QPen(QColor(0, 0, 0))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.setBrush(QColor(*colour))
+    if style == "circle":
+        painter.drawEllipse(pixel, radius, radius)
+    elif style == "square":
+        painter.drawRect(QRectF(pixel.x() - radius, pixel.y() - radius, radius * 2.0, radius * 2.0))
+    elif style == "diamond":
+        painter.drawPolygon(QPolygonF([
+            QPointF(pixel.x(), pixel.y() - radius), QPointF(pixel.x() + radius, pixel.y()),
+            QPointF(pixel.x(), pixel.y() + radius), QPointF(pixel.x() - radius, pixel.y())]))
+    else:
+        raise AssertionError(f"unreachable: marker style={style!r}")
+
+
+def paint_registry_layers(painter: QPainter, viewport: cdx.Viewport, width: int, height: int,
+                          render_mode: str, *,
+                          layer_enabled: dict,
+                          layer_trace_enabled: dict,
+                          layer_points: dict,
+                          layer_traces: dict) -> None:
+    """Draws every OVERLAY_LAYERS entry EXCEPT critical_points -- that one
+    stays on paint_overlays' own dedicated show_critical_points/
+    critical_points/show_traced_orbits/orbit_traces kwargs (unchanged),
+    because File > Export's ExportImageDialog/compose_export_image depend
+    on those specific kwarg names and this stage doesn't touch Export.
+    ImageView.paintEvent calls this SEPARATELY, right alongside its
+    existing paint_overlays call, for the layers Stage 2 actually adds.
+
+    Pure function of its arguments (no ImageView access) -- the four
+    `layer_*` dicts are exactly ImageView's own _layer_enabled/
+    _layer_trace_enabled/_layer_points/_layer_traces, read by the caller
+    and handed in explicitly, the same "resolved data in, painter
+    strokes out" shape paint_overlays itself already has.
+    """
+    bounds = QRectF(0, 0, width, height)
+    inflated_rect = bounds.adjusted(-OFFSCREEN_MARGIN_PX, -OFFSCREEN_MARGIN_PX,
+                                    OFFSCREEN_MARGIN_PX, OFFSCREEN_MARGIN_PX)
+
+    def finite(w: complex) -> bool:
+        return math.isfinite(w.real) and math.isfinite(w.imag)
+
+    for layer in OVERLAY_LAYERS:
+        if layer.key == CRITICAL_POINTS_LAYER_KEY:
+            continue
+        if not layer_enabled.get(layer.key, False) or not layer.is_visible_for(render_mode):
+            continue
+
+        if layer.trace is not None and layer_trace_enabled.get(layer.trace.key, False):
+            resolved_trace = layer_traces.get(layer.trace.key)
+            if resolved_trace:
+                for path, colour in resolved_trace:
+                    pen = QPen(QColor(*colour))
+                    pen.setWidth(1)
+                    painter.setPen(pen)
+                    pixel_points = [complex_to_pixel(w, viewport, width, height) for w in path]
+                    for a, b in drawable_polyline_segments(path, pixel_points, inflated_rect):
+                        painter.drawLine(a, b)
+
+        for point, colour in layer_points.get(layer.key, []):
+            if finite(point):
+                _draw_marker(painter, complex_to_pixel(point, viewport, width, height),
+                            layer.marker_radius, layer.marker_style, colour)
 
 
 def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
@@ -897,16 +1069,16 @@ class ImageView(QWidget):
         kept as a same-behavior alias (see its own docstring) for existing
         callers/tests that still name it directly.
 
-        A single cdx.DynamicalFacts is computed once per key and shared
-        across every layer's provider (see OVERLAY_LAYERS' own module
-        comment on why the critical-points layer specifically still
-        ignores it) -- one root-find serving every layer, not one per
-        layer.
+        A single cdx.DynamicalFacts (session.dynamical_facts()) is computed
+        once per key and shared across every layer's provider (see
+        OVERLAY_LAYERS' own module comment on why the critical-points layer
+        specifically still ignores it) -- one root-find/attracting-cycle
+        search serving every layer, not one per layer.
         """
         key = (self.session.map.serialize(), self.session.param)
         if key != self._layer_facts_key:
             self._layer_facts_key = key
-            self._cached_facts = None   # Stage 2: self.session.dynamical_facts()
+            self._cached_facts = self.session.dynamical_facts()
             for layer in OVERLAY_LAYERS:
                 resolved = list(layer.points_provider(self.session.map, self.session.param,
                                                        self._cached_facts))
@@ -1138,6 +1310,16 @@ class ImageView(QWidget):
                        orbit_state=self.orbit_tracker.state,
                        show_param_marker=True,
                        param=self.session.param)
+        # The registry's OWN layers (Stage 2 onward: fixed points,
+        # attracting cycles, ...) -- a SEPARATE call, not folded into
+        # paint_overlays above, so Export's existing kwargs stay untouched
+        # (see paint_registry_layers' own docstring).
+        paint_registry_layers(painter, self.pane.viewport, self.width(), self.height(),
+                              self.pane.render_mode,
+                              layer_enabled=self._layer_enabled,
+                              layer_trace_enabled=self._layer_trace_enabled,
+                              layer_points=self._layer_points,
+                              layer_traces=self._layer_traces)
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on

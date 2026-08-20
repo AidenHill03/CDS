@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import shiboken6
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -39,8 +39,14 @@ from app.colour import PALETTES
 from app.library_panel import (_DYNAMICAL_VIEW_FALLBACK, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for)
 from app.pane import Pane
-from app.sandbox import (ExportImageDialog, ImageView, RenderTask, SandboxWindow,
-                         array_to_qimage, compose_export_image, drawable_polyline_segments)
+from app.sandbox import (ATTRACTING_CYCLES_LAYER_KEY, CYCLE_TRACE_KEY, FIXED_POINTS_LAYER_KEY,
+                         ExportImageDialog, ImageView, RenderTask, SandboxWindow,
+                         _attracting_cycles_provider, _attracting_cycles_trace_provider,
+                         _CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR, _cycle_colour,
+                         _fixed_points_provider, _FIXED_POINT_CLASSIFICATION_COLOURS,
+                         _OVERLAY_LAYERS_BY_KEY, array_to_qimage, compose_export_image,
+                         drawable_polyline_segments, paint_registry_layers)
+from app.facts_panel import _classify, _is_inf
 from app.session import Session, render_map
 from app.settings import Settings, preview_path_for
 
@@ -314,6 +320,138 @@ def main() -> None:
           "changing the MAP (not just the viewport) invalidates the cache key")
     check(overlay_view._critical_points is not points_before,
           "and genuinely recomputes -- a different list object, not the stale one")
+
+    # ---- fixed-point / attracting-cycle layers (Stage 2) ---------------------------
+    print("\nfixed-point layer:")
+    fp_session = Session()
+    fp_session.map = cdx.RationalMap.mandelbrot()
+    fp_session.param = -1 + 0j   # the basilica: 2 finite (repelling) fixed points + infinity
+    fp_pane, fp_view = _pane_view(fp_session, render_mode="julia")
+    fp_facts = fp_session.dynamical_facts()
+
+    check(fp_view._layer_enabled[FIXED_POINTS_LAYER_KEY] is False,
+          "the fixed-points layer is off by default")
+    check(_OVERLAY_LAYERS_BY_KEY[FIXED_POINTS_LAYER_KEY].is_visible_for("julia") is True
+          and _OVERLAY_LAYERS_BY_KEY[FIXED_POINTS_LAYER_KEY].is_visible_for("parameter") is False
+          and _OVERLAY_LAYERS_BY_KEY[FIXED_POINTS_LAYER_KEY].is_visible_for("parameter_greens")
+              is False,
+          "fixed points are dynamical-plane gated, suppressed on both parameter-plane modes")
+
+    fp_resolved = _fixed_points_provider(fp_session.map, fp_session.param, fp_facts)
+    finite_fixed = [fp for fp in fp_facts.fixed_points if not _is_inf(fp.point)]
+    check(len(fp_resolved) == len(finite_fixed) == 2,
+          "plotted fixed points are exactly the FINITE entries of facts.fixed_points -- the "
+          "same source the Facts tab's own table reads, infinity excluded")
+    check({pt for pt, _colour in fp_resolved} == {fp.point for fp in finite_fixed},
+          "the plotted point SET matches facts.fixed_points' own finite points exactly")
+    check(not any(math.isinf(pt.real) or math.isinf(pt.imag) for pt, _colour in fp_resolved),
+          "infinity itself never appears among the plotted points")
+    for pt, colour in fp_resolved:
+        fp = next(fp for fp in finite_fixed if fp.point == pt)
+        check(colour == _FIXED_POINT_CLASSIFICATION_COLOURS[_classify(fp.multiplier)],
+              f"fixed point at {pt} is coloured by _classify(multiplier) == "
+              f"{_classify(fp.multiplier)!r}, matching the Facts tab's own classification")
+
+    # Map-independent: every _classify output has a defined colour, and the
+    # palette is genuinely 3 DISTINCT colours (attracting/repelling/neutral)
+    # even though _classify itself returns 4 labels -- superattracting
+    # shares attracting's colour (see _FIXED_POINT_CLASSIFICATION_COLOURS'
+    # own module comment), not a silent KeyError for the common case of a
+    # multiplier-0 fixed point (e.g. every root of Newton's method).
+    check(set(_FIXED_POINT_CLASSIFICATION_COLOURS) == {"attracting", "superattracting",
+                                                        "repelling", "neutral"},
+          "every possible _classify(...) output has a defined overlay colour")
+    check(_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"]
+          == _FIXED_POINT_CLASSIFICATION_COLOURS["superattracting"],
+          "superattracting shares attracting's colour, keeping the palette to 3 visually "
+          "distinct colours as specified, not 4")
+    check(len({_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
+              _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
+              _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]}) == 3,
+          "attracting/repelling/neutral are 3 genuinely distinct colours, not two of them "
+          "coinciding by accident")
+
+    print("\nattracting-cycle layer:")
+    check(fp_view._layer_enabled[ATTRACTING_CYCLES_LAYER_KEY] is False,
+          "the attracting-cycles layer is off by default too, independent of fixed points")
+    check(_OVERLAY_LAYERS_BY_KEY[ATTRACTING_CYCLES_LAYER_KEY].is_visible_for("julia") is True
+          and _OVERLAY_LAYERS_BY_KEY[ATTRACTING_CYCLES_LAYER_KEY].is_visible_for("parameter")
+              is False,
+          "attracting cycles are dynamical-plane gated too")
+
+    cyc_resolved = _attracting_cycles_provider(fp_session.map, fp_session.param, fp_facts)
+    period2 = next(c for c in fp_facts.attracting_cycles if c.period == 2)
+    check({pt for pt, _colour in cyc_resolved} >= {0j, -1 + 0j},
+          "plotted cycle points include the basilica's own period-2 cycle {0, -1}, the same "
+          "source the Facts tab's own Attracting Cycles table reads")
+    cyc_colours = {colour for pt, colour in cyc_resolved if pt in (0j, -1 + 0j)}
+    check(len(cyc_colours) == 1,
+          "every point belonging to the SAME cycle shares that cycle's one colour")
+
+    # Map-independent: the strength gradient itself, at its two defined ends
+    # and part-way between.
+    check(_cycle_colour(0j) == _CYCLE_STRONG_COLOUR,
+          "a superattracting cycle (|multiplier| == 0) gets the gradient's STRONG end exactly")
+    check(_cycle_colour(complex(0.999, 0)) != _CYCLE_STRONG_COLOUR,
+          "a barely-attracting cycle (|multiplier| near 1) is visually distinct from a "
+          "superattracting one -- the gradient actually varies, not a flat colour")
+    mid_colour = _cycle_colour(complex(0.5, 0))
+    check(mid_colour != _CYCLE_STRONG_COLOUR and mid_colour != _CYCLE_WEAK_COLOUR,
+          "a mid-strength cycle (|multiplier| == 0.5) lands strictly BETWEEN the two ends, "
+          "not snapped to either one")
+    check(_cycle_colour(complex(5, 0)) == _cycle_colour(complex(1, 0)),
+          "|multiplier| is clamped at 1 -- an (unexpected, since attracting implies < 1) "
+          "out-of-range value doesn't extrapolate past the gradient's own weak end")
+
+    cyc_traces = _attracting_cycles_trace_provider(fp_session.map, fp_session.param, fp_facts)
+    period2_trace = next((path, colour) for path, colour in cyc_traces
+                         if set(path) == {0j, -1 + 0j})
+    check(period2_trace[0] == list(period2.points) + [period2.points[0]],
+          "a period-2 cycle's traced path is its 2 (ordered) points closed into a loop -- "
+          "append points[0] -- not a re-sorted or independently-derived path")
+    check(period2_trace[1] == cyc_colours.pop(),
+          "...drawn in the SAME colour as that cycle's own points, not a separately computed one")
+
+    print("\noverlay-layer registry: independence + trace gating:")
+    fp_view.set_layer_enabled(FIXED_POINTS_LAYER_KEY, True)
+    check(fp_view._layer_enabled[ATTRACTING_CYCLES_LAYER_KEY] is False,
+          "enabling fixed points does not also enable attracting cycles -- independent flags")
+    fp_view.set_trace_enabled(CYCLE_TRACE_KEY, True)
+    fp_view.refresh_layers()
+    check(fp_view._layer_traces[CYCLE_TRACE_KEY] is not None,
+          "sanity: turning the cycle-trace toggle on does compute SOMETHING once refreshed")
+
+    # Trace Cycle Paths must draw NOTHING while its own layer (Attracting
+    # Cycles) is off -- paint_registry_layers' own layer_enabled gate, not
+    # just the View-menu action's setEnabled (a UI convenience, not the
+    # actual enforcement -- see SandboxWindow._build_view_menu_layer_actions).
+    # Explicit layer_enabled/layer_trace_enabled dicts throughout (never
+    # fp_view's own, already-mutated-above, live state) so each of the
+    # three images below draws EXACTLY what its own name claims.
+    def _paint_probe(layer_enabled: dict, layer_trace_enabled: dict) -> bytes:
+        image = QImage(64, 64, QImage.Format.Format_RGB888)
+        image.fill(0)
+        painter = QPainter(image)
+        paint_registry_layers(painter, fp_pane.viewport, 64, 64, "julia",
+                              layer_enabled=layer_enabled, layer_trace_enabled=layer_trace_enabled,
+                              layer_points=fp_view._layer_points, layer_traces=fp_view._layer_traces)
+        painter.end()
+        return image.constBits().tobytes()
+
+    nothing_enabled_bytes = _paint_probe(
+        {FIXED_POINTS_LAYER_KEY: False, ATTRACTING_CYCLES_LAYER_KEY: False}, {})
+    fixed_only_bytes = _paint_probe(
+        {FIXED_POINTS_LAYER_KEY: True, ATTRACTING_CYCLES_LAYER_KEY: False}, {})
+    check(fixed_only_bytes != nothing_enabled_bytes,
+          "sanity: enabling just fixed points DOES change the rendered bytes vs. nothing enabled")
+
+    cycles_off_trace_on_bytes = _paint_probe(
+        {FIXED_POINTS_LAYER_KEY: False, ATTRACTING_CYCLES_LAYER_KEY: False},
+        {CYCLE_TRACE_KEY: True})   # the trace's OWN flag is on; its layer is not
+    check(cycles_off_trace_on_bytes == nothing_enabled_bytes,
+          "Trace Cycle Paths draws NOTHING while Attracting Cycles itself is off, even though "
+          "the trace's own enabled flag is True -- it is genuinely gated behind the layer, not "
+          "just disabled-looking in the menu")
 
     # ---- orbit tracking: click-to-seed, step/clear, painting, staleness -----------
     print("\norbit tracking:")
@@ -782,10 +920,13 @@ def main() -> None:
     check(menu_titles == ["File", "View", "Help"],
           "the menu bar is File, View, Help, in that order")
     view_action_texts = [a.text() for a in window.view_menu.actions() if a.text()]
-    check(view_action_texts == ["Reset View", "Coupled View", "Critical Points",
-                                "Trace Orbits", "Connect Orbit Points"],
-          "the View menu has exactly the toolbar's own view controls, in order "
-          "(blank entries are separators, filtered out above)")
+    check(view_action_texts == ["Reset View", "Coupled View", "Critical Points", "Trace Orbits",
+                                "Fixed Points", "Attracting Cycles", "Trace Cycle Paths",
+                                "Connect Orbit Points"],
+          "the View menu has the toolbar's own view controls PLUS every registry layer's own "
+          "action (and gated trace sub-action), in registry order (blank entries are "
+          "separators, filtered out above) -- Fixed Points/Attracting Cycles/Trace Cycle Paths "
+          "are menu-only (Stage 2), with no toolbar counterpart to mirror")
 
     check(window.reset_view_action.isCheckable() is False,
           "Reset View is a plain triggerable action, not a checkable toggle")
