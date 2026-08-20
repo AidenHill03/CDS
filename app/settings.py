@@ -91,6 +91,16 @@ DEFAULT_GREENS_BAND_WIDTH = 1.0
 DEFAULT_GREENS_PERIOD_BANDS = 12.0
 DEFAULT_GREENS_CONTOUR = False
 
+# Stage 3: which of the two rational Green's potentials render_greens/
+# render_parameter_greens computes for a RATIONAL map (see cdx::
+# GreensPotential's own doc comment) -- ignored entirely for a certified
+# polynomial, where the two already coincide. A plain string, like
+# colour_palette/colour_scaling above, not the cdx enum itself -- this
+# module has no cdx dependency (see its own docstring), and app.session is
+# what translates it at the actual render_map call.
+GREENS_POTENTIAL_CHOICES = ("pragmatic", "conformal")
+DEFAULT_GREENS_POTENTIAL = "pragmatic"
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -169,6 +179,9 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     # same convention the choices-based fields above already use.
     "greens_contour": FieldSpec(bool, 0, 0, DEFAULT_GREENS_CONTOUR,
                                 "Green's function contour lines"),
+    "greens_potential": FieldSpec(str, 0, 0, DEFAULT_GREENS_POTENTIAL,
+                                  "Green's function potential (rational maps only)",
+                                  choices=GREENS_POTENTIAL_CHOICES),
 }
 
 
@@ -186,6 +199,7 @@ class Settings:
     greens_band_width: float = DEFAULT_GREENS_BAND_WIDTH
     greens_period_bands: float = DEFAULT_GREENS_PERIOD_BANDS
     greens_contour: bool = DEFAULT_GREENS_CONTOUR
+    greens_potential: str = DEFAULT_GREENS_POTENTIAL
 
     def sanitized(self) -> Settings:
         """A copy with every field individually validated, out-of-range or

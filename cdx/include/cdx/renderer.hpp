@@ -190,6 +190,22 @@ struct Cycle {
 };
 
 // -----------------------------------------------------------------------------
+// Stage 3's two selectable Green's-function potentials for a RATIONAL map's
+// dynamical-plane render_greens (and, per-critical-orbit, render_parameter_
+// greens) -- see render_greens' own doc comment for what each means
+// mathematically. Meaningless for a CERTIFIED polynomial, which ignores this
+// entirely and keeps its own existing fast path (see Map::escape_certified) --
+// where PRAGMATIC and CONFORMAL-Boettcher already coincide exactly.
+// -----------------------------------------------------------------------------
+enum class GreensPotential {
+    Pragmatic,   // smooth chordal convergence-rate toward the reached attractor
+    Conformal,   // log|phi(z)| -- Boettcher (superattracting) or Koenigs
+                // (geometrically attracting) coordinate, estimated numerically;
+                // falls back to Pragmatic (flagged, see render_greens) when the
+                // orbit's own local behaviour is too close to parabolic to tell
+};
+
+// -----------------------------------------------------------------------------
 // Render result. Row-major, row 0 at the bottom (matching Viewport::coord), so
 // callers that want image-style top-down order should flip.
 // -----------------------------------------------------------------------------
@@ -308,17 +324,41 @@ public:
     Image render_basin(const std::vector<Cycle>& cycles, Image* iterations = nullptr,
                        const std::atomic<bool>* cancel = nullptr) const;
 
-    // Green's function (dynamical potential), G_f(z) = lim_{n->inf}
-    // d^-n log+|f^n(z)|. The pixel is an INITIAL CONDITION on the
-    // DYNAMICAL plane -- the orbit starts AT the pixel, under the map's
-    // own BOUND parameter map_.param() (fixed for the whole render,
-    // exactly like render_julia). When the orbit escapes at iteration n,
-    // the result is log|z_n| / degree^n; non-escaping pixels are exactly
-    // 0. Normalizing at each pixel's OWN escape iteration (not against a
-    // single degree^max_iter for the whole image) is what makes this the
-    // actual escape-rate potential rather than a near-constant field --
-    // see the .cpp for the measured difference.
-    Image render_greens(const std::atomic<bool>* cancel = nullptr) const;
+    // Green's function (dynamical potential). TWO PATHS, same certification
+    // dispatch as render_julia (Map::escape_certified):
+    //
+    //   CERTIFIED POLYNOMIAL: UNCHANGED -- G_f(z) = lim_{n->inf} d^-n
+    //   log+|f^n(z)|. When the orbit escapes at iteration n, the result is
+    //   log|z_n| / degree^n; non-escaping pixels are exactly 0. `cycles`/
+    //   `potential`/`exact` are ignored entirely (PRAGMATIC and CONFORMAL-
+    //   Boettcher already coincide exactly at a certified polynomial's own
+    //   infinity -- see GreensPotential's own doc comment).
+    //
+    //   RATIONAL: sphere-aware, escape_radius-free, against `cycles` (the
+    //   SAME found-attractor set render_julia/render_basin take) -- see
+    //   the .cpp for the actual potential derivations. `potential` selects
+    //   PRAGMATIC (the SAME smooth chordal approach-rate render_julia's own
+    //   rational path computes -- reused, not re-derived) or CONFORMAL
+    //   (log|phi(z)| for the Boettcher/Koenigs coordinate at the reached
+    //   attractor, estimated numerically from the orbit's own last two
+    //   chordal distances before crossing tol -- see the .cpp for the
+    //   superattracting-vs-geometric-vs-parabolic classification this
+    //   estimate is built on). If `exact` is given, it is replaced with an
+    //   Image the same size as the result, 1.0 where CONFORMAL was
+    //   genuinely computed and 0.0 where it fell back to PRAGMATIC (the
+    //   orbit's own local behaviour was too close to parabolic to
+    //   distinguish, or the pixel never resolved at all) -- PRAGMATIC
+    //   itself has no such fallback, `exact` is meaningless for it.
+    //
+    // Normalizing at each pixel's OWN (escape or attractor-crossing)
+    // iteration -- not against a single degree^max_iter for the whole
+    // image -- is what makes this the actual escape-rate potential rather
+    // than a near-constant field, in EITHER path; see the .cpp for the
+    // measured difference on the certified-polynomial path specifically.
+    Image render_greens(const std::atomic<bool>* cancel = nullptr,
+                        const std::vector<Cycle>& cycles = {},
+                        GreensPotential potential = GreensPotential::Pragmatic,
+                        Image* exact = nullptr) const;
 
     // The FAMILY ESCAPE-RATE FUNCTION on the PARAMETER plane -- for the
     // quadratic family this is G_M(c), the Mandelbrot set's own Green's
@@ -349,7 +389,31 @@ public:
     // Cplx a) is purely structural and never actually reads `a` (see its
     // own implementation), so it cannot differ from one parameter-plane
     // pixel to the next.
-    Image render_parameter_greens(const std::atomic<bool>* cancel = nullptr) const;
+    //
+    // CERTIFIED POLYNOMIAL: UNCHANGED, exactly as above. `potential`/`exact`
+    // ignored.
+    //
+    // RATIONAL: escape-radius-free, but deliberately NOT a per-pixel
+    // find_attractors -- that would mean a full root-find at EVERY
+    // parameter pixel (attractors genuinely depend on the parameter here,
+    // unlike render_greens' single fixed map), which is exactly the
+    // per-pixel-root-find cost this codebase's own performance notes warn
+    // against. This function only ever asked "does the critical orbit
+    // escape to infinity" (the classical Mandelbrot-style connectedness
+    // question) -- not "which of several attractors captures it" -- so the
+    // rational generalization keeps that SAME single question, just asked
+    // chordally: track the critical orbit's chordal distance to infinity
+    // specifically (a fixed, trivial one-point attractor, no root-find at
+    // all) and apply the SAME Pragmatic/Conformal-Boettcher potential
+    // render_greens uses for an infinity attractor. If this particular
+    // parameter's infinity isn't actually attracting, the orbit simply
+    // never gets chordally close to it, stays unresolved, and the pixel is
+    // 0 -- "in the connectedness locus" -- exactly the existing convention.
+    // Multi-critical-point, per-parameter-attractor classification (three
+    // strategies) is Stage 4's own job, not this one's.
+    Image render_parameter_greens(const std::atomic<bool>* cancel = nullptr,
+                                  GreensPotential potential = GreensPotential::Pragmatic,
+                                  Image* exact = nullptr) const;
 
     // Deepest zoom the double-precision grid can still resolve: below this
     // half-width, neighbouring pixels round to the same double and the image
@@ -373,6 +437,18 @@ private:
     Image render_julia_polynomial(const std::atomic<bool>* cancel) const;
     Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
                                 const std::atomic<bool>* cancel) const;
+
+    // render_greens' own two paths, same split rationale as render_julia's.
+    Image render_greens_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_greens_rational(const std::vector<Cycle>& cycles, GreensPotential potential,
+                                 Image* exact, const std::atomic<bool>* cancel) const;
+
+    // render_parameter_greens' own two paths. The rational path's "cycles"
+    // is always the fixed, single-point infinity attractor -- see
+    // render_parameter_greens' own doc comment for why.
+    Image render_parameter_greens_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_parameter_greens_rational(GreensPotential potential, Image* exact,
+                                           const std::atomic<bool>* cancel) const;
 
     Map            map_;
     Viewport       view_;

@@ -746,9 +746,12 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     scalar-field equipotential banding (colour_scalar_field, using
     `settings`' greens_band_width/greens_period_bands/greens_contour) --
     the SAME display treatment for both, since they're the same KIND of
-    data (a non-negative potential) even though they live on different
-    planes (see cdx::Renderer::render_parameter_greens' own header comment
-    on why the two are computed by genuinely different kernels).
+    data (a potential -- Stage 3's CONFORMAL/Koenigs variant is not always
+    non-negative, but colour_scalar_field's own scale_scalar_field already
+    clips below 0 before taking a log, so this needs no special-casing
+    either) even though they live on different planes (see cdx::Renderer::
+    render_parameter_greens' own header comment on why the two are
+    computed by genuinely different kernels).
 
     GOVERNING PRINCIPLE: the sphere-aware milestone changes CLASSIFICATION
     and the SCALAR a pixel produces; it must never change a mode's
@@ -781,9 +784,13 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     plain/certified-polynomial) rather than a separate flag, since that IS
     exactly what render_map's own return shape already encodes; only the
     VALUES layer (index 0) is actually coloured, exactly like a plain 2D
-    escape-time array would be. "greens"/"parameter_greens" payloads are a
-    plain 2D array like "parameter" (and a certified-polynomial "julia"),
-    just with a different colour treatment (see below).
+    escape-time array would be. "greens"/"parameter_greens" payloads follow
+    the SAME ndim==3-means-stacked/rational convention (Stage 3): index 0
+    = potential value (coloured), index 1 = `exact` (1.0 where CONFORMAL
+    was genuinely computed, 0.0 where it fell back to Pragmatic -- kept
+    available for the cursor readout, per this function's own GOVERNING
+    PRINCIPLE, never the colourer); a certified polynomial's payload stays
+    a plain 2D array, same as "parameter".
 
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
@@ -797,7 +804,8 @@ def array_to_qimage(payload, mode: str, settings: Settings,
                            scaling=settings.colour_scaling)
         return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
-        flipped = np.flipud(payload)
+        values = payload[0] if np.asarray(payload).ndim == 3 else payload
+        flipped = np.flipud(values)
         rgb = colour_scalar_field(flipped, palette=settings.colour_palette,
                                   band_width=settings.greens_band_width,
                                   period_bands=settings.greens_period_bands,
@@ -875,7 +883,8 @@ class RenderTask:
 
     def __init__(self, request_id: int, rational_map: cdx.RationalMap, param: complex,
                 viewport: cdx.Viewport, settings: cdx.RenderSettings, mode: str,
-                cancel: cdx.CancelToken, cache: RenderCache | None = None):
+                cancel: cdx.CancelToken, cache: RenderCache | None = None,
+                potential: str = "pragmatic"):
         self.request_id = request_id
         self.rational_map = rational_map
         self.param = param
@@ -884,6 +893,13 @@ class RenderTask:
         self.mode = mode
         self.cancel = cancel
         self.cache = cache
+        # Stage 3: which of the two rational Green's potentials -- see
+        # app.session.render_map's own `potential` doc comment. Threaded
+        # through separately from `settings` (cdx.RenderSettings) because
+        # it changes the COMPUTED values, unlike palette/scaling/period,
+        # which stay pure display-time and never reach render_map at all
+        # (see array_to_qimage's own docstring).
+        self.potential = potential
         self.signals = RenderSignals()
 
     def run(self) -> None:
@@ -907,14 +923,16 @@ class RenderTask:
             preview_viewport = cdx.Viewport(self.viewport.center, self.viewport.scale, preview_res)
             preview_buffer_viewport = _overscanned(preview_viewport, PREVIEW_OVERSCAN_FACTOR)
             preview_array = render_map(self.rational_map, self.param, preview_buffer_viewport,
-                                       self.settings, self.mode, self.cancel, self.cache)
+                                       self.settings, self.mode, self.cancel, self.cache,
+                                       self.potential)
             if self.cancel.is_cancelled:
                 return
             self.signals.partial_ready.emit(self.request_id, preview_array, preview_buffer_viewport)
 
             full_buffer_viewport = _overscanned(self.viewport, FULL_OVERSCAN_FACTOR)
             full_array = render_map(self.rational_map, self.param, full_buffer_viewport,
-                                    self.settings, self.mode, self.cancel, self.cache)
+                                    self.settings, self.mode, self.cancel, self.cache,
+                                    self.potential)
             if self.cancel.is_cancelled:
                 return
             self.signals.full_ready.emit(self.request_id, full_array, full_buffer_viewport)
@@ -1156,11 +1174,12 @@ class ImageView(QWidget):
 
         mode = self._buffer_mode
         payload = self._buffer_payload
-        # "basin" is ALWAYS stacked; "julia" is stacked only for a RATIONAL
-        # map's render (Stage 2 -- see render_map/array_to_qimage's own
-        # docstrings, distinguished the SAME way there: ndim, not a second
-        # flag threaded through).
-        stacked = mode == "basin" or (mode == "julia" and payload.ndim == 3)
+        # "basin" is ALWAYS stacked; "julia" and "greens"/"parameter_greens"
+        # are stacked only for a RATIONAL map's render (Stage 2/Stage 3 --
+        # see render_map/array_to_qimage's own docstrings, distinguished
+        # the SAME way there: ndim, not a second flag threaded through).
+        stacked = (mode == "basin" or
+                  (mode in ("julia", "greens", "parameter_greens") and payload.ndim == 3))
         if stacked:
             height, width = payload[0].shape
         else:
@@ -1182,6 +1201,11 @@ class ImageView(QWidget):
         if mode == "basin":
             label = payload[0][raw_row, col]
             return "unresolved" if label == 0.0 else f"basin = {int(label)}"
+        if mode in ("greens", "parameter_greens") and stacked:
+            value = payload[0][raw_row, col]
+            exact = payload[1][raw_row, col]
+            return (f"potential = {value:.4g}" if exact != 0.0
+                    else f"potential = {value:.4g} (approx.)")
         if mode in ("greens", "parameter_greens"):
             value = payload[raw_row, col]
             return f"potential = {value:.4g}"
@@ -1686,7 +1710,8 @@ def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport
     composite" logic that could drift out of sync with this one.
     """
     export_viewport = cdx.Viewport(viewport.center, viewport.scale, resolution)
-    array = render_map(rational_map, param, export_viewport, render_settings, render_mode)
+    array = render_map(rational_map, param, export_viewport, render_settings, render_mode,
+                       potential=colour_settings.greens_potential)
     image = array_to_qimage(array, render_mode, colour_settings, render_settings.max_iter)
     painter = QPainter(image)
     paint_overlays(painter, export_viewport, resolution, resolution, render_mode,
@@ -3023,7 +3048,8 @@ class SandboxWindow(QMainWindow):
 
         task = RenderTask(request_id, self.session.map, self.session.param,
                           viewport_snapshot, settings_snapshot, pane.render_mode,
-                          cdx.CancelToken(), self.session.cache)
+                          cdx.CancelToken(), self.session.cache,
+                          self.session.settings.greens_potential)
         # Bound methods, not lambdas: PySide resolves `self` (this window,
         # a QObject on the GUI thread) as the receiver and correctly
         # queues delivery across threads -- see RenderSignals' docstring.

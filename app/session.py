@@ -120,10 +120,23 @@ def _swap_terms(terms, i: int, j: int, fields: tuple[str, ...]) -> bool:
     return True
 
 
+def _greens_potential(potential: str) -> cdx.GreensPotential:
+    """Translates app.settings.Settings.greens_potential's plain string
+    (see its own FieldSpec -- "pragmatic"/"conformal", the same
+    string-typed-setting convention colour_palette/colour_scaling already
+    use) into the cdx enum render_greens/render_parameter_greens actually
+    take. Kept a free function rather than inlined at each call site since
+    both "greens" and "parameter_greens" need it.
+    """
+    return (cdx.GreensPotential.Conformal if potential == "conformal"
+            else cdx.GreensPotential.Pragmatic)
+
+
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
                cancel: cdx.CancelToken | None = None,
-               cache: RenderCache | None = None):
+               cache: RenderCache | None = None,
+               potential: str = "pragmatic"):
     """Renders `rational_map` at `param` over `viewport`/`settings`, in the
     given mode. A free function rather than a Session method, and taking
     every value explicitly rather than reading them off a Session, so a
@@ -141,6 +154,14 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     an iterate-every-critical-orbit computation rather than a per-pixel one.
     A slow find_attractors call (a root-finding-heavy custom map) is not
     interruptible by this yet.
+
+    `potential` (Stage 3) selects which of the two rational Green's
+    potentials "greens"/"parameter_greens" compute for a RATIONAL map --
+    "pragmatic" (smooth chordal approach-rate, the default) or "conformal"
+    (log|phi(z)| for the Boettcher/Koenigs coordinate, estimated
+    numerically -- see cdx.GreensPotential's own doc comment). Ignored
+    entirely for a certified polynomial (the two already coincide there)
+    and for every other mode.
 
     `cache`, if given, is consulted BEFORE rendering anything (a hit skips
     computation entirely, including find_attractors for basin mode) and
@@ -174,12 +195,18 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         pixel took to resolve -- for basin SHADING (see app/colour.py's
         colour_basin). Stacked into one array rather than returned as a
         tuple so byte-accounting stays simple (a single array's .nbytes).
-      - "greens"/"parameter_greens" return a plain 2D array, the escape-
-        rate potential G(z) (or G_M(c) on the parameter plane) -- see
+      - "greens"/"parameter_greens" return a plain 2D array -- the
+        potential G(z) (or G_M(c) on the parameter plane) -- for a
+        CERTIFIED polynomial, UNCHANGED; for a RATIONAL map (Stage 3), a
+        STACKED 3D array (2, height, width): index 0 is the potential
+        value (selected by `potential`), index 1 is `exact` (1.0 where
+        CONFORMAL was genuinely computed, 0.0 where it fell back to
+        Pragmatic -- meaningless, always 0, for Pragmatic itself). See
         cdx.Renderer.render_greens/render_parameter_greens's own doc
-        comments. Normalized per-pixel at each pixel's own escape
-        iteration, so unlike the old accumulate/degree^max_iter form
-        there is no overflow case and nothing to warn about.
+        comments. Normalized per-pixel at each pixel's own escape/
+        attractor-crossing iteration, so unlike the old accumulate/
+        degree^max_iter form there is no overflow case and nothing to
+        warn about.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -187,7 +214,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     key = None
     if cache is not None:
         key = make_key(rational_map.serialize(), param, mode, viewport.center, viewport.scale,
-                       viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol)
+                       viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol,
+                       potential if mode in ("greens", "parameter_greens") else None)
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -224,9 +252,25 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         labels, iterations = renderer.render_basin(cycles, cancel)
         array = np.stack([labels, iterations])
     elif mode == "greens":
-        array = renderer.render_greens(cancel=cancel)
+        # Same certified-gate reasoning as "julia" above: find_attractors
+        # is only paid for when the rational path genuinely needs it.
+        pot = _greens_potential(potential)
+        if cdx.polynomial_escape_certified(rational_map):
+            values, _exact = renderer.render_greens(cancel, potential=pot)
+            array = values
+        else:
+            cycles = cdx.find_attractors(rational_map, param)
+            values, exact = renderer.render_greens(cancel, cycles, pot)
+            array = np.stack([values, exact])
     elif mode == "parameter_greens":
-        array = renderer.render_parameter_greens(cancel=cancel)
+        # No find_attractors here even for a rational map: the rational
+        # path only ever tracks chordal distance to a FIXED infinity
+        # attractor (see Renderer::render_parameter_greens' own doc
+        # comment for why a per-parameter-pixel root-find isn't needed,
+        # or wanted, for this particular question).
+        pot = _greens_potential(potential)
+        values, exact = renderer.render_parameter_greens(cancel, pot)
+        array = values if cdx.polynomial_escape_certified(rational_map) else np.stack([values, exact])
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 
@@ -302,7 +346,8 @@ class Session:
         session's own map/param/settings/cache.
         """
         return render_map(self.map, self.param, viewport, self.render_settings,
-                          render_mode, cancel=cancel, cache=self.cache)
+                          render_mode, cancel=cancel, cache=self.cache,
+                          potential=self._settings.greens_potential)
 
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/

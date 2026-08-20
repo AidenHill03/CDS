@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox
 
 from app.session import Session
 from app.settings import FIELD_SPECS, Settings
-from app.settings_panel import SettingsPanel
+from app.settings_panel import FIELD_GROUPS, SettingsPanel
 
 failures = 0
 
@@ -39,6 +39,19 @@ def main() -> None:
     app = QApplication.instance() or QApplication([])
 
     print("=== app.settings_panel tests ===")
+
+    # ---- FIELD_GROUPS covers every FIELD_SPECS entry exactly once -----------------
+    # A field present in FIELD_SPECS but missing from every group is silently
+    # unreachable in the UI -- exactly the bug that shipped Stage 3's own
+    # greens_potential without a way to switch it in-app until this test was
+    # added; a field listed twice would build the same widget in two groups,
+    # with only the last one's Apply-time read ever winning.
+    print("\nFIELD_GROUPS completeness:")
+    grouped_fields = [name for names in FIELD_GROUPS.values() for name in names]
+    check(set(grouped_fields) == set(FIELD_SPECS),
+          "every FIELD_SPECS entry appears in exactly one FIELD_GROUPS group")
+    check(len(grouped_fields) == len(set(grouped_fields)),
+          "no field is listed in more than one group")
 
     # ---- initial widget values match session.settings -----------------------------
     print("\ninitial values:")
@@ -126,6 +139,21 @@ def main() -> None:
                              "valid Apply")
     check(applied[-1].greens_contour is True and applied[-1].greens_band_width == 3.0,
           "the applied Settings reflects the checkbox state and the band-width spinbox")
+
+    # ---- Stage 3: greens_potential gets a QComboBox, round-trips through Apply --------
+    print("\nStage 3 (greens_potential -- switchable in-app, per the milestone's own spec):")
+    potential_widget = panel._widgets["greens_potential"]
+    check(isinstance(potential_widget, QComboBox),
+          "greens_potential gets a QComboBox, not a spinbox")
+    check(potential_widget.currentText() == session.settings.greens_potential,
+          "the combo box starts on session.settings' current value (pragmatic)")
+
+    applied.clear()
+    potential_widget.setCurrentText("conformal")
+    panel._apply()
+    check(len(applied) == 1, "changing only the potential combo box still triggers a valid Apply")
+    check(applied[-1].greens_potential == "conformal",
+          "the applied Settings reflects the combo-box selection")
 
     # ---- Clear Cache ------------------------------------------------------------------
     print("\nclear cache:")

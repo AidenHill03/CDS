@@ -32,7 +32,8 @@ from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_fi
 FIELD_GROUPS = {
     "Rendering": ["resolution", "max_iter", "escape_radius", "tol", "threads"],
     "Colouring": ["colour_palette", "colour_scaling", "colour_period"],
-    "Green's function": ["greens_band_width", "greens_period_bands", "greens_contour"],
+    "Green's function": ["greens_potential", "greens_band_width", "greens_period_bands",
+                        "greens_contour"],
     "Cache": ["cache_budget_bytes"],
 }
 

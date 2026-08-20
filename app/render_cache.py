@@ -30,14 +30,20 @@ CacheKey = tuple
 
 def make_key(map_serialized: str, param: complex, mode: str,
             viewport_center: complex, viewport_scale: float, viewport_resolution: int,
-            max_iter: int, escape_radius: float, tol: float) -> CacheKey:
+            max_iter: int, escape_radius: float, tol: float,
+            potential: str | None = None) -> CacheKey:
     """Builds a cache key from exactly the inputs that affect a render's
     pixels. Callers pass viewport fields (not a cdx.Viewport) and
     map.serialize() (not a RationalMap) so this stays a hashable tuple of
     plain values -- cdx objects are not guaranteed hashable/comparable.
+
+    `potential` (Stage 3): app.session.render_map passes its own
+    `potential` argument here for "greens"/"parameter_greens" (None for
+    every other mode, where it plays no role) -- two renders differing
+    only in `potential` must NOT collide on the same cache entry.
     """
     return (map_serialized, param, mode, viewport_center, viewport_scale,
-            viewport_resolution, max_iter, escape_radius, tol)
+            viewport_resolution, max_iter, escape_radius, tol, potential)
 
 
 @dataclass

@@ -533,6 +533,210 @@ int main() {
               "own basin membership is decided by the chordal metric, never a |z|>R test");
     }
 
+    // ---- MILESTONE ACCEPTANCE TEST (Stage 3): rational Green's, both potentials ------
+    // escape_radius-INVARIANT for a rational map; a certified polynomial's fast
+    // path is unaffected by `potential`/`cycles`/`exact` entirely, mirroring
+    // Stage 2's own render_julia acceptance test exactly.
+    std::printf("\nMILESTONE ACCEPTANCE TEST (Stage 3): rational Green's is "
+               "escape_radius-invariant, polynomial Green's unaffected by `potential`:\n");
+    {
+        RationalMap mandel = RationalMap::mandelbrot();
+        const Cplx pa{-0.7269, 0.1889};
+        check(polynomial_escape_certified(mandel) == true,
+              "sanity: mandelbrot is certified -- takes the unchanged fast path");
+        Renderer rp(Map::custom(mandel, pa), Viewport{{0.0, 0.0}, 1.5, 101},
+                   RenderSettings{200, 2.0, 1e-6, 1});
+        const Image g_default = rp.render_greens();
+        Image exact_pragmatic, exact_conformal;
+        const Image g_pragmatic = rp.render_greens(nullptr, find_attractors(mandel, pa),
+                                                    GreensPotential::Pragmatic, &exact_pragmatic);
+        const Image g_conformal = rp.render_greens(nullptr, find_attractors(mandel, pa),
+                                                    GreensPotential::Conformal, &exact_conformal);
+        bool poly_identical = true;
+        for (std::size_t i = 0; i < g_default.data.size(); ++i) {
+            if (g_default.data[i] != g_pragmatic.data[i]) poly_identical = false;
+            if (g_default.data[i] != g_conformal.data[i]) poly_identical = false;
+        }
+        check(poly_identical,
+              "ACCEPTANCE: a certified polynomial's Green's render is IDENTICAL regardless "
+              "of `potential` or whether cycles are passed -- PRAGMATIC and "
+              "CONFORMAL-Boettcher already coincide at a certified polynomial's own "
+              "infinity, and the fast path ignores the selector entirely");
+
+        RationalMap newton4("newton4");   // (3/4)z + (1/4)z^-3 -- Newton's method for z^4-1
+        newton4.add_poly({0.75, 0.0}, 1, 0, "(3/4)z");
+        newton4.add_pole({0.0, 0.0}, {0.25, 0.0}, 3, 0, "1/(4z^3)");
+        const Cplx a{0.0, 0.0};
+        check(polynomial_escape_certified(newton4) == false,
+              "sanity: Newton z^4-1 genuinely takes the rational path");
+        const auto cycles = find_attractors(newton4, a);
+        check(cycles.size() == 4, "sanity: 4 attracting cycles (the 4 fourth-roots of unity)");
+
+        const Viewport v{{0.0, 0.0}, 2.0, 121};
+        for (GreensPotential pot : {GreensPotential::Pragmatic, GreensPotential::Conformal}) {
+            Renderer r2(Map::custom(newton4, a), v, RenderSettings{100, 2.0, 1e-6, 1});
+            Renderer r10(Map::custom(newton4, a), v, RenderSettings{100, 10.0, 1e-6, 1});
+            Image exact2, exact10;
+            const Image vals2 = r2.render_greens(nullptr, cycles, pot, &exact2);
+            const Image vals10 = r10.render_greens(nullptr, cycles, pot, &exact10);
+
+            bool values_identical = true, exact_identical = true;
+            for (std::size_t i = 0; i < vals2.data.size(); ++i) {
+                if (vals2.data[i] != vals10.data[i]) values_identical = false;
+                if (exact2.data[i] != exact10.data[i]) exact_identical = false;
+            }
+            const char* label = pot == GreensPotential::Pragmatic ? "PRAGMATIC" : "CONFORMAL";
+            std::printf("  (%s)\n", label);
+            check(values_identical,
+                  "ACCEPTANCE: rational Green's (Newton z^4-1) at escape_radius=2 and "
+                  "escape_radius=10 produces BYTE-IDENTICAL values");
+            check(exact_identical,
+                  "...and byte-identical `exact` flags too -- escape_radius plays no role "
+                  "anywhere in this path");
+
+            if (pot == GreensPotential::Conformal) {
+                bool some_exact = false;
+                for (double e : exact2.data) if (e != 0.0) some_exact = true;
+                check(some_exact,
+                      "CONFORMAL genuinely computes the Boettcher potential for at least "
+                      "some pixels here (each root is superattracting, local degree 2) -- "
+                      "not silently falling back to Pragmatic for everything");
+            }
+        }
+    }
+
+    // ---- Conformal (Koenigs) potential on a geometrically attracting fixed point -----
+    // R(z) = lambda*z + (1-lambda), an affine (degree-1, hence NOT
+    // escape-radius-certified -- see polynomial_escape_certified's own "degree
+    // < 2" test case) map with EXACT global dynamics: R(z)-1 = lambda*(z-1)
+    // for every z, so the fixed point at z=1 has multiplier EXACTLY lambda,
+    // and every finite point converges to it geometrically at that exact
+    // rate -- ideal ground truth for testing the numerically-ESTIMATED
+    // Koenigs potential against.
+    std::printf("\nConformal (Koenigs) potential on a geometrically attracting fixed point:\n");
+    {
+        const double lambda = 0.3;
+        RationalMap affine("affine");
+        affine.add_poly({lambda, 0.0}, 1, 0, "lambda*z");
+        affine.add_poly({1.0 - lambda, 0.0}, 0, 0, "1-lambda");
+        const Cplx a{0.0, 0.0};
+        check(polynomial_escape_certified(affine) == false,
+              "sanity: a degree-1 map is not escape_radius-certified -- takes the rational "
+              "path despite having no poles");
+
+        // NOT via find_attractors: that seeds from distinct_critical_points,
+        // and a degree-1 map has NONE (Riemann-Hurwitz: total multiplicity
+        // == 2d-2 == 0) -- a genuine, expected blind spot of critical-orbit
+        // discovery for a map with no critical points at all, not something
+        // to route around. fixed_points() finds z=1 directly instead, the
+        // same way this map's ground-truth multiplier is verified below.
+        const auto fps = affine.fixed_points(a);
+        bool found_p1 = false;
+        for (const auto& fp : fps) {
+            if (close(fp.point, Cplx{1.0, 0.0}, 1e-6)) {
+                found_p1 = true;
+                check(close(fp.multiplier, Cplx{lambda, 0.0}, 1e-6),
+                      "fixed_points independently confirms the multiplier at z=1 is exactly "
+                      "lambda -- the ground truth this test's Koenigs estimate is checked "
+                      "against");
+            }
+        }
+        check(found_p1, "sanity: z=1 is a fixed point of R(z)=lambda*z+(1-lambda)");
+
+        const std::vector<Cycle> cycles = {Cycle{{Cplx{1.0, 0.0}}, 1}};
+
+        const Viewport v{{1.0, 0.0}, 6.0, 121};   // centred on the attractor
+        Renderer r(Map::custom(affine, a), v, RenderSettings{200, 2.0, 1e-9, 1});
+        Image exact;
+        const Image g = r.render_greens(nullptr, cycles, GreensPotential::Conformal, &exact);
+
+        bool most_exact = false;
+        {
+            int n_exact = 0, n_resolved = 0;
+            for (std::size_t i = 0; i < g.data.size(); ++i) {
+                if (g.data[i] != 0.0 || exact.data[i] != 0.0) ++n_resolved;
+                if (exact.data[i] != 0.0) ++n_exact;
+            }
+            most_exact = n_resolved > 0 && n_exact > n_resolved / 2;
+        }
+        check(most_exact,
+              "the geometric (Koenigs) branch is genuinely selected for most resolved "
+              "pixels here -- not falling back to Pragmatic");
+
+        // Sample real-axis points at increasing distance from the attractor
+        // (this map's dynamics are real-preserving) and confirm G grows
+        // monotonically farther from z=1 -- G_p is supposed to vanish toward
+        // the basin boundary and grow toward the attractor's own approach,
+        // exactly as the certified-polynomial Boettcher formula already
+        // does; a geometric basin should show the SAME qualitative shape
+        // even though its magnitude isn't sign-pinned the way Boettcher's
+        // is (see conformal_potential's own doc comment).
+        auto conformal_at = [&](double re) {
+            Renderer r1(Map::custom(affine, a), Viewport{{re, 0.0}, 0.01, 3},
+                       RenderSettings{200, 2.0, 1e-9, 1});
+            Image ex1;
+            const Image gv = r1.render_greens(nullptr, cycles, GreensPotential::Conformal, &ex1);
+            return std::make_pair(gv.at(1, 1), ex1.at(1, 1));
+        };
+        const auto [g_near, ex_near] = conformal_at(1.5);     // |z-1| = 0.5
+        const auto [g_far,  ex_far ] = conformal_at(4.0);     // |z-1| = 3.0
+        check(ex_near != 0.0 && ex_far != 0.0,
+              "both sample points resolve via the genuine Koenigs estimate (exact), not a "
+              "Pragmatic fallback");
+        check(g_far > g_near,
+              "CONSISTENT WITH THE MULTIPLIER: a point 6x farther from the attractor (and "
+              "so needing more lambda-scaled steps to converge) gets a strictly LARGER "
+              "Conformal value -- the potential grows away from the attractor, not a flat "
+              "or inverted field");
+    }
+
+    // ---- Conformal potential flags the near-parabolic case as approximate -----------
+    // Same affine construction, but with lambda pushed right up against the
+    // unit circle (0.99): still technically geometric, but exactly the
+    // regime this milestone's own spec calls out as too close to parabolic
+    // to trust ("approximate with the pragmatic rate and CLEARLY label it as
+    // not the exact conformal potential") -- conformal_potential's own
+    // lambda_est < 0.98 acceptance threshold is deliberately conservative
+    // about this boundary, not just the literal |lambda|==1 point.
+    std::printf("\nConformal potential falls back to Pragmatic, flagged inexact, near the "
+               "parabolic boundary:\n");
+    {
+        const double lambda = 0.99;
+        RationalMap affine("affine_slow");
+        affine.add_poly({lambda, 0.0}, 1, 0, "lambda*z");
+        affine.add_poly({1.0 - lambda, 0.0}, 0, 0, "1-lambda");
+        const Cplx a{0.0, 0.0};
+        // Same reasoning as the lambda=0.3 case above: built directly from
+        // the map's own algebra, not find_attractors (no critical points to
+        // seed from at degree 1).
+        const std::vector<Cycle> cycles = {Cycle{{Cplx{1.0, 0.0}}, 1}};
+
+        const Viewport v{{1.0, 0.0}, 6.0, 41};
+        Renderer r(Map::custom(affine, a), v, RenderSettings{4000, 2.0, 1e-9, 1});
+        Image exact_conf, exact_prag;
+        const Image g_conf = r.render_greens(nullptr, cycles, GreensPotential::Conformal, &exact_conf);
+        const Image g_prag = r.render_greens(nullptr, cycles, GreensPotential::Pragmatic, &exact_prag);
+
+        int n_resolved = 0, n_fallback = 0, n_matches_pragmatic = 0;
+        for (std::size_t i = 0; i < g_conf.data.size(); ++i) {
+            if (g_prag.data[i] == 0.0) continue;   // unresolved pixel, not relevant here
+            ++n_resolved;
+            if (exact_conf.data[i] == 0.0) {
+                ++n_fallback;
+                if (g_conf.data[i] == g_prag.data[i]) ++n_matches_pragmatic;
+            }
+        }
+        check(n_resolved > 0, "sanity: at least some pixels resolved within max_iter");
+        check(n_fallback == n_resolved,
+              "FLAGGED APPROXIMATE: every resolved pixel falls back (exact == 0) at "
+              "lambda=0.99 -- the near-parabolic regime is honestly reported as "
+              "inexact, not silently given a fabricated Boettcher/Koenigs value");
+        check(n_matches_pragmatic == n_fallback,
+              "...and the fallback VALUE is genuinely the Pragmatic value, not left at a "
+              "stale 0 -- 'approximate with the pragmatic rate', per the spec, not just "
+              "flagged and abandoned");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

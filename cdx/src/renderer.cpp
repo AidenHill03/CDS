@@ -389,6 +389,150 @@ StepPlan make_step_plan(const Map& m) {
     if (plan.use_compiled) plan.compiled = custom->compile(m.param());
     return plan;
 }
+
+// -----------------------------------------------------------------------------
+// Shared sphere-aware orbit classifier -- the SAME chordal-distance-against-
+// found-attractors loop render_julia_rational (Stage 2) and render_greens'/
+// render_parameter_greens' rational paths (Stage 3) all need, written once.
+// `step` is templated (not std::function) so it inlines exactly like a
+// direct StepPlan::step call would -- render_julia/render_greens pass a
+// per-render-fixed StepPlan, render_parameter_greens passes a per-PIXEL
+// closure (its step formula depends on the pixel's own parameter value; see
+// its own comment), and both cost nothing extra here.
+// -----------------------------------------------------------------------------
+struct OrbitFate {
+    bool   resolved  = false;
+    int    label     = 0;
+    double nu        = 0.0;    // pragmatic smooth chordal approach-rate (0 if unresolved)
+    int    n         = 0;      // iterations taken to resolve (1-based; 0 if unresolved)
+    double d_curr    = 0.0;    // chordal distance to the reached attractor at iteration n
+    double d_prev    = 0.0;    // ...at iteration n-1, valid iff have_prev
+    bool   have_prev = false;
+};
+
+template <typename Step>
+OrbitFate classify_rational_orbit(double zr, double zi, Step&& step,
+                                  const std::vector<double>& ar, const std::vector<double>& ai,
+                                  const std::vector<int>& aid, double tol, int max_iter) {
+    OrbitFate fate;
+    const double log_tol = std::log(tol);
+    const int nattr = static_cast<int>(ar.size());
+
+    int prev_attractor = -1;
+    double prev_dist = 0.0;
+    bool have_prev = false;
+
+    for (int n = 0; n < max_iter; ++n) {
+        step(zr, zi);
+        if (is_bad(zr) || is_bad(zi)) break;   // genuine overflow -- stays unresolved
+
+        int closest = -1;
+        double closest_dist = kHuge;
+        for (int k = 0; k < nattr; ++k) {
+            const double d = chordal_distance(zr, zi, ar[k], ai[k]);
+            if (d < closest_dist) { closest_dist = d; closest = k; }
+        }
+
+        if (closest_dist < tol) {
+            fate.resolved = true;
+            fate.label = aid[closest];
+            fate.n = n + 1;
+            fate.d_curr = closest_dist;
+
+            double nu = static_cast<double>(n + 1);
+            if (have_prev && prev_attractor == closest && prev_dist > closest_dist &&
+                closest_dist > 0.0) {
+                fate.d_prev = prev_dist;
+                fate.have_prev = true;
+                const double log_prev = std::log(prev_dist);
+                const double log_curr = std::log(closest_dist);
+                const double denom = log_curr - log_prev;
+                if (denom < 0.0 && std::isfinite(denom)) {
+                    const double interpolated =
+                        static_cast<double>(n - 1) + (log_tol - log_prev) / denom;
+                    if (std::isfinite(interpolated)) nu = interpolated;
+                }
+            }
+            fate.nu = nu;
+            return fate;
+        }
+
+        prev_attractor = closest;
+        prev_dist = closest_dist;
+        have_prev = true;
+    }
+    return fate;   // unresolved: default-constructed (resolved=false)
+}
+
+// -----------------------------------------------------------------------------
+// Stage 3's Conformal potential, log|phi(z)| for the Boettcher (super-
+// attracting) or Koenigs (geometrically attracting) coordinate at the
+// attractor an OrbitFate resolved to, estimated numerically from ONLY the
+// last two chordal distances straddling tol (fate.d_prev, fate.d_curr) and
+// the integer step count (fate.n) -- no extra iteration, reusing exactly
+// what classify_rational_orbit already computed.
+//
+// SUPERATTRACTING (incl. polynomial infinity, where this literally reduces
+// to the certified-polynomial path's own log|z_n|/d^n -- see render_greens'
+// own comment): near a superattracting point p of local degree k, the
+// Boettcher coordinate is a genuine local biholomorphism with phi_p(p) = 0,
+// phi_p(f(z)) = phi_p(z)^k, so phi_p(z) ~ C*(z-p) to leading order and
+// d(z_n, p) ~ C' * d(z_{n-1}, p)^k locally -- k is estimated from the
+// log-log ratio log(d_curr)/log(d_prev) (both logs negative for d<1),
+// accepted only when it lands close to an integer >= 2 AND d_prev is
+// already small enough (log_prev < -1.2, i.e. d_prev < ~0.3) for the
+// leading-order approximation to be trustworthy. G_p(z) = -log(d_curr) /
+// k^n follows from the functional equation G_p(f^n(z)) = k^n * G_p(z) with
+// G_p(z_n) ~= -log(C*d(z_n,p)) ~= -log(d(z_n,p)) for z_n already close to p
+// -- vanishes at the basin boundary (n -> large), diverges at p itself
+// (n -> small), same sign convention as the certified-polynomial formula.
+//
+// GEOMETRIC (0 < |lambda| < 1): the Koenigs coordinate psi(z) with
+// psi(f(z)) = lambda*psi(z) linearizes f near p; |lambda| is estimated
+// directly as d_curr/d_prev (a genuine linear ratio, no log-log needed).
+// log|psi(z)| ~= log(d_curr) - n*log(|lambda|) follows the same way. UNLIKE
+// the superattracting case, this is NOT sign-determinate against the same
+// "0 at boundary, diverges at p" convention -- psi is only defined up to an
+// arbitrary nonzero multiplicative normalization (no k-power self-map to
+// pin it down the way Boettcher's does), so this value can run either
+// direction. That is a genuine, acknowledged modeling limitation, not a
+// bug: it is still a perfectly good scalar for palette/equipotential-band
+// colouring (colour_scalar_field only needs a scalar field, not a
+// particular sign), just not one that reduces to the Boettcher convention.
+//
+// PARABOLIC / AMBIGUOUS (|lambda| ~= 1, or no reliable local-rate data at
+// all): the true Fatou-coordinate potential is hard and NOT attempted here
+// -- returns exact=false so the caller falls back to the Pragmatic value.
+// -----------------------------------------------------------------------------
+struct ConformalPotential {
+    double value = 0.0;
+    bool   exact = false;
+};
+
+ConformalPotential conformal_potential(const OrbitFate& fate) {
+    if (!fate.resolved || !fate.have_prev || fate.d_prev <= 0.0 || fate.d_curr <= 0.0)
+        return {};
+
+    const double log_prev = std::log(fate.d_prev);
+    const double log_curr = std::log(fate.d_curr);
+    if (!std::isfinite(log_prev) || !std::isfinite(log_curr) || log_prev >= 0.0) return {};
+    const double n = static_cast<double>(fate.n);
+
+    const double ratio_log = log_curr / log_prev;
+    const double k_round = std::round(ratio_log);
+    if (log_prev < -1.2 && k_round >= 2.0 && std::abs(ratio_log - k_round) < 0.2) {
+        const double g = -log_curr / std::pow(k_round, n);
+        if (std::isfinite(g)) return {g, true};
+    }
+
+    const double lambda_est = fate.d_curr / fate.d_prev;
+    if (lambda_est > 1e-6 && lambda_est < 0.98) {
+        const double g = log_curr - n * std::log(lambda_est);
+        if (std::isfinite(g)) return {g, true};
+    }
+
+    return {};   // parabolic or too ambiguous to classify -- caller falls back to Pragmatic
+}
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -479,62 +623,19 @@ Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* l
             aid.push_back(cyc.id);
         }
     }
-    const int nattr = static_cast<int>(ar.size());
     const double tol = settings_.tol;
-    const double log_tol = std::log(tol);
 
     const StepPlan plan = make_step_plan(map_);
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx c = view_.coord(col, row);
-            double zr = c.real(), zi = c.imag();
-            double out = 0.0, label = 0.0;
+            const OrbitFate fate = classify_rational_orbit(
+                c.real(), c.imag(), [&](double& zr, double& zi) { plan.step(zr, zi); },
+                ar, ai, aid, tol, settings_.max_iter);
 
-            int prev_attractor = -1;
-            double prev_dist = 0.0;
-            bool have_prev = false;
-
-            for (int n = 0; n < settings_.max_iter; ++n) {
-                plan.step(zr, zi);
-                if (is_bad(zr) || is_bad(zi)) break;   // genuine overflow -- stays unresolved
-
-                int closest = -1;
-                double closest_dist = kHuge;
-                for (int k = 0; k < nattr; ++k) {
-                    const double d = chordal_distance(zr, zi, ar[k], ai[k]);
-                    if (d < closest_dist) { closest_dist = d; closest = k; }
-                }
-
-                if (closest_dist < tol) {
-                    label = static_cast<double>(aid[closest]);
-                    // Log-log interpolation IFF the previous iteration's
-                    // closest attractor was this SAME one and genuinely
-                    // farther away (a real contraction to interpolate
-                    // between) -- otherwise fall back to the plain count.
-                    double nu = static_cast<double>(n + 1);
-                    if (have_prev && prev_attractor == closest && prev_dist > closest_dist &&
-                        closest_dist > 0.0) {
-                        const double log_prev = std::log(prev_dist);
-                        const double log_curr = std::log(closest_dist);
-                        const double denom = log_curr - log_prev;
-                        if (denom < 0.0 && std::isfinite(denom)) {
-                            const double interpolated =
-                                static_cast<double>(n - 1) + (log_tol - log_prev) / denom;
-                            if (std::isfinite(interpolated)) nu = interpolated;
-                        }
-                    }
-                    out = nu;
-                    break;
-                }
-
-                prev_attractor = closest;
-                prev_dist = closest_dist;
-                have_prev = true;
-            }
-
-            img.at(col, row) = out;
-            if (labels) labels->at(col, row) = label;
+            img.at(col, row) = fate.resolved ? fate.nu : 0.0;
+            if (labels) labels->at(col, row) = fate.resolved ? static_cast<double>(fate.label) : 0.0;
         }
     }, cancel);
     return img;
@@ -620,7 +721,9 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 // critical-point/step dispatch, with render_greens' accumulate-and-
 // normalize body substituted for render_parameter's escape-time test.
 // -----------------------------------------------------------------------------
-Image Renderer::render_parameter_greens(const std::atomic<bool>* cancel) const {
+// The pre-Stage-3 escape-radius path, UNCHANGED, extracted the same way as
+// render_greens_polynomial.
+Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
     const double escR = settings_.escape_radius;
     Image img(res, res);
@@ -683,6 +786,77 @@ Image Renderer::render_parameter_greens(const std::atomic<bool>* cancel) const {
     return img;
 }
 
+// Stage 3's sphere-aware rational path -- see render_parameter_greens' own
+// header doc comment for why this tracks chordal distance to a FIXED,
+// trivial one-point "infinity" attractor rather than a per-parameter-pixel
+// find_attractors call (that per-pixel root-find cost is exactly what
+// Stage 4's own multi-critical-point restructuring will have to solve for
+// render_parameter too; this function's own question -- "does the critical
+// orbit escape to infinity" -- doesn't need it). Same classify_rational_
+// orbit/conformal_potential pair render_greens_rational uses, just with a
+// per-PIXEL step closure (the parameter varies per pixel here) instead of
+// a per-render-fixed StepPlan.
+Image Renderer::render_parameter_greens_rational(GreensPotential potential, Image* exact,
+                                                  const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (exact) *exact = Image(res, res);
+
+    const std::vector<double> ar{kInf};
+    const std::vector<double> ai{0.0};
+    const std::vector<int>    aid{1};
+    const double tol = settings_.tol;
+
+    // See render_parameter for the three-path critical-point/step dispatch
+    // this mirrors exactly.
+    const RationalMap* custom = map_.custom_map();
+    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
+
+    const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
+    const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+            Cplx c0;
+            if (recognized) c0 = Map::critical_point(*recognized, p);
+            else if (cp_fixed) c0 = fixed_c0;
+            else c0 = map_.critical_point_at(p);
+
+            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            auto step = [&](double& zr, double& zi) {
+                if (recognized) Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
+                else if (custom) compiled.step(zr, zi);
+                else map_.step_with_param(p, zr, zi);
+            };
+
+            const OrbitFate fate = classify_rational_orbit(c0.real(), c0.imag(), step, ar, ai, aid,
+                                                            tol, settings_.max_iter);
+
+            double g = 0.0;
+            bool is_exact = false;
+            if (fate.resolved) {
+                if (potential == GreensPotential::Pragmatic) {
+                    g = fate.nu;
+                } else {
+                    const ConformalPotential cp = conformal_potential(fate);
+                    g = cp.exact ? cp.value : fate.nu;
+                    is_exact = cp.exact;
+                }
+            }
+            img.at(col, row) = g;
+            if (exact) exact->at(col, row) = is_exact ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+Image Renderer::render_parameter_greens(const std::atomic<bool>* cancel, GreensPotential potential,
+                                        Image* exact) const {
+    if (map_.escape_certified()) return render_parameter_greens_polynomial(cancel);
+    return render_parameter_greens_rational(potential, exact, cancel);
+}
+
 // -----------------------------------------------------------------------------
 // Basins
 // -----------------------------------------------------------------------------
@@ -739,7 +913,12 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations
 // -----------------------------------------------------------------------------
 // Green's function
 // -----------------------------------------------------------------------------
-Image Renderer::render_greens(const std::atomic<bool>* cancel) const {
+// The pre-Stage-3 escape-radius path, UNCHANGED, extracted the same way
+// render_julia_polynomial was in Stage 2 -- correct and fast for a
+// CERTIFIED polynomial, where PRAGMATIC and CONFORMAL-Boettcher already
+// coincide exactly (see GreensPotential's own doc comment), so there is
+// nothing a `potential` selector would even distinguish here.
+Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
     const double escR = settings_.escape_radius;
     const double ddeg = static_cast<double>(map_.degree());
@@ -788,6 +967,62 @@ Image Renderer::render_greens(const std::atomic<bool>* cancel) const {
         }
     }, cancel);
     return img;
+}
+
+// Stage 3's sphere-aware rational path -- same classify_rational_orbit
+// (shared with render_julia_rational) supplying BOTH the resolved
+// attractor's chordal approach data and the PRAGMATIC value directly;
+// CONFORMAL is derived from that same data by conformal_potential (see its
+// own doc comment for the Boettcher/Koenigs derivations). escape_radius
+// plays no role, same reasoning as render_julia_rational's own.
+Image Renderer::render_greens_rational(const std::vector<Cycle>& cycles, GreensPotential potential,
+                                       Image* exact, const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (exact) *exact = Image(res, res);
+    if (cycles.empty()) return img;
+
+    std::vector<double> ar, ai;
+    std::vector<int>    aid;
+    for (const auto& cyc : cycles) {
+        for (const auto& pt : cyc.points) {
+            ar.push_back(pt.real());
+            ai.push_back(pt.imag());
+            aid.push_back(cyc.id);
+        }
+    }
+    const double tol = settings_.tol;
+    const StepPlan plan = make_step_plan(map_);
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx c = view_.coord(col, row);
+            const OrbitFate fate = classify_rational_orbit(
+                c.real(), c.imag(), [&](double& zr, double& zi) { plan.step(zr, zi); },
+                ar, ai, aid, tol, settings_.max_iter);
+
+            double g = 0.0;
+            bool is_exact = false;
+            if (fate.resolved) {
+                if (potential == GreensPotential::Pragmatic) {
+                    g = fate.nu;
+                } else {
+                    const ConformalPotential cp = conformal_potential(fate);
+                    g = cp.exact ? cp.value : fate.nu;
+                    is_exact = cp.exact;
+                }
+            }
+            img.at(col, row) = g;
+            if (exact) exact->at(col, row) = is_exact ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+Image Renderer::render_greens(const std::atomic<bool>* cancel, const std::vector<Cycle>& cycles,
+                              GreensPotential potential, Image* exact) const {
+    if (map_.escape_certified()) return render_greens_polynomial(cancel);
+    return render_greens_rational(cycles, potential, exact, cancel);
 }
 
 }  // namespace cdx

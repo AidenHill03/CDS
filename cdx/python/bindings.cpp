@@ -135,6 +135,11 @@ PYBIND11_MODULE(cdx, m) {
           "Resolve a family name ('mandelbrot', 'mcmullen3', ...) to a Family. "
           "Custom maps are constructed via Map.custom(), not by name.");
 
+    // ---- GreensPotential -----------------------------------------------------
+    py::enum_<GreensPotential>(m, "GreensPotential")
+        .value("Pragmatic", GreensPotential::Pragmatic)
+        .value("Conformal", GreensPotential::Conformal);
+
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
         .def(py::init<>())
@@ -496,35 +501,54 @@ PYBIND11_MODULE(cdx, m) {
              "iterations (see app/colour.py's colour_basin).")
 
         .def("render_greens",
-             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
+                const std::vector<Cycle>& cycles, GreensPotential potential) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::array_t<double> arr;
+                 Image exact;
+                 py::array_t<double> values_arr, exact_arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_greens(cp);
+                     Image img = r.render_greens(cp, cycles, potential, &exact);
                      py::gil_scoped_acquire acquire;
-                     arr = image_to_numpy(std::move(img));
+                     values_arr = image_to_numpy(std::move(img));
+                     exact_arr = image_to_numpy(std::move(exact));
                  }
-                 return arr;
+                 return py::make_tuple(values_arr, exact_arr);
              },
-             py::arg("cancel") = nullptr,
-             "Green's function (dynamical escape-rate potential), "
-             "G_f(z) = lim d^-n log+|f^n(z)|, normalized at each pixel's "
-             "own escape iteration. Non-escaping pixels are exactly 0.")
+             py::arg("cancel") = nullptr, py::arg("cycles") = std::vector<Cycle>{},
+             py::arg("potential") = GreensPotential::Pragmatic,
+             "Green's function (dynamical potential) -- TWO PATHS (see Renderer::"
+             "render_greens' own doc comment): a CERTIFIED polynomial ignores "
+             "`cycles`/`potential` entirely and returns today's G_f(z) = lim "
+             "d^-n log+|f^n(z)|, normalized at each pixel's own escape "
+             "iteration (0 = never escaped), with an all-zero exact array; a "
+             "RATIONAL map needs `cycles` (cdx.find_attractors' own output) "
+             "and returns (potential values, exact) where `potential` selects "
+             "GreensPotential.Pragmatic (smooth chordal approach-rate, the "
+             "SAME quantity render_julia's own rational path computes) or "
+             "GreensPotential.Conformal (log|phi(z)| for the Boettcher/"
+             "Koenigs coordinate, estimated numerically; falls back to "
+             "Pragmatic -- flagged via exact==0 -- when the orbit's own local "
+             "behaviour is too close to parabolic to classify). exact is 1 "
+             "where Conformal was genuinely computed, 0 where it fell back "
+             "(meaningless for Pragmatic, which has no such fallback).")
 
         .def("render_parameter_greens",
-             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
+                GreensPotential potential) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::array_t<double> arr;
+                 Image exact;
+                 py::array_t<double> values_arr, exact_arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter_greens(cp);
+                     Image img = r.render_parameter_greens(cp, potential, &exact);
                      py::gil_scoped_acquire acquire;
-                     arr = image_to_numpy(std::move(img));
+                     values_arr = image_to_numpy(std::move(img));
+                     exact_arr = image_to_numpy(std::move(exact));
                  }
-                 return arr;
+                 return py::make_tuple(values_arr, exact_arr);
              },
-             py::arg("cancel") = nullptr,
+             py::arg("cancel") = nullptr, py::arg("potential") = GreensPotential::Pragmatic,
              "The family escape-rate function on the PARAMETER plane (G_M(c) "
              "for the quadratic family) -- a DIFFERENT function on a "
              "DIFFERENT space from render_greens: the pixel is a parameter, "
