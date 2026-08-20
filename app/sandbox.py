@@ -18,10 +18,12 @@ Entry point: `python -m app.sandbox`.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import math
 import os
 import sys
+from typing import Callable
 
 import numpy as np
 import shiboken6
@@ -98,7 +100,7 @@ PRECISION_WARN_MULTIPLE = 100
 # clutter for a map with several critical points, and cheap regardless of
 # map complexity -- a handful of RationalMap.eval() calls per critical
 # point, computed once per (map, param) and cached (see ImageView.
-# refresh_critical_points), not per paint.
+# refresh_layers), not per paint.
 CRITICAL_ORBIT_TRACE_STEPS = 60
 
 
@@ -121,7 +123,109 @@ def trace_critical_orbit(rational_map: cdx.RationalMap, param: complex,
     return points
 
 
+# ---- overlay-layer registry (Stage 1) ----------------------------------------
+# A DECLARED layer, not a one-off flag: every dynamical/parameter-plane overlay
+# that plots points from the map's own algebraic/dynamical data (as opposed to
+# the seeded orbit or the parameter marker, which are their own separate
+# concepts -- see paint_overlays' own docstring) is meant to become one entry
+# here instead of its own hand-written flag/method quartet. Adding a layer
+# should mean adding one OverlayLayer to OVERLAY_LAYERS below, not touching
+# ImageView's painting code or SandboxWindow's View-menu construction (see
+# ImageView.refresh_layers/_build_view_menu_layer_actions).
+#
+# `facts` is threaded through every provider's signature uniformly (a single
+# cdx.DynamicalFacts computed once per (map, param), shared across every
+# layer -- see ImageView.refresh_layers) even though the CRITICAL-points
+# layer below does not actually use it: DynamicalFacts.critical_points is
+# documented WITH MULTIPLICITY (see cdx/include/cdx/analysis.hpp), the same
+# set RationalMap.critical_points() returns, not distinct_critical_points().
+# This overlay has always deliberately drawn DISTINCT points only ("one
+# marker per location, multiplicity has no separate visual meaning here" --
+# see the pre-Stage-1 refresh_critical_points' own docstring) -- sourcing it
+# from `facts` as-is would silently draw duplicate/near-duplicate markers at
+# any multiplicity>1 critical point, a real regression. Its provider and
+# trace therefore keep calling distinct_critical_points() directly (exactly
+# as before this stage) and simply ignore `facts`; `facts` remains part of
+# the signature purely for uniformity across layers, and IS what Stage 2's
+# new layers (fixed points, attracting cycles) actually read.
+OverlayColour = tuple[int, int, int, int]
+
+
+@dataclasses.dataclass(frozen=True)
+class OverlayTrace:
+    """A layer's OPTIONAL sub-overlay: a path per (a subset of) the layer's
+    own points, gated behind the layer itself being enabled (see
+    ImageView.set_trace_enabled) -- mirrors how the critical-points overlay's
+    own "Trace Orbits" toggle has always been a sub-feature of "Critical
+    Points", never independently drawable (paint_overlays' own docstring
+    calls this out explicitly; preserved, not a new coupling).
+
+    path_provider returns (polyline, colour) pairs -- paired colour, unlike
+    the spec prose's own "list of polylines" phrasing, because Stage 2's
+    attracting-cycle trace needs each cycle's path drawn in that SAME
+    cycle's own (strength-dependent) colour; pairing it inline here is the
+    simplest way to carry that without a second, order-dependent list the
+    compositor would have to zip against this one.
+    """
+    key: str
+    label: str
+    path_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[list[complex], OverlayColour]]]
+
+
+@dataclasses.dataclass(frozen=True)
+class OverlayLayer:
+    """One declared overlay: a marker style/radius, a gate (which render
+    modes it's even meaningful on), and a points_provider returning
+    (point, colour) pairs -- colour may already vary per point (e.g. Stage
+    2's fixed-point classification colouring) since it's computed INSIDE
+    the provider, not applied uniformly afterward by some separate field.
+    """
+    key: str
+    label: str
+    gate: str   # "dynamical" | "parameter" | "always"
+    marker_radius: float
+    points_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[complex, OverlayColour]]]
+    trace: OverlayTrace | None = None
+
+    def is_visible_for(self, render_mode: str) -> bool:
+        if self.gate == "always":
+            return True
+        is_dynamical = render_mode not in PARAMETER_PLANE_MODES
+        return is_dynamical if self.gate == "dynamical" else not is_dynamical
+
+
+CRITICAL_POINTS_LAYER_KEY = "critical_points"
+CRITICAL_TRACE_KEY = "trace_orbits"
 CRITICAL_POINT_MARKER_RADIUS = 5.0
+CRITICAL_POINT_FILL_COLOUR: OverlayColour = (255, 255, 255, 255)   # white -- matches the pre-Stage-1 flat brush
+CRITICAL_TRACE_COLOUR: OverlayColour = (255, 255, 255, 160)        # translucent white -- matches the old trace_pen
+
+
+def _critical_points_provider(rational_map: cdx.RationalMap, param: complex,
+                              facts: object) -> list[tuple[complex, OverlayColour]]:
+    del facts   # see OVERLAY_LAYERS' own module comment on why this layer ignores it
+    return [(pt, CRITICAL_POINT_FILL_COLOUR)
+           for pt in rational_map.distinct_critical_points(param)]
+
+
+def _critical_trace_provider(rational_map: cdx.RationalMap, param: complex,
+                             facts: object) -> list[tuple[list[complex], OverlayColour]]:
+    del facts
+    points = rational_map.distinct_critical_points(param)
+    return [(trace_critical_orbit(rational_map, param, z0), CRITICAL_TRACE_COLOUR) for z0 in points]
+
+
+OVERLAY_LAYERS: list[OverlayLayer] = [
+    OverlayLayer(
+        key=CRITICAL_POINTS_LAYER_KEY, label="Critical Points", gate="dynamical",
+        marker_radius=CRITICAL_POINT_MARKER_RADIUS, points_provider=_critical_points_provider,
+        trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
+                           path_provider=_critical_trace_provider),
+    ),
+]
+
+_OVERLAY_LAYERS_BY_KEY: dict[str, OverlayLayer] = {layer.key: layer for layer in OVERLAY_LAYERS}
+
 
 # How far outside the visible widget rect a mapped orbit/trace point may
 # still fall and be treated as "leaving the view" rather than "off
@@ -595,21 +699,38 @@ class ImageView(QWidget):
         self._buffer_payload = None
         self._buffer_mode: str | None = None
 
-        # ---- critical-point overlay (dynamical plane only) --------------------
-        self._show_critical_points = False
-        self._trace_orbits = False
-        # Memoized on (map.serialize(), param) -- see refresh_critical_points --
-        # so panning/zooming (which only ever changes pane.viewport, never
-        # the map or param) never re-triggers root-finding. None until the
-        # first refresh_critical_points() call (made once by SandboxWindow
-        # right after construction, same as its other panels' initial state).
-        self._critical_points_key: tuple[str, complex] | None = None
-        self._critical_points: list[complex] = []
-        # None means "not computed for the current key yet" (distinct from
-        # an empty list, a genuinely orbit-free map) -- computed lazily,
-        # only once _trace_orbits is actually turned on, since tracing costs
-        # real RationalMap.eval() calls the marker-only display doesn't need.
-        self._orbit_traces: list[list[complex]] | None = None
+        # ---- overlay-layer registry state (Stage 1) ----------------------------
+        # Generic per-layer storage backing EVERY registered OverlayLayer (see
+        # OVERLAY_LAYERS), not just critical points -- adding a layer means
+        # adding one OverlayLayer entry, never a new quartet of fields here.
+        # _show_critical_points/_trace_orbits/_critical_points/_orbit_traces
+        # below are now thin COMPATIBILITY properties over this same storage
+        # (see their own definitions) -- kept because they're depended on
+        # directly, by name, by existing tests and by ExportImageDialog.
+        #
+        # Memoized on (map.serialize(), param) -- see refresh_layers -- so
+        # panning/zooming (which only ever changes pane.viewport, never the
+        # map or param) never re-triggers root-finding. _layer_facts_key is
+        # None until the first refresh_layers() call (made once by
+        # SandboxWindow right after construction, same as its other panels'
+        # initial state).
+        self._layer_facts_key: tuple[str, complex] | None = None
+        self._cached_facts = None   # cdx.DynamicalFacts | None -- see refresh_layers' own comment
+        self._layer_enabled: dict[str, bool] = {layer.key: False for layer in OVERLAY_LAYERS}
+        self._layer_trace_enabled: dict[str, bool] = {
+            layer.trace.key: False for layer in OVERLAY_LAYERS if layer.trace is not None}
+        # Resolved (point, colour) / (path, colour) pairs, keyed by layer/
+        # trace key -- what a future generic paint/legend step iterates.
+        self._layer_points: dict[str, list[tuple[complex, OverlayColour]]] = {}
+        self._layer_traces: dict[str, list[tuple[list[complex], OverlayColour]] | None] = {}
+        # Plain-point/plain-path PROJECTIONS of the two dicts above, built
+        # ONCE per refresh (inside the same memoization gate), not per
+        # access -- what _critical_points/_orbit_traces actually read, so
+        # repeated access between refreshes returns the SAME list object
+        # (existing tests assert this identity to confirm memoization is
+        # real, not just cheap-looking).
+        self._layer_point_values: dict[str, list[complex]] = {}
+        self._layer_trace_values: dict[str, list[list[complex]] | None] = {}
 
         self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
@@ -762,58 +883,118 @@ class ImageView(QWidget):
         d_im = abs(vp.center.imag - buf.center.imag) + vp.scale
         return max(d_re, d_im) / buf.scale
 
-    # ---- critical-point overlay: cached per (map, param), never re-root-found on
-    # ---- pan/zoom -- see P5c's own "cache per (map, parameter); do not re-root-find
+    # ---- overlay layers: cached per (map, param), never re-root-found on pan/
+    # ---- zoom -- see P5c's own "cache per (map, parameter); do not re-root-find
     # ---- on zoom or pan" requirement --------------------------------------------
-    def refresh_critical_points(self) -> None:
-        """Recomputes the critical-point set for the CURRENT session.map/
-        param, memoized on (map.serialize(), param) so this is a no-op
-        whenever neither has actually changed -- called by SandboxWindow
-        after every term edit and family load (the same points that
-        already refresh the Facts panel), NEVER from a viewport change.
+    def refresh_layers(self) -> None:
+        """Recomputes every registered OverlayLayer's resolved points (and,
+        for any layer whose trace is currently enabled, its resolved trace
+        paths too) for the CURRENT session.map/param -- memoized on
+        (map.serialize(), param) so this is a no-op whenever neither has
+        actually changed -- called by SandboxWindow after every term edit
+        and family load (the same points that already refresh the Facts
+        panel), NEVER from a viewport change. `refresh_critical_points` is
+        kept as a same-behavior alias (see its own docstring) for existing
+        callers/tests that still name it directly.
 
-        Uses distinct_critical_points (deduplicated within the engine's
-        own tolerance), not the raw critical_points() -- this overlay
-        draws one MARKER per distinct location; multiplicity (already
-        shown properly in the Facts panel) has no separate visual meaning
-        here, and drawing several exactly-overlapping markers at one
-        multiplicity->2 point would add nothing but redundant painting.
+        A single cdx.DynamicalFacts is computed once per key and shared
+        across every layer's provider (see OVERLAY_LAYERS' own module
+        comment on why the critical-points layer specifically still
+        ignores it) -- one root-find serving every layer, not one per
+        layer.
         """
         key = (self.session.map.serialize(), self.session.param)
-        if key != self._critical_points_key:
-            self._critical_points_key = key
-            self._critical_points = list(
-                self.session.map.distinct_critical_points(self.session.param))
-            self._orbit_traces = None   # stale -- lazily recomputed below if still wanted
-        if self._trace_orbits and self._orbit_traces is None:
-            self._orbit_traces = [self._trace_orbit(z0) for z0 in self._critical_points]
+        if key != self._layer_facts_key:
+            self._layer_facts_key = key
+            self._cached_facts = None   # Stage 2: self.session.dynamical_facts()
+            for layer in OVERLAY_LAYERS:
+                resolved = list(layer.points_provider(self.session.map, self.session.param,
+                                                       self._cached_facts))
+                self._layer_points[layer.key] = resolved
+                self._layer_point_values[layer.key] = [pt for pt, _colour in resolved]
+                if layer.trace is not None:
+                    self._layer_traces[layer.trace.key] = None   # stale -- lazily recomputed below
+                    self._layer_trace_values[layer.trace.key] = None
+        for layer in OVERLAY_LAYERS:
+            if (layer.trace is not None and self._layer_trace_enabled.get(layer.trace.key, False)
+                    and self._layer_traces.get(layer.trace.key) is None):
+                resolved_trace = list(layer.trace.path_provider(
+                    self.session.map, self.session.param, self._cached_facts))
+                self._layer_traces[layer.trace.key] = resolved_trace
+                self._layer_trace_values[layer.trace.key] = [path for path, _colour in resolved_trace]
 
-    def _trace_orbit(self, z0: complex) -> list[complex]:
-        return trace_critical_orbit(self.session.map, self.session.param, z0)
+    def refresh_critical_points(self) -> None:
+        """Same-behavior alias for refresh_layers -- kept under its old name
+        because it's called directly, by name, by existing tests and by
+        every SandboxWindow call site that predates the layer registry.
+        """
+        self.refresh_layers()
+
+    def set_layer_enabled(self, key: str, enabled: bool) -> None:
+        self._layer_enabled[key] = enabled
+        self.update()
+
+    def set_trace_enabled(self, trace_key: str, enabled: bool) -> None:
+        self._layer_trace_enabled[trace_key] = enabled
+        self.refresh_layers()   # lazily fills in the trace if just turned on
+        self.update()
 
     def set_show_critical_points(self, show: bool) -> None:
-        self._show_critical_points = show
-        self.update()
+        self.set_layer_enabled(CRITICAL_POINTS_LAYER_KEY, show)
 
     def set_trace_orbits(self, trace: bool) -> None:
-        self._trace_orbits = trace
-        self.refresh_critical_points()   # lazily fills in traces if just turned on
-        self.update()
+        self.set_trace_enabled(CRITICAL_TRACE_KEY, trace)
+
+    # ---- compatibility properties: the pre-Stage-1 critical-point overlay's
+    # own field names, now thin views over the generic per-layer storage
+    # above -- kept because ExportImageDialog and existing tests read/write
+    # them directly, by name (see this class's own __init__ comment).
+    @property
+    def _show_critical_points(self) -> bool:
+        return self._layer_enabled[CRITICAL_POINTS_LAYER_KEY]
+
+    @_show_critical_points.setter
+    def _show_critical_points(self, value: bool) -> None:
+        self._layer_enabled[CRITICAL_POINTS_LAYER_KEY] = value
+
+    @property
+    def _trace_orbits(self) -> bool:
+        return self._layer_trace_enabled[CRITICAL_TRACE_KEY]
+
+    @_trace_orbits.setter
+    def _trace_orbits(self, value: bool) -> None:
+        self._layer_trace_enabled[CRITICAL_TRACE_KEY] = value
+
+    @property
+    def _critical_points(self) -> list[complex]:
+        return self._layer_point_values.get(CRITICAL_POINTS_LAYER_KEY, [])
+
+    @property
+    def _orbit_traces(self) -> list[list[complex]] | None:
+        return self._layer_trace_values.get(CRITICAL_TRACE_KEY)
+
+    @property
+    def _critical_points_key(self) -> tuple[str, complex] | None:
+        # The SAME key every layer shares (see refresh_layers) -- exposed
+        # under its pre-Stage-1 name because existing tests compare it
+        # directly to confirm panning/zooming never invalidates it.
+        return self._layer_facts_key
 
     def set_orbit_connect_lines(self, on: bool) -> None:
-        """Governs ONLY _paint_orbit's connecting segments -- the seeded
-        orbit's own history, drawn in orange. Independent of
-        set_trace_orbits: the post-critical-point traces (drawn in
-        _paint_critical_point_overlay, in white) are a different overlay
-        entirely and always connect when shown, regardless of this flag.
+        """Governs ONLY the seeded orbit's connecting segments (drawn in
+        orange by paint_overlays' own show_orbit branch) -- the seeded
+        orbit's own history. Independent of set_trace_orbits: the critical-
+        points layer's own post-critical-point traces (drawn in white, via
+        the SAME paint_overlays call) are a different overlay entirely and
+        always connect when shown, regardless of this flag.
         """
         self._orbit_connect_lines = on
         self.update()
 
     # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
     def refresh_orbit_staleness(self) -> None:
-        """Called at the same map/param-change points refresh_critical_points
-        is (term edits, family loads) -- clears the traced orbit the moment
+        """Called at the same map/param-change points refresh_layers is
+        (term edits, family loads) -- clears the traced orbit the moment
         it stops describing THIS map/parameter's dynamics (see
         OrbitTracker.reset_if_stale's own docstring for why this is not
         optional). Deliberately never called from a viewport change --
@@ -965,8 +1146,13 @@ class ImageView(QWidget):
         # thing to mark there (see P5c's own spec on this exact
         # distinction). False on those modes, not an error -- the
         # checkboxes stay checked/available for whenever the user switches
-        # back to a dynamical-plane mode.
-        return self._show_critical_points and self.pane.render_mode not in PARAMETER_PLANE_MODES
+        # back to a dynamical-plane mode. Routed through the registry's own
+        # gate (OverlayLayer.is_visible_for) rather than re-checking
+        # PARAMETER_PLANE_MODES inline, so this and the registry can never
+        # silently disagree about what "dynamical-plane gated" means.
+        return (self._show_critical_points
+               and _OVERLAY_LAYERS_BY_KEY[CRITICAL_POINTS_LAYER_KEY]
+                   .is_visible_for(self.pane.render_mode))
 
     def _orbit_line_segments(self):
         """The line segments paint_overlays would draw for the CURRENT
@@ -1497,7 +1683,7 @@ class SandboxWindow(QMainWindow):
 
         self._build_ui()
         for pane in self.panes:
-            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_layers()
         self._update_status_bar()
         for pane in self.panes:
             self._start_render(pane)
@@ -1655,13 +1841,18 @@ class SandboxWindow(QMainWindow):
         # which pane they're looking at, and per-pane versions would mean
         # SIX checkboxes crowding the toolbar instead of three. Revisit if
         # that tradeoff stops holding.
+        # Not wired to the ImageViews directly here (unlike
+        # orbit_connect_lines_checkbox below) -- since Stage 1, the View-menu
+        # action built for this layer (see the registry-driven loop below) is
+        # what's actually wired to set_show_critical_points/set_trace_orbits;
+        # these two checkboxes just mirror that action bidirectionally, the
+        # same "second control surface, never a parallel copy" relationship
+        # the View menu has always had with the toolbar, just inverted which
+        # side is authoritative now that a registry, not a hand-written
+        # checkbox, is what the menu is built from.
         self.critical_points_checkbox = QCheckBox("Critical Points", self)
-        self.critical_points_checkbox.toggled.connect(self.image_view.set_show_critical_points)
-        self.critical_points_checkbox.toggled.connect(self.image_view2.set_show_critical_points)
         toolbar.addWidget(self.critical_points_checkbox)
         self.trace_orbits_checkbox = QCheckBox("Trace Orbits", self)
-        self.trace_orbits_checkbox.toggled.connect(self.image_view.set_trace_orbits)
-        self.trace_orbits_checkbox.toggled.connect(self.image_view2.set_trace_orbits)
         toolbar.addWidget(self.trace_orbits_checkbox)
         self.orbit_connect_lines_checkbox = QCheckBox("Connect orbit points", self)
         self.orbit_connect_lines_checkbox.setChecked(True)
@@ -1699,12 +1890,9 @@ class SandboxWindow(QMainWindow):
         # comment below. The toolbar stays for now (its fate is a separate,
         # later redesign); this menu doesn't replace it, it MIRRORS it -- every
         # checkable action here is bound BIDIRECTIONALLY to its toolbar
-        # checkbox (each one's toggled signal sets the other's checked state,
-        # which Qt no-ops when the value doesn't actually change, so this
-        # can't loop). The checkbox stays the ONE place the actual behavior
-        # (set_show_critical_points etc., _relayout_panes) is wired to; each
-        # menu action is purely a second control surface for that SAME state,
-        # never a parallel copy that could drift out of sync with it.
+        # checkbox where one exists (each one's toggled signal sets the
+        # other's checked state, which Qt no-ops when the value doesn't
+        # actually change, so this can't loop).
         #
         # No Experiment/Map menu for mode selection: with TWO independent
         # per-pane mode combos (Stage 2) rather than one window-level mode,
@@ -1723,17 +1911,20 @@ class SandboxWindow(QMainWindow):
         self.coupled_checkbox.toggled.connect(self.coupled_view_action.setChecked)
         self.view_menu.addSeparator()
 
-        self.critical_points_action = self.view_menu.addAction("Critical Points")
-        self.critical_points_action.setCheckable(True)
-        self.critical_points_action.setChecked(self.critical_points_checkbox.isChecked())
-        self.critical_points_action.toggled.connect(self.critical_points_checkbox.setChecked)
-        self.critical_points_checkbox.toggled.connect(self.critical_points_action.setChecked)
-
-        self.trace_orbits_action = self.view_menu.addAction("Trace Orbits")
-        self.trace_orbits_action.setCheckable(True)
-        self.trace_orbits_action.setChecked(self.trace_orbits_checkbox.isChecked())
-        self.trace_orbits_action.toggled.connect(self.trace_orbits_checkbox.setChecked)
-        self.trace_orbits_checkbox.toggled.connect(self.trace_orbits_action.setChecked)
+        # ---- overlay-layer actions: built FROM the registry (Stage 1), not
+        # hand-written per overlay -- adding a layer to OVERLAY_LAYERS is
+        # enough to give it a View-menu toggle (and its trace a gated sub-
+        # toggle), with NO changes needed here. Unlike coupled_view_action
+        # above, the ACTION is what's wired directly to
+        # image_view[2].set_layer_enabled/set_trace_enabled -- a toolbar
+        # checkbox, where this layer still has one (critical_points/
+        # trace_orbits only, for now -- see _build_ui's own comment), just
+        # mirrors the action bidirectionally, same as coupled_view_action
+        # mirrors coupled_checkbox, just the other direction: the toolbar
+        # checkbox predates the registry and is going away (a later,
+        # separate toolbar redesign), so the action -- not a widget the
+        # registry doesn't know about -- is what actually owns the state.
+        self._build_view_menu_layer_actions()
 
         self.orbit_connect_lines_action = self.view_menu.addAction("Connect Orbit Points")
         self.orbit_connect_lines_action.setCheckable(True)
@@ -1762,6 +1953,56 @@ class SandboxWindow(QMainWindow):
 
         self._update_pane_focus_styling()
         self._sync_orbit_panel()
+
+    def _build_view_menu_layer_actions(self) -> None:
+        """One checkable QAction per OVERLAY_LAYERS entry (plus, for a layer
+        with a trace, one more gated sub-action) -- called once from
+        _build_ui, right where the hand-written Critical Points/Trace Orbits
+        actions used to be built directly. Adding a layer to the registry is
+        now enough to give it a View-menu toggle; nothing here needs
+        touching.
+
+        Each action is wired DIRECTLY to both ImageViews'
+        set_layer_enabled/set_trace_enabled (GLOBAL, not per-pane -- same
+        "one visual preference, not six checkboxes" reasoning the toolbar's
+        own comment gives). A same-named legacy toolbar checkbox --
+        f"{layer.key}_checkbox"/f"{trace.key}_checkbox" -- is mirrored
+        bidirectionally when one still exists (critical_points/trace_orbits,
+        for now; Stage 4 removes them and every future layer is menu-only
+        from the start, so most layers never have one).
+        """
+        for layer in OVERLAY_LAYERS:
+            action = self.view_menu.addAction(layer.label)
+            action.setCheckable(True)
+            action.toggled.connect(
+                lambda checked, key=layer.key: self.image_view.set_layer_enabled(key, checked))
+            action.toggled.connect(
+                lambda checked, key=layer.key: self.image_view2.set_layer_enabled(key, checked))
+            setattr(self, f"{layer.key}_action", action)
+
+            checkbox = getattr(self, f"{layer.key}_checkbox", None)
+            if checkbox is not None:
+                action.toggled.connect(checkbox.setChecked)
+                checkbox.toggled.connect(action.setChecked)
+
+            if layer.trace is not None:
+                trace = layer.trace
+                trace_action = self.view_menu.addAction(trace.label)
+                trace_action.setCheckable(True)
+                trace_action.setEnabled(action.isChecked())
+                action.toggled.connect(trace_action.setEnabled)
+                trace_action.toggled.connect(
+                    lambda checked, key=trace.key: self.image_view.set_trace_enabled(key, checked))
+                trace_action.toggled.connect(
+                    lambda checked, key=trace.key: self.image_view2.set_trace_enabled(key, checked))
+                setattr(self, f"{trace.key}_action", trace_action)
+
+                trace_checkbox = getattr(self, f"{trace.key}_checkbox", None)
+                if trace_checkbox is not None:
+                    trace_action.toggled.connect(trace_checkbox.setChecked)
+                    trace_checkbox.toggled.connect(trace_action.setChecked)
+
+            self.view_menu.addSeparator()
 
     def _build_pane_column(self, mode_combo: QComboBox, image_view: "ImageView") -> QWidget:
         """One pane's own little control strip (mode combo) stacked above
@@ -1944,7 +2185,7 @@ class SandboxWindow(QMainWindow):
         self.facts_panel.refresh()
         self.metadata_header.refresh()
         for pane in self.panes:
-            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_layers()
             if pane is self._focused_pane:
                 self._update_status_bar()
             self._debounce_timers[pane].stop()
@@ -2115,7 +2356,7 @@ class SandboxWindow(QMainWindow):
                                                   pane.render_mode)
             vp = pane.viewport
             pane.viewport = cdx.Viewport(center, scale, vp.resolution)
-            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_layers()
             pane.image_view.refresh_orbit_for_new_param()
             if pane is self._focused_pane:
                 self._update_status_bar()
@@ -2212,8 +2453,8 @@ class SandboxWindow(QMainWindow):
         self.facts_panel.refresh()
         for pane in self.panes:
             self._debounce_timers[pane].start()
-            # Same memoization property -- see ImageView.refresh_critical_points.
-            pane.image_view.refresh_critical_points()
+            # Same memoization property -- see ImageView.refresh_layers.
+            pane.image_view.refresh_layers()
             # An orbit traced under the PRE-edit map no longer describes
             # this map's dynamics -- see OrbitTracker.reset_if_stale's own
             # docstring.
@@ -2278,7 +2519,7 @@ class SandboxWindow(QMainWindow):
             center, scale = default_view_for_mode(self.session.map, self.session.param,
                                                   pane.render_mode)
             pane.viewport = cdx.Viewport(center, scale, pane.viewport.resolution)
-            pane.image_view.refresh_critical_points()
+            pane.image_view.refresh_layers()
             pane.image_view.refresh_orbit_staleness()
             if pane is self._focused_pane:
                 self._update_status_bar()
