@@ -61,6 +61,18 @@ struct FindAttractorsOptions {
 std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
                                    const FindAttractorsOptions& opts = {});
 
+// Same discovery, but seeded from a caller-supplied critical-point list
+// instead of calling map.distinct_critical_points(a) itself. find_attractors
+// above is now a thin wrapper over this. Exists for a caller (render_
+// parameter's Stage 4 multi-critical rational path, see renderer.cpp) that
+// ALSO needs the critical points themselves for its own per-orbit render --
+// distinct_critical_points is a real, sometimes root-finding-heavy cost
+// (see cdx_test_custom's own benchmark comment), so a per-PIXEL caller
+// computes it once and passes it here rather than paying for it twice.
+std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                              const RationalMap& map, Cplx a,
+                                              const FindAttractorsOptions& opts = {});
+
 // -----------------------------------------------------------------------------
 // Polynomial escape-radius certification.
 //

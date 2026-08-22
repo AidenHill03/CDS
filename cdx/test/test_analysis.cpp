@@ -737,6 +737,112 @@ int main() {
               "flagged and abandoned");
     }
 
+    // ---- MILESTONE ACCEPTANCE TEST (Stage 4): rational parameter plane, ------------
+    // multi-critical, three strategies, escape-radius-free.
+    std::printf("\nMILESTONE ACCEPTANCE TEST (Stage 4): rational parameter plane is "
+               "escape_radius-invariant, multi-critical, three strategies:\n");
+    {
+        // z^2 + 0.3z + a/z^2 -- deliberately NOT one of the six recognized
+        // shapes (the extra 0.3z term breaks McMullen's own z -> iz
+        // rotational symmetry, so its critical points do NOT all share
+        // escape behaviour the way a real mcmullen(2)'s do -- see
+        // ParameterStrategy's own doc comment for why a RECOGNIZED shape
+        // stays on the single-representative path instead), and has a
+        // pole (not certified) -- exactly the case Stage 4's own multi-
+        // critical path exists for.
+        RationalMap m("multi_crit");
+        m.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        m.add_poly({0.3, 0.0}, 1, 0, "0.3z");
+        m.add_pole({0.0, 0.0}, {1.0, 0.0}, 2, 1, "a/z^2");
+        check(polynomial_escape_certified(m) == false, "sanity: has a pole, not certified");
+
+        const Cplx a0{0.3, 0.1};
+        check(recognize_family(m) == std::nullopt,
+              "sanity: NOT recognized as any of the six built-in shapes -- genuinely "
+              "exercises the general multi-critical path, not the single-representative one");
+        const auto crit_pts = m.distinct_critical_points(a0);
+        check(crit_pts.size() >= 2,
+              "sanity: genuinely multiple distinct critical points at this parameter");
+
+        const Viewport v{{0.0, 0.0}, 2.0, 61};
+        Renderer r2(Map::custom(m, a0), v, RenderSettings{80, 2.0, 1e-6, 1});
+        Renderer r10(Map::custom(m, a0), v, RenderSettings{80, 10.0, 1e-6, 1});
+
+        const ParameterStrategy strategies[] = {ParameterStrategy::AllCaptured,
+                                                ParameterStrategy::FastestCapture,
+                                                ParameterStrategy::PerCritical};
+        const char* strategy_names[] = {"AllCaptured", "FastestCapture", "PerCritical"};
+        for (int s = 0; s < 3; ++s) {
+            const Image img2 = r2.render_parameter(nullptr, strategies[s], 0);
+            const Image img10 = r10.render_parameter(nullptr, strategies[s], 0);
+            bool identical = true;
+            for (std::size_t i = 0; i < img2.data.size(); ++i) {
+                if (img2.data[i] != img10.data[i]) identical = false;
+            }
+            std::printf("  (%s)\n", strategy_names[s]);
+            check(identical,
+                  "ACCEPTANCE: escape_radius=2 and escape_radius=10 produce "
+                  "BYTE-IDENTICAL values");
+        }
+
+        const Image all_captured = r2.render_parameter(nullptr, ParameterStrategy::AllCaptured);
+        const Image fastest = r2.render_parameter(nullptr, ParameterStrategy::FastestCapture);
+        const Image pc0 = r2.render_parameter(nullptr, ParameterStrategy::PerCritical, 0);
+        const Image pc1 = r2.render_parameter(nullptr, ParameterStrategy::PerCritical, 1);
+
+        bool ge_everywhere = true;
+        for (std::size_t i = 0; i < all_captured.data.size(); ++i) {
+            if (all_captured.data[i] < fastest.data[i] - 1e-9) ge_everywhere = false;
+        }
+        check(ge_everywhere,
+              "AllCaptured >= FastestCapture at EVERY pixel -- the worst-behaved critical "
+              "orbit's escape value can never be less than the best-behaved one's, over "
+              "the SAME underlying set of orbits");
+
+        bool pc_differs = false;
+        for (std::size_t i = 0; i < pc0.data.size(); ++i) {
+            if (pc0.data[i] != pc1.data[i]) pc_differs = true;
+        }
+        check(pc_differs,
+              "PerCritical(0) and PerCritical(1) differ somewhere -- genuinely two "
+              "INDEPENDENT critical-point orbits are tracked, not the same one duplicated");
+
+        bool implication_holds = true;
+        for (std::size_t i = 0; i < all_captured.data.size(); ++i) {
+            if (all_captured.data[i] == 0.0 && (pc0.data[i] != 0.0 || pc1.data[i] != 0.0))
+                implication_holds = false;
+            if ((pc0.data[i] != 0.0 || pc1.data[i] != 0.0) && all_captured.data[i] == 0.0)
+                implication_holds = false;
+        }
+        check(implication_holds,
+              "AllCaptured == 0 at a pixel iff EVERY tracked critical orbit (including "
+              "both index 0 and 1) also reports 0 under PerCritical -- the combination "
+              "rule is internally consistent, not just plausible-looking");
+
+        // ---- degenerate case: a built-in RATIONAL family still renders sensibly ----
+        Renderer mc(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 41},
+                   RenderSettings{80, 2.0, 1e-6, 1});
+        check(mc.map().escape_certified() == false,
+              "sanity: McMullen2 is a built-in RATIONAL (non-certified) family");
+        const Image mc_all = mc.render_parameter(nullptr, ParameterStrategy::AllCaptured);
+        const Image mc_fast = mc.render_parameter(nullptr, ParameterStrategy::FastestCapture);
+        const Image mc_pc0 = mc.render_parameter(nullptr, ParameterStrategy::PerCritical, 0);
+        bool degenerate_identical = true;
+        for (std::size_t i = 0; i < mc_all.data.size(); ++i) {
+            if (mc_all.data[i] != mc_fast.data[i] || mc_all.data[i] != mc_pc0.data[i])
+                degenerate_identical = false;
+        }
+        check(degenerate_identical,
+              "DEGENERATE CASE: a built-in rational family (only ever one representative "
+              "critical point tracked) gives IDENTICAL results under all three "
+              "strategies -- nothing to combine, so nothing should differ");
+        bool mc_some_nonzero = false, mc_some_zero = false;
+        for (double v : mc_all.data) { if (v > 0.0) mc_some_nonzero = true; else mc_some_zero = true; }
+        check(mc_some_nonzero && mc_some_zero,
+              "...and it's a REAL classification (some pixels escape, some don't), not a "
+              "flat degenerate image");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

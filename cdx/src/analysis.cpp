@@ -58,7 +58,12 @@ void add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double t
 
 std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
                                    const FindAttractorsOptions& opts) {
-    const std::vector<Cplx> seeds = map.distinct_critical_points(a);
+    return find_attractors_from_seeds(map.distinct_critical_points(a), map, a, opts);
+}
+
+std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                              const RationalMap& map, Cplx a,
+                                              const FindAttractorsOptions& opts) {
     std::vector<Cycle> cycles;
 
     for (Cplx seed : seeds) {

@@ -140,6 +140,12 @@ PYBIND11_MODULE(cdx, m) {
         .value("Pragmatic", GreensPotential::Pragmatic)
         .value("Conformal", GreensPotential::Conformal);
 
+    // ---- ParameterStrategy -----------------------------------------------------
+    py::enum_<ParameterStrategy>(m, "ParameterStrategy")
+        .value("AllCaptured", ParameterStrategy::AllCaptured)
+        .value("FastestCapture", ParameterStrategy::FastestCapture)
+        .value("PerCritical", ParameterStrategy::PerCritical);
+
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
         .def(py::init<>())
@@ -466,15 +472,31 @@ PYBIND11_MODULE(cdx, m) {
              "result should be discarded, not displayed.")
 
         .def("render_parameter",
-             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
+                ParameterStrategy strategy, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::gil_scoped_release release;
-                 Image img = r.render_parameter(cp);
-                 py::gil_scoped_acquire acquire;
-                 return image_to_numpy(std::move(img));
+                 py::array_t<double> arr;
+                 {
+                     py::gil_scoped_release release;
+                     Image img = r.render_parameter(cp, strategy, critical_index);
+                     py::gil_scoped_acquire acquire;
+                     arr = image_to_numpy(std::move(img));
+                 }
+                 return arr;
              },
-             py::arg("cancel") = nullptr,
-             "Parameter plane (Mandelbrot / multibrot / McMullenbrot).")
+             py::arg("cancel") = nullptr, py::arg("strategy") = ParameterStrategy::AllCaptured,
+             py::arg("critical_index") = 0,
+             "Parameter plane (Mandelbrot / multibrot / McMullenbrot) -- TWO PATHS "
+             "(see Renderer::render_parameter's own doc comment): a CERTIFIED "
+             "polynomial ignores `strategy`/`critical_index` entirely (only ever "
+             "one critical point to track); a RATIONAL map is escape-radius-free "
+             "and MULTI-critical (Stage 4) -- every distinct critical point at "
+             "that pixel's parameter is classified by its own chordal distance to "
+             "infinity, then combined by `strategy` (ParameterStrategy.AllCaptured: "
+             "0 iff every critical orbit stays bounded, else the slowest-escaping "
+             "one's value; .FastestCapture: the fastest-escaping orbit's value; "
+             ".PerCritical: exactly one orbit, selected by `critical_index` into "
+             "cdx.RationalMap.distinct_critical_points' own ordering).")
 
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,
