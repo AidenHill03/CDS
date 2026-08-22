@@ -40,6 +40,12 @@ target_link_libraries(cdx_test_custom PRIVATE cdx_core)
 add_executable(cdx_test_analysis test/test_analysis.cpp)
 target_link_libraries(cdx_test_analysis PRIVATE cdx_core)
 
+# Measurement tool, not a PASS/FAIL suite -- see its own header comment.
+# Diagnoses the Parameter_basin unresolved/slow problem on a Nova-style
+# family; prints a report rather than asserting production behavior.
+add_executable(cdx_diagnose_parameter_basin test/diagnose_parameter_basin.cpp)
+target_link_libraries(cdx_diagnose_parameter_basin PRIVATE cdx_core)
+
 # ---- Python module (optional) ----------------------------------------------
 # Enable with:  cmake -B build -DCDX_BUILD_PYTHON=ON
 # Requires:     pip install pybind11
