@@ -38,7 +38,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 import cdx
 from app.about_dialog import AboutDialog
-from app.colour import colour_basin, colour_escape_time, colour_scalar_field
+from app.colour import (colour_basin, colour_escape_time, colour_parameter_basin,
+                        colour_scalar_field)
 from app.complex_field import ComplexField
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
@@ -792,6 +793,16 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     PRINCIPLE, never the colourer); a certified polynomial's payload stays
     a plain 2D array, same as "parameter".
 
+    "parameter_basin" (Stage 2 of the P/Q-representation-turned-parameter-
+    plane batch) is the ONE deliberate exception to the governing
+    principle above: its payload is a COUNT (number of distinct attracting
+    cycles), not a potential or an escape value, so it gets its own
+    categorical colourer (colour_parameter_basin) rather than being forced
+    through colour_escape_time/colour_scalar_field -- see that function's
+    own docstring for why a count is not a gradient. ALWAYS stacked
+    (counts, unresolved), never a plain 2D array (there is no
+    certified-polynomial fast path here that would make it one).
+
     Colouring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
     never be a cache key or trigger a re-render, only a re-paint.
@@ -810,6 +821,16 @@ def array_to_qimage(payload, mode: str, settings: Settings,
                                   band_width=settings.greens_band_width,
                                   period_bands=settings.greens_period_bands,
                                   contour=settings.greens_contour)
+        return _rgb_to_qimage(rgb)
+    if mode == "parameter_basin":
+        # Always stacked (counts, unresolved) -- see render_map's own
+        # docstring; categorical colouring (colour_parameter_basin), NOT
+        # the escape-time palette/scaling pipeline every other mode here
+        # goes through -- see that function's own docstring for why a
+        # COUNT is deliberately not treated as a gradient.
+        counts = np.flipud(payload[0])
+        unresolved = np.flipud(payload[1])
+        rgb = colour_parameter_basin(counts, unresolved)
         return _rgb_to_qimage(rgb)
     # A RATIONAL "julia" payload is stacked (values, labels) -- colour ONLY
     # the values layer, through the exact SAME colour_escape_time call a
@@ -1226,11 +1247,12 @@ class ImageView(QWidget):
 
         mode = self._buffer_mode
         payload = self._buffer_payload
-        # "basin" is ALWAYS stacked; "julia" and "greens"/"parameter_greens"
-        # are stacked only for a RATIONAL map's render (Stage 2/Stage 3 --
-        # see render_map/array_to_qimage's own docstrings, distinguished
-        # the SAME way there: ndim, not a second flag threaded through).
-        stacked = (mode == "basin" or
+        # "basin" and "parameter_basin" are ALWAYS stacked; "julia" and
+        # "greens"/"parameter_greens" are stacked only for a RATIONAL map's
+        # render (Stage 2/Stage 3 -- see render_map/array_to_qimage's own
+        # docstrings, distinguished the SAME way there: ndim, not a second
+        # flag threaded through).
+        stacked = (mode in ("basin", "parameter_basin") or
                   (mode in ("julia", "greens", "parameter_greens") and payload.ndim == 3))
         if stacked:
             height, width = payload[0].shape
@@ -1261,6 +1283,11 @@ class ImageView(QWidget):
         if mode in ("greens", "parameter_greens"):
             value = payload[raw_row, col]
             return f"potential = {value:.4g}"
+        if mode == "parameter_basin":
+            count = payload[0][raw_row, col]
+            unresolved = payload[1][raw_row, col]
+            base = f"{int(count)} attracting cycle{'s' if count != 1 else ''}"
+            return base if unresolved == 0.0 else f"{base}, {int(unresolved)} unresolved"
         return None
 
     def _buffer_source_rect(self) -> QRectF | None:

@@ -329,6 +329,55 @@ public:
     // Julia/Green's, deliberately not to plain Parameter.
     Image render_parameter(const std::atomic<bool>* cancel = nullptr) const;
 
+    // Parameter_basin: each pixel is a parameter value a; the pixel value
+    // is the NUMBER OF DISTINCT ATTRACTING CYCLES the map has at that a
+    // (infinity counts as one when it's the limit of a critical orbit).
+    // Escape-radius-free -- this is a genuine multi-attractor question,
+    // the one render_parameter's own retired Stage 4 detour was trying to
+    // answer before being pulled back to plain escape-time (see its own
+    // doc comment).
+    //
+    // METHOD, per pixel: get EVERY distinct critical point at that
+    // parameter (RationalMap::distinct_critical_points -- by Fatou, every
+    // attracting cycle attracts at least one critical point, so this is
+    // enough to find them all; no per-pixel find_attractors call that
+    // would redundantly re-root-find the SAME critical points a second
+    // time -- see find_attractors_from_seeds' own doc comment), then run
+    // find_attractors_from_seeds against THAT seed list (the SAME burn-in
+    // + chordal-closure-detection + attracting-multiplier-verification +
+    // chordal dedup machinery find_attractors already uses everywhere
+    // else in this codebase -- nothing bespoke here). The result's own
+    // .size() is the distinct-attracting-cycle count; `unresolved`, if
+    // given, is replaced with an Image the same size as the result
+    // holding how many of that pixel's critical orbits did NOT resolve to
+    // a confirmed attracting cycle within budget (find_attractors_from_
+    // seeds' own `unresolved_count` out-param) -- tracked SEPARATELY, so
+    // a caller can tell "0 attracting cycles, nothing else interesting
+    // either" apart from "0 attracting cycles because everything here is
+    // still unresolved" rather than the two being silently conflated into
+    // the same 0.
+    //
+    // KNOWN RESIDUAL, honestly: this counts ATTRACTING cycles specifically
+    // (multiplier strictly < 1, find_attractors' own existing criterion).
+    // A Siegel disc / Herman ring (irrationally neutral, multiplier on the
+    // unit circle) or a parabolic cycle (multiplier a root of unity) is
+    // NEITHER attracting NOR does a critical orbit inside one ever close
+    // chordally onto anything within max_period -- it shows up as
+    // unresolved, not as a phantom attracting cycle and not silently
+    // dropped either. Correct for HYPERBOLIC maps (attracting cycles are
+    // the whole story); a genuine limitation for non-hyperbolic ones,
+    // which this reports honestly via `unresolved` rather than hiding.
+    //
+    // Requires a Custom-wrapped map (map_.custom_map() non-null) -- a
+    // genuine built-in Family with no RationalMap behind it (never
+    // actually reached by the app itself, which always renders through
+    // Map::custom -- see app/session.py's render_map) has no RationalMap
+    // for find_attractors_from_seeds to call eval()/deriv() on; returns
+    // an all-zero degenerate image with `unresolved` all-zero too in that
+    // case, rather than guessing.
+    Image render_parameter_basin(const std::atomic<bool>* cancel = nullptr,
+                                 Image* unresolved = nullptr) const;
+
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.
     //

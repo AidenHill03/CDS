@@ -134,6 +134,13 @@ PALETTE_NAMES: tuple[str, ...] = tuple(PALETTES.keys())
 # Deliberately NOT palette index 0 -- see module docstring.
 NEVER_ESCAPED_RGB: tuple[int, int, int] = (0, 0, 0)
 UNRESOLVED_BASIN_RGB: tuple[int, int, int] = (0, 0, 0)
+# Same flat-black "nothing resolved here" convention as the two above,
+# for colour_parameter_basin's own unresolved-dominant pixels -- a
+# DIFFERENT question (a whole PARAMETER's worth of critical orbits mostly
+# failing to settle, not one pixel's own orbit never reaching a known
+# attractor), but visually the same "black = nothing here" language this
+# app already speaks everywhere else.
+PARAMETER_BASIN_UNRESOLVED_RGB: tuple[int, int, int] = (0, 0, 0)
 
 SCALING_MODES: tuple[str, ...] = ("log1p", "histogram")
 
@@ -304,6 +311,53 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
 
     rgb = shaded.round().clip(0, 255).astype(np.uint8)
     rgb[~resolved] = UNRESOLVED_BASIN_RGB
+    return rgb
+
+
+def colour_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = None) -> np.ndarray:
+    """Categorical colouring for Parameter_basin: hue = the COUNT itself
+    (golden-angle spacing, the SAME _golden_hue/_hue_to_rgb_255 primitive
+    colour_basin already uses for basin ids -- N distinct, well-separated
+    colours without needing to know N, the largest count this render will
+    ever show, in advance). Deliberately NOT colour_escape_time's palette-
+    gradient machinery: a count is a CATEGORY (2 is not "a bit more than
+    1" the way a larger escape iteration is), so a gradient would imply an
+    ordering relationship between adjacent counts that isn't actually
+    there -- count=1 and count=2 should read as two DIFFERENT things, not
+    two shades of the same thing. This is what makes a bifurcation
+    boundary (where the count changes) read as a sharp colour EDGE rather
+    than a subtle gradient shift.
+
+    A pixel is UNRESOLVED-DOMINANT -- flat PARAMETER_BASIN_UNRESOLVED_RGB,
+    never a count colour -- when count itself is 0 (nothing was ever
+    confirmed, so there is no real category to show) OR when `unresolved`
+    (given) exceeds `counts` at that pixel (more of this parameter's
+    critical orbits failed to resolve than succeeded, so the confirmed
+    count is more noise than signal). A pixel with count >= 1 and SOME,
+    but not a majority, of its orbits unresolved still gets its real
+    count's colour -- a confirmed attractor is shown as confirmed
+    regardless of what else, separately, didn't resolve.
+
+    Shading WITHIN a count region by slowest convergence rate (finer
+    structure inside one colour band) is an intentionally deferred,
+    optional refinement -- see cdx::Renderer::render_parameter_basin's own
+    doc comment; it does not currently expose a convergence-rate channel
+    for this to shade by at all, so there is nothing to wire up yet, not
+    a corner cut.
+    """
+    counts = np.asarray(counts)
+    unresolved_arr = np.zeros_like(counts) if unresolved is None else np.asarray(unresolved)
+
+    dominant_unresolved = (counts == 0) | (unresolved_arr > counts)
+    resolved = ~dominant_unresolved
+
+    base = np.zeros(counts.shape + (3,), dtype=float)
+    if np.any(resolved):
+        for count_value in np.unique(counts[resolved]).astype(np.int64):
+            base[counts == count_value] = _hue_to_rgb_255(_golden_hue(int(count_value)))
+
+    rgb = base.round().clip(0, 255).astype(np.uint8)
+    rgb[dominant_unresolved] = PARAMETER_BASIN_UNRESOLVED_RGB
     return rgb
 
 

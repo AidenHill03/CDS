@@ -29,7 +29,7 @@ from app.render_cache import RenderCache, make_key
 from app.settings import Settings
 from app.version import VERSION
 
-RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens")
+RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens", "parameter_basin")
 
 # Which modes render the PARAMETER plane (pixel = a value of the map's
 # own free parameter `a`, orbit seeded at that parameter's critical
@@ -38,8 +38,12 @@ RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens")
 # is this" matters beyond just dispatching a render call -- e.g. the
 # critical-point overlay and cursor readout are dynamical-plane-only
 # concepts (see P5c's own spec: critical points belong to the dynamical
-# plane, not the parameter plane).
-PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens"})
+# plane, not the parameter plane). "parameter_basin" (number of
+# attracting cycles per parameter) participates in this SAME set, and so
+# gets the marker/arrow-nudging/click-sets-`a` machinery every other
+# parameter-plane mode already has "for free" -- see app/sandbox.py's own
+# gates, all keyed off membership here rather than a per-mode name list.
+PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens", "parameter_basin"})
 
 # The six built-in families are read-only: save_to_library/rename_in_library/
 # delete_from_library/set_library_notes below all refuse to touch a name in
@@ -207,6 +211,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         attractor-crossing iteration, so unlike the old accumulate/
         degree^max_iter form there is no overflow case and nothing to
         warn about.
+      - "parameter_basin" always returns a STACKED 3D array, shape (2,
+        height, width): index 0 is the NUMBER OF DISTINCT ATTRACTING
+        CYCLES at that parameter (infinity counts as one when a critical
+        orbit's limit), index 1 is how many of that pixel's critical
+        orbits did NOT resolve within budget (Siegel/Herman/parabolic --
+        tracked separately, never folded into index 0). Escape-radius-
+        free. See cdx.Renderer.render_parameter_basin's own doc comment
+        for the method (critical-orbit convergence + chordal clustering,
+        reusing find_attractors_from_seeds -- no per-pixel find_attractors
+        that would redundantly re-root-find the same critical points).
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -271,6 +285,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         pot = _greens_potential(potential)
         values, exact = renderer.render_parameter_greens(cancel, pot)
         array = values if cdx.polynomial_escape_certified(rational_map) else np.stack([values, exact])
+    elif mode == "parameter_basin":
+        # No find_attractors here either: render_parameter_basin does its
+        # OWN per-pixel discovery internally (distinct_critical_points at
+        # THAT pixel's own parameter, then find_attractors_from_seeds) --
+        # unlike "basin" above, there is no single fixed `a` to discover
+        # attractors for ONCE up front, since every pixel IS a different
+        # `a`. Always stacked: (counts, unresolved) -- see cdx.Renderer.
+        # render_parameter_basin's own doc comment.
+        counts, unresolved = renderer.render_parameter_basin(cancel)
+        array = np.stack([counts, unresolved])
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 

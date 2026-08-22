@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.colour import (NEVER_ESCAPED_RGB, PALETTE_NAMES, PALETTES, UNRESOLVED_BASIN_RGB,
-                        colour_basin, colour_escape_time, colour_scalar_field,
+from app.colour import (NEVER_ESCAPED_RGB, PALETTE_NAMES, PALETTES,
+                        PARAMETER_BASIN_UNRESOLVED_RGB, UNRESOLVED_BASIN_RGB, colour_basin,
+                        colour_escape_time, colour_parameter_basin, colour_scalar_field,
                         scale_histogram_eq, scale_log1p, scale_scalar_field)
 
 failures = 0
@@ -198,6 +199,42 @@ def main() -> None:
     check(tuple(hist_flat[1]) == tuple(flat[1]),
           "with no iterations array, the scaling mode has no effect at all -- same flat "
           "colour regardless of 'scaling'")
+
+    # ---- colour_parameter_basin: categorical by count, unresolved-dominant flat -----
+    print("\ncolour_parameter_basin:")
+    counts = np.array([0, 1, 1, 2, 3])
+    pbimg = colour_parameter_basin(counts)
+    check(tuple(pbimg[0]) == PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count == 0 gets the flat unresolved colour, not a 'count 0' hue of its own")
+    check(tuple(pbimg[1]) == tuple(pbimg[2]),
+          "the SAME count gets the SAME colour, deterministically")
+    check(tuple(pbimg[1]) != tuple(pbimg[3]) and tuple(pbimg[3]) != tuple(pbimg[4]) and
+         tuple(pbimg[1]) != tuple(pbimg[4]),
+          "three DIFFERENT counts (1, 2, 3) get three visually distinct colours")
+
+    # Categorical, not a gradient: count=1 and count=2 aren't required to be
+    # "close" in colour space the way adjacent escape-time values would be
+    # under a palette gradient -- confirmed structurally by the distinctness
+    # checks above already using the golden-angle-separated hue wheel, not a
+    # linear ramp (no ordering assumption asserted here on purpose).
+
+    no_unresolved = colour_parameter_basin(np.array([1, 2]))
+    check(tuple(no_unresolved[0]) == tuple(colour_parameter_basin(np.array([1, 2]),
+                                                                  np.array([0, 0]))[0]),
+          "omitting `unresolved` entirely behaves the same as passing an all-zero array")
+
+    dominant = colour_parameter_basin(np.array([2, 2]), np.array([1, 3]))
+    check(tuple(dominant[0]) != PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count=2 with unresolved=1 (a MINORITY of orbits unresolved) still shows the "
+          "real count's colour -- a confirmed attractor is shown as confirmed")
+    check(tuple(dominant[1]) == PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count=2 with unresolved=3 (unresolved EXCEEDS count -- a majority) is "
+          "UNRESOLVED-DOMINANT and gets the flat neutral colour instead, not conflated "
+          "with a real count")
+
+    all_unresolved_pb = colour_parameter_basin(np.zeros(4, dtype=int))
+    check(np.all(all_unresolved_pb == 0), "an all-zero count array is entirely the flat "
+          "unresolved colour, no crash")
 
     # Rational Julia (Stage 2) has NO bespoke colourer at this layer any more
     # -- it colours through colour_escape_time directly (see app/sandbox.py's

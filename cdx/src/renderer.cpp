@@ -721,6 +721,65 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 }
 
 // -----------------------------------------------------------------------------
+// Parameter_basin -- see the header doc comment for the full method and the
+// honestly-tracked residual (Siegel/Herman/parabolic land in `unresolved`,
+// never in the attracting-cycle count). No native/compiled step dispatch
+// here at all -- unlike every OTHER render_* method, this one's inner loop
+// is find_attractors_from_seeds' own map.eval()/map.deriv() calls (the
+// general RationalMap evaluator), not a per-render StepPlan/CompiledMap;
+// a recognized built-in shape gets no fast-path benefit here, since the
+// discovery machinery being reused doesn't take a custom step function.
+// -----------------------------------------------------------------------------
+Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (unresolved) *unresolved = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    if (!custom) return img;   // see header doc comment -- no RationalMap to discover cycles against
+
+    // See render_parameter/render_parameter_greens for the SAME critical_
+    // points_constant() optimization -- a Custom map whose critical points
+    // don't depend on `a` at all gets them computed ONCE for the whole
+    // render, not once per pixel (the dominant cost here otherwise).
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_crit_pts =
+        cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+
+    // Deliberately NOT settings_.tol: that governs a DIFFERENT notion --
+    // "is a pixel's own orbit close enough to a KNOWN attractor" (basin
+    // membership, where a coarser user-tunable tolerance is fine, since
+    // the target is a single fixed point/cycle already in hand). Cycle-
+    // CLOSURE detection (does THIS orbit return to itself) is a stricter
+    // question: a looser tolerance there risks a FALSE POSITIVE -- a
+    // merely slowly-converging (near-parabolic) orbit that never actually
+    // closes can look like it "closed" under a loose enough tol, exactly
+    // the false-attractor failure mode this mode's own `unresolved`
+    // tracking exists to avoid. find_attractors' own established default
+    // (1e-9) is what every other trusted caller already relies on; every
+    // FindAttractorsOptions field stays at its default here for the same
+    // reason burn_in/max_period do -- these govern CORRECTNESS of
+    // discovery, not a rendering-speed knob to retune per mode.
+    const FindAttractorsOptions opts;
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+            const std::vector<Cplx> crit_pts =
+                cp_fixed ? fixed_crit_pts : custom->distinct_critical_points(p);
+
+            int unresolved_n = 0;
+            const std::vector<Cycle> cycles =
+                find_attractors_from_seeds(crit_pts, *custom, p, opts, &unresolved_n);
+
+            img.at(col, row) = static_cast<double>(cycles.size());
+            if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);
+        }
+    }, cancel);
+    return img;
+}
+
+// -----------------------------------------------------------------------------
 // Parameter-plane Green's function (family escape-rate function, G_M(c) for
 // the quadratic family) -- see the header comment for why this is a
 // DIFFERENT function on a DIFFERENT space from render_greens, not a

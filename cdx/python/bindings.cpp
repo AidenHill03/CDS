@@ -485,6 +485,33 @@ PYBIND11_MODULE(cdx, m) {
              "VISUALIZATION, and escape_radius is a real tuning knob here, not an "
              "invariant of the map).")
 
+        .def("render_parameter_basin",
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
+                 Image unresolved;
+                 py::array_t<double> counts_arr, unresolved_arr;
+                 {
+                     py::gil_scoped_release release;
+                     Image img = r.render_parameter_basin(cp, &unresolved);
+                     py::gil_scoped_acquire acquire;
+                     counts_arr = image_to_numpy(std::move(img));
+                     unresolved_arr = image_to_numpy(std::move(unresolved));
+                 }
+                 return py::make_tuple(counts_arr, unresolved_arr);
+             },
+             py::arg("cancel") = nullptr,
+             "Parameter_basin: each pixel is a parameter value; returns (counts, "
+             "unresolved). counts is the NUMBER OF DISTINCT ATTRACTING CYCLES the "
+             "map has at that parameter (infinity counts as one when it's the "
+             "limit of a critical orbit); unresolved is how many of that pixel's "
+             "critical orbits did NOT resolve to a confirmed attracting cycle "
+             "within budget (Siegel/Herman/parabolic land here, tracked "
+             "separately -- never silently folded into counts). Escape-radius-"
+             "free. Requires a Custom-wrapped map (see Renderer::render_"
+             "parameter_basin's own doc comment) -- degrades to an honest "
+             "all-zero (counts, unresolved) pair otherwise, rather than "
+             "guessing.")
+
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,
                 std::shared_ptr<CancelToken> cancel) {

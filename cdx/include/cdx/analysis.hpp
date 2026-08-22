@@ -63,15 +63,27 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 
 // Same discovery, but seeded from a caller-supplied critical-point list
 // instead of calling map.distinct_critical_points(a) itself. find_attractors
-// above is now a thin wrapper over this. Exists for a caller (render_
-// parameter's Stage 4 multi-critical rational path, see renderer.cpp) that
-// ALSO needs the critical points themselves for its own per-orbit render --
-// distinct_critical_points is a real, sometimes root-finding-heavy cost
-// (see cdx_test_custom's own benchmark comment), so a per-PIXEL caller
-// computes it once and passes it here rather than paying for it twice.
+// above is now a thin wrapper over this. Exists for a caller that ALSO
+// needs the critical points themselves for its own per-orbit use --
+// render_parameter_basin (renderer.cpp), which counts DISTINCT attracting
+// cycles per PARAMETER PIXEL, is the current one: distinct_critical_points
+// is a real, sometimes root-finding-heavy cost (see cdx_test_custom's own
+// benchmark comment), so a per-pixel caller computes it once and passes it
+// here rather than paying for it twice.
+//
+// `unresolved_count`, if given, is set to how many of `seeds` did NOT end
+// up contributing a cycle to the result -- a critical orbit that never
+// closed onto anything within `opts.max_period` (parabolic/rotation-domain/
+// slow), that closed onto a cycle but failed the attracting-multiplier
+// check, or that excursed past inf_cutoff during burn-in without infinity
+// actually being attracting there. render_parameter_basin needs this to
+// report "unresolved" honestly rather than silently folding it into the
+// attracting-cycle count (see its own doc comment) -- every other existing
+// caller ignores it (nullptr, the default), unchanged.
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
-                                              const FindAttractorsOptions& opts = {});
+                                              const FindAttractorsOptions& opts = {},
+                                              int* unresolved_count = nullptr);
 
 // -----------------------------------------------------------------------------
 // Polynomial escape-radius certification.

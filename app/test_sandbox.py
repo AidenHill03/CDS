@@ -853,6 +853,15 @@ def main() -> None:
     check("potential = " in greens_text,
           "greens mode's cursor readout samples the potential, not escape/basin formatting")
 
+    readout_pane.set_render_mode("parameter_basin")
+    pbasin_array = render_map(readout_session.map, readout_session.param, readout_pane.viewport,
+                              readout_session.render_settings, "parameter_basin")
+    readout_view.set_image(pbasin_array, readout_pane.viewport)
+    pbasin_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check("attracting cycle" in pbasin_text,
+          "parameter_basin mode's cursor readout reports the attracting-cycle count, not "
+          "escape/basin/potential formatting")
+
     # Stage 2: a RATIONAL map's "julia" render is stacked too -- the cursor
     # readout must sample it the SAME way basin's own stacked array is
     # sampled, not crash trying to unpack a 3D array's .shape into (h, w).
@@ -1563,6 +1572,13 @@ def main() -> None:
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "switching to parameter_greens mode renders and displays successfully end-to-end")
 
+    window.image_view._pixmap = None
+    window.mode_combo.setCurrentText("parameter_basin")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching to parameter_basin mode renders and displays successfully end-to-end, "
+         "with the new stacked counts+unresolved array flowing all the way through the "
+         "categorical (non-palette) colourer")
+
     # A max_iter that would have overflowed the OLD accumulate/degree^
     # max_iter formula (degree^2000 is astronomically outside double
     # range) must still render successfully with no warning -- confirming
@@ -2170,6 +2186,12 @@ def main() -> None:
     check("no effect" in window.image_view.no_effect_parameter_message() or
           "has no" in window.image_view.no_effect_parameter_message(),
           "the message actually explains why, not just a blank/generic string")
+
+    window.mode_combo.setCurrentText("parameter_basin")
+    check(window.image_view.no_effect_parameter_message() is not None,
+          "parameter_basin gets the SAME no-effect guard as plain parameter -- driven by "
+          "PARAMETER_PLANE_MODES membership, not a hardcoded per-mode name list")
+    window.mode_combo.setCurrentText("parameter")
 
     rid_before_guard = window.pane.request_id
     window._start_render(window.pane)

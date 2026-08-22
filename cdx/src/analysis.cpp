@@ -63,8 +63,10 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
-                                              const FindAttractorsOptions& opts) {
+                                              const FindAttractorsOptions& opts,
+                                              int* unresolved_count) {
     std::vector<Cycle> cycles;
+    if (unresolved_count) *unresolved_count = 0;
 
     for (Cplx seed : seeds) {
         // A seed at infinity can't be evaluated through eval() directly (that
@@ -124,7 +126,10 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                         break;
                     }
                 }
-                if (!infinity_attracting) continue;   // spurious excursion, not a real attractor
+                if (!infinity_attracting) {
+                    if (unresolved_count) ++*unresolved_count;   // spurious excursion, not a real attractor
+                    continue;
+                }
             }
             add_cycle(cycles, {Cplx(kInf, 0.0)}, opts.tol);
             continue;
@@ -155,7 +160,10 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
             }
         }
 
-        if (found <= 0 || hit_inf_mid_orbit) continue;   // no cycle detected, or punted
+        if (found <= 0 || hit_inf_mid_orbit) {
+            if (unresolved_count) ++*unresolved_count;   // no cycle detected, or punted
+            continue;
+        }
 
         std::vector<Cplx> cyc(orbit.begin(), orbit.begin() + found);
 
@@ -166,7 +174,10 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
             if (!has_inf) {
                 Cplx multiplier(1.0, 0.0);
                 for (Cplx zc : cyc) multiplier *= map.deriv(zc, a);
-                if (!(std::abs(multiplier) < 1.0)) continue;   // not attracting after all
+                if (!(std::abs(multiplier) < 1.0)) {
+                    if (unresolved_count) ++*unresolved_count;   // not attracting after all
+                    continue;
+                }
             }
         }
 

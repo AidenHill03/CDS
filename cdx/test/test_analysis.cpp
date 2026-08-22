@@ -818,6 +818,187 @@ int main() {
               "the same VISUALIZATION-knob behavior as the certified-polynomial case above");
     }
 
+    // ---- Parameter_basin: find_attractors_from_seeds' unresolved_count -------------
+    // Pure-function test of the counting/clustering logic itself, no
+    // rendering involved: z^2+c at c=0.2499 (just inside the main
+    // cardioid's cusp, c=0.25, where the finite fixed point's multiplier
+    // is on the verge of 1) -- the finite critical orbit's own closure
+    // either never completes within max_period, or completes onto a cycle
+    // the multiplier check then rejects; either way it must show up in
+    // `unresolved_count`, not be silently absorbed into the returned
+    // cycle count.
+    std::printf("\nParameter_basin: find_attractors_from_seeds' unresolved_count "
+               "(pure-function test):\n");
+    {
+        RationalMap quad("quad");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        const Cplx c_inside{0.0, 0.0};
+        int unresolved_inside = -1;
+        const auto cyc_inside = find_attractors_from_seeds(quad.distinct_critical_points(c_inside),
+                                                           quad, c_inside, {}, &unresolved_inside);
+        check(cyc_inside.size() == 2 && unresolved_inside == 0,
+              "c=0 (deep inside the cardioid): 2 distinct attracting cycles (the "
+              "superattracting fixed point at 0, plus infinity), nothing unresolved");
+
+        const Cplx c_cusp{0.2499, 0.0};
+        int unresolved_cusp = -1;
+        const auto cyc_cusp = find_attractors_from_seeds(quad.distinct_critical_points(c_cusp),
+                                                         quad, c_cusp, {}, &unresolved_cusp);
+        check(cyc_cusp.size() == 1,
+              "c=0.2499 (just inside the cusp): only infinity is confirmed attracting -- "
+              "the near-parabolic finite fixed point is NOT found as a second cycle");
+        check(unresolved_cusp >= 1,
+              "...and that near-parabolic critical orbit is honestly reported as "
+              "UNRESOLVED, not silently dropped or miscounted as a third attractor");
+
+        const Cplx c_far{5.0, 5.0};
+        int unresolved_far = -1;
+        const auto cyc_far = find_attractors_from_seeds(quad.distinct_critical_points(c_far),
+                                                        quad, c_far, {}, &unresolved_far);
+        check(cyc_far.size() == 1 && unresolved_far == 0,
+              "c=5+5i (far outside): both critical-point seeds (0 and infinity) converge to "
+              "the SAME attractor (infinity) -- deduped to exactly 1 cycle, nothing "
+              "unresolved (infinity genuinely IS confirmed attracting there)");
+    }
+
+    // ---- Parameter_basin: render, count == number of distinct attracting cycles ----
+    std::printf("\nParameter_basin: render_parameter_basin counts distinct attracting "
+               "cycles per pixel:\n");
+    {
+        RationalMap quad("quad");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        auto count_at = [&](Cplx c) {
+            Renderer r(Map::custom(quad, c), Viewport{c, 0.001, 3}, RenderSettings{100, 2.0, 1e-6, 1});
+            Image unresolved;
+            const Image counts = r.render_parameter_basin(nullptr, &unresolved);
+            return std::make_pair(counts.at(1, 1), unresolved.at(1, 1));
+        };
+
+        auto [count_inside, unresolved_inside2] = count_at(Cplx{0.0, 0.0});
+        check(count_inside == 2.0 && unresolved_inside2 == 0.0,
+              "RENDER matches the pure-function result at c=0: count=2, unresolved=0");
+
+        auto [count_cusp, unresolved_cusp2] = count_at(Cplx{0.2499, 0.0});
+        check(count_cusp == 1.0 && unresolved_cusp2 >= 1.0,
+              "RENDER matches the pure-function result at c=0.2499: count=1, unresolved>=1 -- "
+              "count and unresolved are tracked as SEPARATE channels, never conflated");
+
+        auto [count_far, unresolved_far2] = count_at(Cplx{5.0, 5.0});
+        check(count_far == 1.0 && unresolved_far2 == 0.0,
+              "RENDER matches the pure-function result far outside: count=1 (infinity "
+              "only), unresolved=0");
+
+        // A REAL render (not just three probed pixels) actually shows the
+        // count changing across the image -- this is what makes "sharp
+        // colour edges at bifurcation boundaries" (the app's own colouring
+        // requirement) possible at all.
+        Renderer r_full(Map::custom(quad, Cplx{0.0, 0.0}), Viewport{{-0.5, 0.0}, 1.5, 81},
+                        RenderSettings{100, 2.0, 1e-6, 1});
+        const Image full = r_full.render_parameter_basin();
+        bool has_count_1 = false, has_count_2 = false;
+        for (double v : full.data) {
+            if (v == 1.0) has_count_1 = true;
+            if (v == 2.0) has_count_2 = true;
+        }
+        check(has_count_1 && has_count_2,
+              "COUNT CHANGES ACROSS A KNOWN BIFURCATION: a real render spanning the "
+              "Mandelbrot set's own cusp shows BOTH count=1 (exterior) and count=2 "
+              "(interior) pixels, not a uniform plane");
+    }
+
+    // ---- Parameter_basin: 2+ coexisting FINITE attracting cycles -------------------
+    std::printf("\nParameter_basin: a genuinely multi-critical family shows 2+ coexisting "
+               "FINITE attracting cycles:\n");
+    {
+        // z^3 - 0.9z + a -- two independent finite critical points (+-
+        // sqrt(0.3)), so (unlike z^2+a) its critical orbits can land on
+        // TWO DIFFERENT finite attracting cycles simultaneously. `a` below
+        // was found by an empirical scan (not hand-derived) and verified
+        // directly against find_attractors before being hardcoded here;
+        // small perturbations of it give the same count, so this is not a
+        // knife-edge value.
+        RationalMap cubic("cubic2");
+        cubic.add_poly({1.0, 0.0}, 3, 0, "z^3");
+        cubic.add_poly({-0.9, 0.0}, 1, 0, "-0.9z");
+        cubic.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        const Cplx a_two_finite{-0.02986271158692677, -0.6105286348382948};
+        const auto cycles = find_attractors(cubic, a_two_finite);
+        int n_finite_cycles = 0;
+        for (const auto& cyc : cycles) {
+            bool all_finite = true;
+            for (Cplx pt : cyc.points) if (!std::isfinite(pt.real())) all_finite = false;
+            if (all_finite) ++n_finite_cycles;
+        }
+        check(n_finite_cycles >= 2,
+              "sanity: find_attractors independently confirms >= 2 distinct FINITE "
+              "attracting cycles at this parameter (two coexisting period-2 cycles)");
+
+        Renderer r(Map::custom(cubic, a_two_finite), Viewport{a_two_finite, 0.001, 3},
+                  RenderSettings{100, 2.0, 1e-6, 1});
+        const Image counts = r.render_parameter_basin();
+        check(counts.at(1, 1) == static_cast<double>(cycles.size()),
+              "render_parameter_basin's own count matches find_attractors' cycle count "
+              "exactly at this parameter (2 finite cycles + infinity = 3)");
+
+        // A parameter far away collapses back to just infinity -- the
+        // count genuinely varies with `a`, not a constant baked into the
+        // family's own structure.
+        Renderer r_far(Map::custom(cubic, Cplx{5.0, 5.0}), Viewport{{5.0, 5.0}, 0.001, 3},
+                       RenderSettings{100, 2.0, 1e-6, 1});
+        check(r_far.render_parameter_basin().at(1, 1) == 1.0,
+              "...and a distant parameter for the SAME family collapses to count=1 "
+              "(everything converges to infinity) -- a genuine bifurcation, not a "
+              "fixed per-family constant");
+    }
+
+    // ---- Parameter_basin: a parameter-independent family gives a constant count ----
+    std::printf("\nParameter_basin: Newton z^3-1 (no free parameter) gives a CONSTANT "
+               "count everywhere:\n");
+    {
+        RationalMap newton3("newton3");
+        newton3.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        newton3.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        check(polynomial_escape_certified(newton3) == false, "sanity: has a pole, not certified");
+
+        const auto cycles = find_attractors(newton3, Cplx{0.0, 0.0});
+        check(cycles.size() == 3, "sanity: find_attractors independently confirms 3 "
+              "attracting cycles (the 3 cube roots of unity, each superattracting)");
+
+        Renderer r(Map::custom(newton3), Viewport{{0.0, 0.0}, 2.0, 31},
+                  RenderSettings{100, 2.0, 1e-6, 1});
+        const Image counts = r.render_parameter_basin();
+        bool all_three = true;
+        for (double v : counts.data) if (v != 3.0) all_three = false;
+        check(all_three,
+              "every pixel reports count=3, regardless of the (ignored) parameter value -- "
+              "newton_cubic has no term depending on `a` at all, so its dynamics -- and "
+              "this count -- cannot vary across the plane");
+    }
+
+    // ---- Parameter_basin: requires a Custom-wrapped map -----------------------------
+    std::printf("\nParameter_basin: a genuine built-in Family with no RationalMap behind "
+               "it degrades honestly:\n");
+    {
+        Renderer r(Map(Family::Quadratic, Cplx{0.0, 0.0}), Viewport{{-0.5, 0.0}, 1.5, 21},
+                  RenderSettings{80, 2.0, 1e-6, 1});
+        check(r.map().custom_map() == nullptr,
+              "sanity: a genuine Family::Quadratic Map has no RationalMap behind it");
+        Image unresolved;
+        const Image counts = r.render_parameter_basin(nullptr, &unresolved);
+        bool all_zero = true, unresolved_all_zero = true;
+        for (double v : counts.data) if (v != 0.0) all_zero = false;
+        for (double v : unresolved.data) if (v != 0.0) unresolved_all_zero = false;
+        check(all_zero && unresolved_all_zero,
+              "degrades to an honest all-zero image (both channels) rather than crashing "
+              "or guessing -- this path is never actually reached by the app itself, which "
+              "always renders through Map::custom (see app/session.py's render_map)");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

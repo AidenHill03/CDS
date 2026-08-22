@@ -21,7 +21,7 @@ import numpy as np
 
 import cdx
 from app.orbit_tracker import OrbitTracker
-from app.session import PRESET_FAMILY_NAMES, Session, render_map
+from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES, Session, render_map
 
 failures = 0
 
@@ -77,6 +77,11 @@ def main() -> None:
     check(pgreens_array.shape == (41, 41),
           "parameter_greens render also matches viewport resolution")
 
+    pbasin_array = s.render(vp, "parameter_basin")
+    check(pbasin_array.shape == (2, 41, 41),
+          "parameter_basin render is ALWAYS STACKED: (2, height, width) -- counts, "
+          "then unresolved -- there is no certified-polynomial plain-2D fast path here")
+
     # ---- Stage 2: rational Julia is STACKED, escape_radius-invariant ------------
     print("\nrender mode dispatch: rational Julia (Stage 2 sphere-aware classification):")
     newton4 = cdx.RationalMap("newton4")   # (3/4)z + (1/4)z^-3 -- Newton's method for z^4-1
@@ -117,6 +122,54 @@ def main() -> None:
     check(poly_julia.shape == (41, 41),
           "ACCEPTANCE: a certified polynomial's julia render is STILL a plain 2D array, "
           "not stacked -- Stage 2 didn't change its shape or meaning")
+
+    # ---- Parameter_basin: counts distinct attracting cycles per parameter ----------
+    print("\nrender mode dispatch: Parameter_basin (number of attracting cycles):")
+    # z^2 + a: at c=0 (deep in the cardioid) BOTH the origin's own fixed
+    # point AND infinity are independently confirmed attracting -- count=2.
+    # Far outside (c=5+5i), both critical-point seeds (0 and infinity)
+    # converge to the SAME attractor and dedupe to count=1. Cross-checked
+    # against cdx.find_attractors directly in cdx/test/test_analysis.cpp;
+    # this is the app-dispatch-level counterpart, not a re-derivation.
+    quad = cdx.RationalMap("quad")
+    quad.add_poly(1 + 0j, 2, 0, "z^2")
+    quad.add_poly(1 + 0j, 0, 1, "a")
+
+    s_pb = Session()
+    s_pb.map = quad
+    s_pb.render_settings = cdx.RenderSettings(100, 2.0, 1e-6, 1)
+
+    tiny_vp_inside = cdx.Viewport(complex(0, 0), 0.001, 3)
+    counts_inside, unresolved_inside = s_pb.render(tiny_vp_inside, "parameter_basin")
+    check(counts_inside[1, 1] == 2.0 and unresolved_inside[1, 1] == 0.0,
+          "c=0: count=2 (origin's own fixed point + infinity), unresolved=0")
+
+    tiny_vp_far = cdx.Viewport(complex(5, 5), 0.001, 3)
+    counts_far, unresolved_far = s_pb.render(tiny_vp_far, "parameter_basin")
+    check(counts_far[1, 1] == 1.0 and unresolved_far[1, 1] == 0.0,
+          "c=5+5i: count=1 (both seeds dedupe onto infinity), unresolved=0")
+
+    # A real render spanning the cusp shows count genuinely CHANGING across
+    # the plane -- this is what makes colour_parameter_basin's sharp
+    # colour edges meaningful at all, not a uniform/degenerate image.
+    wide_vp = cdx.Viewport(complex(-0.5, 0), 1.5, 61)
+    counts_wide, _unresolved_wide = s_pb.render(wide_vp, "parameter_basin")
+    unique_counts = set(counts_wide.flatten().tolist())
+    check(len(unique_counts & {1.0, 2.0}) == 2,
+          "a real render shows BOTH count=1 and count=2 pixels -- a genuine "
+          "classification, not a flat plane")
+
+    # No-effect-parameter guard (dynamical-plane concept generalized):
+    # newton_cubic() has no term depending on `a` at all, so ImageView's
+    # own no_effect_parameter_message (app/sandbox.py) should treat
+    # "parameter_basin" the same as "parameter"/"parameter_greens" --
+    # verified here at the describe_parameter_role level this session
+    # already tests elsewhere, confirming PARAMETER_PLANE_MODES
+    # membership (not a hardcoded per-mode name list) is what drives it.
+    check("parameter_basin" in PARAMETER_PLANE_MODES,
+          "parameter_basin is a genuine PARAMETER-plane mode -- gets the marker/"
+          "arrow-nudging/no-effect-guard machinery every other one already has, "
+          "purely through set membership")
 
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
