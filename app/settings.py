@@ -101,6 +101,18 @@ DEFAULT_GREENS_CONTOUR = False
 GREENS_POTENTIAL_CHOICES = ("pragmatic", "conformal")
 DEFAULT_GREENS_POTENTIAL = "pragmatic"
 
+# Stage 4: arrow-key parameter-marker nudging (app.sandbox.ImageView.
+# keyPressEvent). Step is in SCREEN pixels, converted to a complex delta
+# through the active parameter pane's own viewport at move time (see
+# ImageView._nudge_delta) -- a fixed pixel step, not a fixed complex one,
+# is what keeps the marker moving a consistent VISUAL amount regardless of
+# zoom depth, and gets finer-grained (in complex units) the deeper a user
+# has zoomed, exactly like a mouse drag already does. Rate is moves per
+# second while a key is held, independent of the OS's own key-repeat (see
+# ImageView's own held-key-repeat QTimer).
+DEFAULT_PARAM_MARKER_STEP = 2.0
+DEFAULT_PARAM_MARKER_RATE = 20.0
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -182,6 +194,18 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "greens_potential": FieldSpec(str, 0, 0, DEFAULT_GREENS_POTENTIAL,
                                   "Green's function potential (rational maps only)",
                                   choices=GREENS_POTENTIAL_CHOICES),
+    # Upper bound is arbitrary headroom (a marker crossing the whole visible
+    # window in one step is already useless); lower bound excludes 0 --
+    # a zero-pixel step would never move the marker at all, not just move
+    # it slowly.
+    "param_marker_step": FieldSpec(float, 0.0, 500.0, DEFAULT_PARAM_MARKER_STEP,
+                                   "Parameter marker step (pixels)", exclusive_minimum=True),
+    # Upper bound comfortably above what a QTimer can usefully drive (and
+    # above any human's held-key cadence); lower bound excludes 0 -- a
+    # zero-rate hold would never repeat at all, not just repeat slowly.
+    "param_marker_rate": FieldSpec(float, 0.0, 120.0, DEFAULT_PARAM_MARKER_RATE,
+                                   "Parameter marker repeat rate (moves/sec)",
+                                   exclusive_minimum=True),
 }
 
 
@@ -200,6 +224,8 @@ class Settings:
     greens_period_bands: float = DEFAULT_GREENS_PERIOD_BANDS
     greens_contour: bool = DEFAULT_GREENS_CONTOUR
     greens_potential: str = DEFAULT_GREENS_POTENTIAL
+    param_marker_step: float = DEFAULT_PARAM_MARKER_STEP
+    param_marker_rate: float = DEFAULT_PARAM_MARKER_RATE
 
     def sanitized(self) -> Settings:
         """A copy with every field individually validated, out-of-range or

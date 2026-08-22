@@ -19,7 +19,7 @@ Run with:
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDoubleSpinBox
 
 from app.session import Session
 from app.settings import FIELD_SPECS, Settings
@@ -154,6 +154,24 @@ def main() -> None:
     check(len(applied) == 1, "changing only the potential combo box still triggers a valid Apply")
     check(applied[-1].greens_potential == "conformal",
           "the applied Settings reflects the combo-box selection")
+
+    # ---- Stage 4: param_marker_step/rate get spinboxes, round-trip through Apply ------
+    print("\nStage 4 (param_marker_step/rate -- tunable in-app, per the milestone's own spec):")
+    step_widget = panel._widgets["param_marker_step"]
+    rate_widget = panel._widgets["param_marker_rate"]
+    check(isinstance(step_widget, QDoubleSpinBox) and isinstance(rate_widget, QDoubleSpinBox),
+          "param_marker_step/rate both get QDoubleSpinBoxes, not combo boxes")
+    check(abs(step_widget.value() - session.settings.param_marker_step) < 1e-9 and
+         abs(rate_widget.value() - session.settings.param_marker_rate) < 1e-9,
+          "both spinboxes start on session.settings' current values")
+
+    applied.clear()
+    step_widget.setValue(9.0)
+    rate_widget.setValue(30.0)
+    panel._apply()
+    check(len(applied) == 1, "changing only the marker step/rate fields still triggers a valid Apply")
+    check(applied[-1].param_marker_step == 9.0 and applied[-1].param_marker_rate == 30.0,
+          "the applied Settings reflects both spinbox values")
 
     # ---- Clear Cache ------------------------------------------------------------------
     print("\nclear cache:")

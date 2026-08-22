@@ -17,6 +17,7 @@ plugin search path):
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import math
 import os
@@ -27,8 +28,8 @@ from pathlib import Path
 
 import numpy as np
 import shiboken6
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QAction, QImage, QPainter
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QAction, QImage, QKeyEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -687,6 +688,21 @@ def main() -> None:
             return self._button
         def modifiers(self):
             return self._modifiers
+
+    def _key_event(key, press: bool = True, autorepeat: bool = False) -> QKeyEvent:
+        """A REAL QKeyEvent (not a hand-rolled stand-in like _FakeMouseEvent
+        above): ImageView.keyPressEvent/keyReleaseEvent, unlike the mouse
+        handlers, legitimately fall through to super().keyPressEvent(event)
+        for an event they don't handle (e.g. an arrow key in a DYNAMICAL
+        pane) -- PySide6's C++ binding rejects a duck-typed Python stand-in
+        there (it type-checks the argument against QKeyEvent), so this
+        needs to be constructed as one for real, still delivered directly
+        (bypassing Qt's own event queue/focus system) the same way
+        _FakeMouseEvent's events are, for the same offscreen-reliability
+        reason.
+        """
+        kind = QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease
+        return QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier, autorep=autorepeat)
 
     gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
     gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))   # no movement -> a click
@@ -1819,6 +1835,157 @@ def main() -> None:
     check(close(complex(marker_after_field.x(), marker_after_field.y()),
                complex(expected_pixel2.x(), expected_pixel2.y()), 1e-6),
           "the marker moves with a field commit too, not just a plane click")
+
+    # ---- Stage 4: arrow-key parameter marker nudging ------------------------------
+    print("\narrow-key parameter marker nudging: single press moves param by the expected delta:")
+    window.coupled_view_action.setChecked(True)
+    window._set_focused_pane(window.pane)
+    window.mode_combo.setCurrentText("parameter")
+    check(window.pane.render_mode == "parameter" and window._focused_pane is window.pane,
+          "sanity: pane A is parameter-plane and focused")
+    check(window.pane2.render_mode == "julia", "sanity: pane2 is still the dynamical partner")
+
+    window.session.apply_settings(dataclasses.replace(
+        window.session.settings, param_marker_step=6.0, param_marker_rate=25.0))
+
+    view = window.image_view
+    rect = view._display_rect()
+    origin = QPointF(rect.center())
+
+    def _expected_delta(dx: float, dy: float) -> complex:
+        # Same computation ImageView._nudge_delta itself does -- see that
+        # method's own docstring for why differencing two _pixel_to_complex
+        # calls (an already-established, separately-tested primitive) is
+        # the derivation, not a hand-rolled scale factor.
+        moved = QPointF(origin.x() + dx, origin.y() + dy)
+        return view._pixel_to_complex(moved) - view._pixel_to_complex(origin)
+
+    param_before_left = window.session.param
+    expected_left = _expected_delta(-6.0, 0.0)
+    view.keyPressEvent(_key_event(Qt.Key.Key_Left))
+    check(close(window.session.param, param_before_left + expected_left, 1e-9),
+          "a single Left press moves session.param by exactly the expected complex delta -- "
+          "real part decreases")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Left, press=False))
+    check(not view._nudge_timer.isActive(),
+          "releasing the only held arrow stops the repeat timer")
+
+    param_before_up = window.session.param
+    expected_up = _expected_delta(0.0, -6.0)   # screen-up = smaller pixel y
+    view.keyPressEvent(_key_event(Qt.Key.Key_Up))
+    check(close(window.session.param, param_before_up + expected_up, 1e-9),
+          "a single Up press moves session.param by exactly the expected complex delta -- "
+          "imaginary part increases (screen-up = +imag)")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Up, press=False))
+
+    print("\nheld-key repeat: produces repeated moves at ~param_marker_rate, stops on release:")
+    rate = 25.0
+    window.session.apply_settings(dataclasses.replace(
+        window.session.settings, param_marker_step=1.0, param_marker_rate=rate))
+    nudges: list[complex] = []
+    def _record_nudge(a: complex) -> None:
+        nudges.append(a)
+    view.param_nudged.connect(_record_nudge)
+
+    check(not view._nudge_timer.isActive(), "sanity: the repeat timer is not running before any press")
+    view.keyPressEvent(_key_event(Qt.Key.Key_Right))
+    check(len(nudges) == 1, "the initial (non-autorepeat) press does exactly one immediate nudge")
+    check(view._nudge_timer.isActive(), "the repeat timer starts running while the key is held")
+
+    hold_ms = 600
+    QTest.qWait(hold_ms)
+    observed = len(nudges)
+    expected = 1 + hold_ms / 1000.0 * rate
+    # Generous tolerance -- QTimer/event-loop scheduling jitter under a
+    # test harness is real, this is checking "roughly the configured rate
+    # drove it," not a real-time guarantee.
+    check(observed > 1, "the timer produced more nudges than just the initial press's own one")
+    check(abs(observed - expected) < max(3, expected * 0.5),
+          f"~{rate}/sec repeat rate: observed {observed} nudges in {hold_ms}ms "
+          f"(expected ~{expected:.1f})")
+
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Right, press=False))
+    check(not view._nudge_timer.isActive(), "releasing the key stops the repeat timer")
+    count_after_release = len(nudges)
+    QTest.qWait(200)
+    check(len(nudges) == count_after_release,
+          "no further nudges happen after release, even after waiting")
+
+    # Qt's own OS-level autorepeat must be ignored -- only OUR timer drives
+    # cadence (see keyPressEvent's own isAutoRepeat() check).
+    nudges.clear()
+    view.keyPressEvent(_key_event(Qt.Key.Key_Right))
+    check(len(nudges) == 1, "sanity: the initial non-autorepeat press nudges once")
+    view.keyPressEvent(_key_event(Qt.Key.Key_Right, autorepeat=True))
+    check(len(nudges) == 1,
+          "a Qt autorepeat press (isAutoRepeat()==True) does NOT itself trigger another nudge")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Right, autorepeat=True, press=False))
+    check(view._nudge_timer.isActive(),
+          "an autorepeat RELEASE is also ignored -- the key is still physically held, the "
+          "repeat timer keeps running")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Right, press=False))
+    check(not view._nudge_timer.isActive(), "the genuine (non-autorepeat) release stops it")
+    view.param_nudged.disconnect(_record_nudge)
+
+    print("\narrow keys in a DYNAMICAL pane: unbound, param unchanged (future scope elsewhere):")
+    window._set_focused_pane(window.pane2)
+    param_before_dynamical = window.session.param
+    window.image_view2.keyPressEvent(_key_event(Qt.Key.Key_Left))
+    check(window.session.param == param_before_dynamical,
+          "an arrow press on the DYNAMICAL pane leaves session.param completely unchanged")
+    check(not window.image_view2._held_arrows,
+          "...and isn't even tracked as held -- the press was never accepted/consumed there")
+    window.image_view2.keyReleaseEvent(_key_event(Qt.Key.Key_Left, press=False))
+    window._set_focused_pane(window.pane)
+
+    print("\narrow-key nudge drives the PARTNER dynamical pane's re-render, "
+         "WITHOUT resetting its viewport:")
+    window.coupled_view_action.setChecked(True)
+    wait_for(lambda: window.pane2.request_id not in window.pane2.pending_tasks, timeout_ms=10000)
+    pane2_viewport_before_nudge = window.pane2.viewport
+    pane2_request_id_before_nudge = window.pane2.request_id
+
+    view.keyPressEvent(_key_event(Qt.Key.Key_Up))
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Up, press=False))
+
+    check(window.pane2.viewport.center == pane2_viewport_before_nudge.center and
+         window.pane2.viewport.scale == pane2_viewport_before_nudge.scale,
+          "RESOLVED PREMISE: unlike a parameter-plane CLICK, a nudge does NOT reset the "
+          "partner dynamical pane's viewport -- it re-renders the SAME framing, so a held "
+          "sweep can watch it evolve continuously instead of snapping back to default "
+          "every tick")
+    check(window.pane2.request_id != pane2_request_id_before_nudge,
+          "...but a genuinely NEW render request was still dispatched for the partner pane")
+    ok = wait_for(lambda: window.pane2.request_id not in window.pane2.pending_tasks,
+                  timeout_ms=10000)
+    check(ok, "the partner pane's nudge-triggered render actually completes")
+
+    print("\nparam_marker_step/rate are read LIVE -- a Settings change mid-session takes "
+         "effect on the very next nudge:")
+    window.session.apply_settings(dataclasses.replace(
+        window.session.settings, param_marker_step=3.0, param_marker_rate=25.0))
+    origin_live = QPointF(view._display_rect().center())
+    small_step_delta = (view._pixel_to_complex(QPointF(origin_live.x() + 3.0, origin_live.y())) -
+                        view._pixel_to_complex(origin_live))
+    param_before_small = window.session.param
+    view.keyPressEvent(_key_event(Qt.Key.Key_Right))
+    check(close(window.session.param, param_before_small + small_step_delta, 1e-9),
+          "sanity: nudges with param_marker_step=3.0")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Right, press=False))
+
+    window.session.apply_settings(dataclasses.replace(
+        window.session.settings, param_marker_step=30.0, param_marker_rate=25.0))
+    origin_live2 = QPointF(view._display_rect().center())
+    large_step_delta = (view._pixel_to_complex(QPointF(origin_live2.x() + 30.0, origin_live2.y())) -
+                        view._pixel_to_complex(origin_live2))
+    param_before_large = window.session.param
+    view.keyPressEvent(_key_event(Qt.Key.Key_Right))
+    check(close(window.session.param, param_before_large + large_step_delta, 1e-9),
+          "a Settings change made BETWEEN two presses (no fresh ImageView, no restart) is "
+          "reflected immediately -- param_marker_step is read live, not cached at construction")
+    check(abs(large_step_delta) > abs(small_step_delta) * 5,
+          "sanity: the step really did change the move size, not coincidentally the same")
+    view.keyReleaseEvent(_key_event(Qt.Key.Key_Right, press=False))
 
     print("\nsingle-view fallback: click still switches the one visible pane (legacy behavior):")
     window.coupled_view_action.setChecked(False)

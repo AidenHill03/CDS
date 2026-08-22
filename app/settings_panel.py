@@ -34,6 +34,7 @@ FIELD_GROUPS = {
     "Colouring": ["colour_palette", "colour_scaling", "colour_period"],
     "Green's function": ["greens_potential", "greens_band_width", "greens_period_bands",
                         "greens_contour"],
+    "Parameter marker": ["param_marker_step", "param_marker_rate"],
     "Cache": ["cache_budget_bytes"],
 }
 

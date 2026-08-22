@@ -956,9 +956,29 @@ class _Runnable(QRunnable):
         self._task.run()
 
 
+# Stage 4: arrow-key parameter-marker nudging. Screen convention (Up =
+# +imag, matching every other screen<->complex mapping in this module --
+# see ImageView._pixel_to_complex's own comment on why screen-down is
+# -imag) -- Left/Right move the real axis, Up/Down the imaginary axis.
+# Values are UNNORMALIZED unit-ish directions, summed directly when
+# multiple arrows are held (see ImageView._do_nudge): a diagonal (e.g.
+# Up+Right) moves sqrt(2) times as far per tick as a single cardinal
+# direction, not renormalized to match cardinal speed -- simplest thing
+# that supports diagonal movement at all, and "if cheap" (per this
+# feature's own spec) didn't ask for more than that.
+_ARROW_DIRECTIONS: dict[Qt.Key, complex] = {
+    Qt.Key.Key_Left:  complex(-1.0, 0.0),
+    Qt.Key.Key_Right: complex(1.0, 0.0),
+    Qt.Key.Key_Up:    complex(0.0, 1.0),
+    Qt.Key.Key_Down:  complex(0.0, -1.0),
+}
+
+
 class ImageView(QWidget):
     """The single image pane: displays the current render, and owns every
-    mouse/wheel interaction (scroll zoom, drag rubber-band zoom, pan).
+    mouse/wheel interaction (scroll zoom, drag rubber-band zoom, pan) and,
+    in a PARAMETER-plane pane, arrow-key marker nudging (Stage 4 -- see
+    keyPressEvent/keyReleaseEvent).
 
     The displayed image is always drawn into a centered SQUARE sub-rect of
     the widget (see _display_rect), never stretched to the widget's full
@@ -1022,6 +1042,22 @@ class ImageView(QWidget):
     # paths funnel through EXACTLY the same underlying invalidation logic
     # rather than two divergent copies of it.
     param_changed = Signal(complex)
+    # Emitted with the NUDGED complex value (session.param + one step) from
+    # a PARAMETER-plane arrow-key press/repeat -- deliberately a SEPARATE
+    # signal from param_changed above, not a reuse of it: param_changed's
+    # existing single-view-mode handler switches the clicked pane straight
+    # to "julia" (the right thing for a deliberate click, wrong for a
+    # nudge -- the user is presumably WATCHING the parameter plane while
+    # nudging, not asking to leave it), and its coupled-mode handler resets
+    # the partner dynamical pane's viewport to the map's default framing on
+    # every call (right for a deliberate jump to a new parameter, wrong for
+    # continuous nudging -- see SandboxWindow._apply_param_change's own
+    # `reset_dynamical_viewport` parameter). Like param_changed, this does
+    # NOT touch session.param itself -- SandboxWindow._on_param_nudged is
+    # the one place that assignment happens, via the same
+    # _apply_param_change every other param-setting path already funnels
+    # through.
+    param_nudged = Signal(complex)
 
     def __init__(self, pane: Pane, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
@@ -1032,6 +1068,22 @@ class ImageView(QWidget):
         self.session = session
         self.setMouseTracking(True)
         self.setMinimumSize(200, 200)
+        # StrongFocus (tab- and click-focusable) so this pane can receive
+        # arrow-key events at all -- a QWidget's default policy is
+        # Qt.NoFocus, which silently swallows key events rather than
+        # delivering them to keyPressEvent below. mousePressEvent also
+        # calls setFocus() explicitly (belt-and-suspenders alongside Qt's
+        # own click-to-focus, which some offscreen/test environments don't
+        # reliably grant on a simulated click).
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Held-key repeat state (Stage 4) -- see keyPressEvent/
+        # keyReleaseEvent/_on_nudge_timer_tick. A set, not a single value,
+        # so multiple simultaneously-held arrows (e.g. Up+Right) combine
+        # into a diagonal nudge rather than the second press silently
+        # replacing the first.
+        self._held_arrows: set[complex] = set()
+        self._nudge_timer = QTimer(self)
+        self._nudge_timer.timeout.connect(self._on_nudge_timer_tick)
         self.orbit_tracker = OrbitTracker()
         # Orbit-only -- deliberately independent of _trace_orbits below,
         # which governs the SEPARATE post-critical-point traces (see
@@ -1605,6 +1657,7 @@ class ImageView(QWidget):
 
     # ---- drag: rubber-band zoom, or pan -----------------------------------------
     def mousePressEvent(self, event) -> None:
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         self.pane_activated.emit()
         pos = event.position().toPoint()
         is_pan = (event.button() == Qt.MouseButton.MiddleButton or
@@ -1667,6 +1720,89 @@ class ImageView(QWidget):
                     self._set_param_at(origin)
                 else:
                     self._seed_orbit_at(origin)
+
+    # ---- keyboard: arrow-key parameter-marker nudging (Stage 4) -----------------
+    # PARAMETER-plane panes only -- the marker is a parameter-plane concept
+    # (see param_nudged's own comment). In a DYNAMICAL pane, arrows are left
+    # UNBOUND here (fall through to Qt's default handling, e.g. focus
+    # navigation) -- future scope, not this feature's job.
+    def keyPressEvent(self, event) -> None:
+        direction = _ARROW_DIRECTIONS.get(event.key())
+        if direction is None or self.pane.render_mode not in PARAMETER_PLANE_MODES:
+            super().keyPressEvent(event)
+            return
+        event.accept()   # so an arrow never also triggers focus navigation
+        if event.isAutoRepeat():
+            return   # our own timer drives held-key cadence, not Qt's OS-level repeat
+        self._held_arrows.add(direction)
+        self._do_nudge()
+        self._nudge_timer.start(self._nudge_interval_ms())
+
+    def keyReleaseEvent(self, event) -> None:
+        direction = _ARROW_DIRECTIONS.get(event.key())
+        # Only act if this direction is actually tracked as held -- keeps
+        # this symmetric with an unconsumed press (e.g. the render_mode
+        # switched away from PARAMETER_PLANE_MODES while the key was still
+        # down: the press never added it, so the release shouldn't stop a
+        # timer some OTHER held direction may still need) and side-steps
+        # ever needing to re-check render_mode here at all. Checked BEFORE
+        # isAutoRepeat() -- an untracked direction must fall through to
+        # super() regardless of autorepeat, and a TRACKED one must never
+        # reach super() at all once accepted, autorepeat or not (Qt's
+        # C++-typed base implementation rejects a non-QKeyEvent, which an
+        # accepted-then-forwarded autorepeat release would otherwise hit).
+        if direction is None or direction not in self._held_arrows:
+            super().keyReleaseEvent(event)
+            return
+        event.accept()
+        if event.isAutoRepeat():
+            return   # the key is still physically held; only a genuine release stops the timer
+        self._held_arrows.discard(direction)
+        if not self._held_arrows:
+            self._nudge_timer.stop()
+
+    def focusOutEvent(self, event) -> None:
+        # A key can be physically released after focus has already moved
+        # elsewhere (or the window itself lost focus) -- Qt does not
+        # synthesize a keyReleaseEvent for that, so without this a held
+        # arrow could leave the repeat timer running forever.
+        self._held_arrows.clear()
+        self._nudge_timer.stop()
+        super().focusOutEvent(event)
+
+    def _nudge_interval_ms(self) -> int:
+        # Read LIVE every time (called on every timer restart AND every
+        # tick -- see _on_nudge_timer_tick) so a Settings change to
+        # param_marker_rate takes effect on a held key immediately, not
+        # only on the next fresh press.
+        rate = max(self.session.settings.param_marker_rate, 1e-6)
+        return max(1, round(1000.0 / rate))
+
+    def _on_nudge_timer_tick(self) -> None:
+        self._do_nudge()
+        self._nudge_timer.setInterval(self._nudge_interval_ms())
+
+    def _do_nudge(self) -> None:
+        if not self._held_arrows:
+            return
+        direction = sum(self._held_arrows, complex(0.0, 0.0))
+        if direction == 0:
+            return   # e.g. Left+Right both held -- they cancel, nothing to emit
+        self.param_nudged.emit(self.session.param + self._nudge_delta(direction))
+
+    def _nudge_delta(self, direction: complex) -> complex:
+        """A `param_marker_step`-pixel screen-space move in `direction`
+        (see _ARROW_DIRECTIONS), converted to a complex delta through THIS
+        pane's own current viewport -- differences two _pixel_to_complex
+        calls rather than re-deriving its affine scale factor by hand, so
+        this can never drift out of sync with the actual pixel<->complex
+        mapping every other interaction in this view already uses.
+        """
+        step = self.session.settings.param_marker_step
+        rect = self._display_rect()
+        origin = QPointF(rect.center())
+        moved = QPointF(origin.x() + direction.real * step, origin.y() - direction.imag * step)
+        return self._pixel_to_complex(moved) - self._pixel_to_complex(origin)
 
     def _apply_rubber_band_zoom(self, rect: QRect) -> None:
         top_left = self._pixel_to_complex(rect.topLeft())
@@ -2097,6 +2233,14 @@ class SandboxWindow(QMainWindow):
             # self._focused_pane is already the clicked pane; see
             # _on_param_changed_by_click, which reads it as "the clicked pane."
             view.param_changed.connect(self._on_param_changed_by_click)
+            # Same "no pane-capturing lambda needed" reasoning as
+            # param_changed above: keyPressEvent only fires on whichever
+            # ImageView actually has Qt keyboard focus, which mousePressEvent's
+            # own setFocus() call (plus StrongFocus's click-to-focus) keeps
+            # in sync with self._focused_pane -- see ImageView.param_nudged's
+            # own comment for why this is a SEPARATE signal/handler from
+            # param_changed, not a reuse of it.
+            view.param_nudged.connect(self._on_param_nudged)
             # Keeps the "Orbit seed z0" field showing the CURRENT z0
             # whenever one is seeded via a dynamical-plane click (P6's
             # "symmetry of input": the click path must populate the
@@ -2726,10 +2870,11 @@ class SandboxWindow(QMainWindow):
         # same underlying invalidation a plain field commit also does.
         self._apply_param_change(a)
 
-    def _apply_param_change(self, a: complex) -> None:
+    def _apply_param_change(self, a: complex, *, reset_dynamical_viewport: bool = True) -> None:
         """The ONE place session.param is ever assigned from user input --
-        the field commit and every parameter-plane click (coupled or
-        single-view-already-dynamical) funnel through here, so they
+        the field commit, every parameter-plane click (coupled or
+        single-view-already-dynamical), AND arrow-key marker nudging
+        (Stage 4, via _on_param_nudged) funnel through here, so they
         cannot diverge (P6's own requirement, extended to N panes).
 
         CACHE ASYMMETRY (Stage 3): render_parameter ignores the bound
@@ -2750,6 +2895,17 @@ class SandboxWindow(QMainWindow):
         switched here -- that is exactly Stage 3's "do NOT reset the
         clicked (parameter) pane's own viewport" requirement, and it
         falls out for free by just... not touching it.
+
+        `reset_dynamical_viewport` (Stage 4): the ONE exception to "every
+        dynamical pane's viewport resets to the default framing on every
+        param change." A held arrow can call this many times a second;
+        resetting the partner pane's viewport on every one of those ticks
+        would snap it back to the default framing every tick instead of
+        letting the user watch the SAME framing evolve continuously as the
+        parameter moves -- exactly backwards from what "continuous
+        re-render" / "smooth held-arrow sweeps" are supposed to mean.
+        False ONLY from _on_param_nudged below; every other caller keeps
+        today's reset-to-default behavior, unchanged.
         """
         self.session.param = a
         self.param_field.set_value(a)
@@ -2759,16 +2915,29 @@ class SandboxWindow(QMainWindow):
             if pane.render_mode in PARAMETER_PLANE_MODES:
                 pane.image_view.update()   # move its marker; nothing else about it changed
                 continue
-            center, scale = default_view_for_mode(self.session.map, self.session.param,
-                                                  pane.render_mode)
-            vp = pane.viewport
-            pane.viewport = cdx.Viewport(center, scale, vp.resolution)
+            if reset_dynamical_viewport:
+                center, scale = default_view_for_mode(self.session.map, self.session.param,
+                                                      pane.render_mode)
+                vp = pane.viewport
+                pane.viewport = cdx.Viewport(center, scale, vp.resolution)
             pane.image_view.refresh_layers()
             pane.image_view.refresh_orbit_for_new_param()
             if pane is self._focused_pane:
                 self._update_status_bar()
             self._debounce_timers[pane].stop()
             self._start_render(pane)
+
+    def _on_param_nudged(self, a: complex) -> None:
+        """Arrow-key marker nudging (Stage 4, ImageView.param_nudged): the
+        SAME underlying invalidation _apply_param_change already gives
+        every other param-setting path, just without resetting a dynamical
+        partner pane's viewport on every tick -- see
+        _apply_param_change's own `reset_dynamical_viewport` doc comment
+        for why. Unlike _on_param_changed_by_click, this never switches
+        any pane's plane/mode either, coupled or single-view: nudging the
+        marker is not a request to stop looking at the parameter plane.
+        """
+        self._apply_param_change(a, reset_dynamical_viewport=False)
 
     # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
     def _on_z0_field_committed(self, z0: complex) -> None:
