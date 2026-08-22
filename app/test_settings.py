@@ -173,8 +173,7 @@ def main() -> None:
                           colour_palette="magma", colour_scaling="histogram", colour_period=20.0,
                           greens_band_width=2.0, greens_period_bands=8.0, greens_contour=True,
                           greens_potential="conformal",
-                          param_marker_step=6.0, param_marker_rate=15.0,
-                          parameter_strategy="fastest_capture", parameter_critical_index=2)
+                          param_marker_step=6.0, param_marker_rate=15.0)
         save_settings(custom, path)
         roundtripped = load_settings(path)
         check(roundtripped == custom, "save_settings/load_settings round-trips every field exactly")

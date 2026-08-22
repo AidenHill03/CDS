@@ -533,53 +533,6 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 
     return {};   // parabolic or too ambiguous to classify -- caller falls back to Pragmatic
 }
-
-// -----------------------------------------------------------------------------
-// Stage 4's three ParameterStrategy combination rules -- see that enum's own
-// doc comment for the reasoning behind each. Every `fates` entry is one
-// distinct critical point's own OrbitFate against the fixed, single-point
-// infinity attractor (see render_parameter_rational) -- fate.resolved means
-// THAT critical orbit escaped to infinity; fate.nu is its own smooth
-// escape-rate value. `critical_index` is only read for PerCritical, and is
-// clamped into range (never a caller-supplied out-of-bounds crash) rather
-// than treated as an error -- a Custom map's own critical-point COUNT can
-// legitimately change as the user edits it, and a UI holding a now-stale
-// index should degrade to "whichever one still exists," not fail the
-// render outright.
-// -----------------------------------------------------------------------------
-double combine_parameter_fates(const std::vector<OrbitFate>& fates, ParameterStrategy strategy,
-                               int critical_index) {
-    if (fates.empty()) return 0.0;
-    switch (strategy) {
-        case ParameterStrategy::PerCritical: {
-            const int clamped = std::max(0, std::min(critical_index,
-                                                      static_cast<int>(fates.size()) - 1));
-            const OrbitFate& f = fates[static_cast<std::size_t>(clamped)];
-            return f.resolved ? f.nu : 0.0;
-        }
-        case ParameterStrategy::FastestCapture: {
-            double best = 0.0;
-            bool any = false;
-            for (const auto& f : fates) {
-                if (f.resolved && (!any || f.nu < best)) { best = f.nu; any = true; }
-            }
-            return best;   // 0.0 iff NO critical orbit ever escapes to infinity at all
-        }
-        case ParameterStrategy::AllCaptured:
-        default: {
-            // 0.0 iff EVERY critical orbit stays bounded (nothing resolved
-            // against infinity, so `worst` is never touched); otherwise the
-            // SLOWEST-escaping orbit's own value -- the one that stayed
-            // "in the set" the longest, i.e. the pixel's own distance from
-            // the generalized connectedness-locus boundary.
-            double worst = 0.0;
-            for (const auto& f : fates) {
-                if (f.resolved && f.nu > worst) worst = f.nu;
-            }
-            return worst;
-        }
-    }
-}
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -697,12 +650,14 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // -----------------------------------------------------------------------------
 // Parameter plane
 // -----------------------------------------------------------------------------
-// The pre-Stage-4 escape-radius path, UNCHANGED, extracted the same way as
-// every other render_*_polynomial split -- correct and fast for a
-// CERTIFIED polynomial, where there is only ever ONE critical point that
-// distinguishes parameter pixels (see render_parameter's own doc comment),
-// so `strategy`/`critical_index` have nothing to combine and are ignored.
-Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) const {
+// escape_radius-based escape-TIME -- see render_parameter's own header doc
+// comment for why this mode stays escape_radius-based (a visualization
+// knob, not a set-membership invariant) even after Stage 2/3's sphere-
+// aware, escape-radius-free treatment of Julia/Green's, and for why a
+// brief Stage 4 detour into a multi-critical, escape-radius-free rational
+// path here was retired in favour of Parameter_basin as its own dedicated
+// mode.
+Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
     const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -763,84 +718,6 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
         }
     }, cancel);
     return img;
-}
-
-// Stage 4's sphere-aware, MULTI-critical rational path. Per pixel: get
-// EVERY distinct critical point at that pixel's parameter (one, for a
-// non-Custom rational family -- see ParameterStrategy's own doc comment;
-// possibly several for a genuinely multi-critical Custom map), classify
-// EACH one's own orbit via classify_rational_orbit against the SAME fixed,
-// single-point infinity attractor render_parameter_greens_rational already
-// uses (see its own doc comment for why this deliberately is NOT a
-// per-pixel find_attractors call), then combine via `strategy`
-// (combine_parameter_fates, above).
-Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critical_index,
-                                          const std::atomic<bool>* cancel) const {
-    const int res = view_.resolution;
-    Image img(res, res);
-
-    // See render_parameter_polynomial for the three-path critical-point/
-    // step dispatch this mirrors -- only difference is the critical-point
-    // SOURCE returns a LIST here (distinct_critical_points), not a single
-    // Cplx, for the `custom` (general) case; `recognized` still uses the
-    // single native representative (Map::critical_point), the SAME
-    // established "one representative suffices" choice every other
-    // built-in-shaped path already makes.
-    const RationalMap* custom = map_.custom_map();
-    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
-
-    const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
-    const std::vector<Cplx> fixed_crit_pts =
-        cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
-
-    const std::vector<double> ar{kInf};
-    const std::vector<double> ai{0.0};
-    const std::vector<int>    aid{1};
-    const double tol = settings_.tol;
-
-    // A critical point at infinity itself (e.g. a McMullen-shaped map's own
-    // criticality there) can't be fed to step() as a starting value --
-    // same reasoning, same fixed proxy magnitude, as find_attractors' own
-    // identical handling (cdx/src/analysis.cpp) for an infinite seed.
-    constexpr double kCriticalInfProxy = 1e12;
-
-    parallel_columns([&](int col) {
-        for (int row = 0; row < res; ++row) {
-            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
-
-            std::vector<Cplx> crit_pts;
-            if (recognized) crit_pts.push_back(Map::critical_point(*recognized, p));
-            else if (cp_fixed) crit_pts = fixed_crit_pts;
-            else if (custom) crit_pts = custom->distinct_critical_points(p);
-            else crit_pts.push_back(Map::critical_point(map_.family(), p));
-
-            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
-            auto step = [&](double& zr, double& zi) {
-                if (recognized) Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
-                else if (custom) compiled.step(zr, zi);
-                else map_.step_with_param(p, zr, zi);
-            };
-
-            std::vector<OrbitFate> fates;
-            fates.reserve(crit_pts.size());
-            for (Cplx c0 : crit_pts) {
-                const bool c0_finite = std::isfinite(c0.real()) && std::isfinite(c0.imag());
-                const double zr0 = c0_finite ? c0.real() : kCriticalInfProxy;
-                const double zi0 = c0_finite ? c0.imag() : 0.0;
-                fates.push_back(classify_rational_orbit(zr0, zi0, step, ar, ai, aid, tol,
-                                                        settings_.max_iter));
-            }
-
-            img.at(col, row) = combine_parameter_fates(fates, strategy, critical_index);
-        }
-    }, cancel);
-    return img;
-}
-
-Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrategy strategy,
-                                 int critical_index) const {
-    if (map_.escape_certified()) return render_parameter_polynomial(cancel);
-    return render_parameter_rational(strategy, critical_index, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -919,14 +796,14 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
 // Stage 3's sphere-aware rational path -- see render_parameter_greens' own
 // header doc comment for why this tracks chordal distance to a FIXED,
 // trivial one-point "infinity" attractor rather than a per-parameter-pixel
-// find_attractors call. Stage 4's own render_parameter_rational (below)
-// solves the harder multi-critical version of this same "which critical
-// point(s), and against what" question for render_parameter itself; this
-// function's own question stays the narrower "does THE critical orbit
-// escape to infinity," which never needed find_attractors either. Same
-// classify_rational_orbit/conformal_potential pair render_greens_rational
-// uses, just with a per-PIXEL step closure (the parameter varies per pixel
-// here) instead of a per-render-fixed StepPlan.
+// find_attractors call. render_parameter_basin (Parameter_basin) solves
+// the harder multi-critical version of this same "which critical point(s),
+// and against what" question; this function's own question stays the
+// narrower "does THE critical orbit escape to infinity," which never
+// needed find_attractors either. Same classify_rational_orbit/
+// conformal_potential pair render_greens_rational uses, just with a
+// per-PIXEL step closure (the parameter varies per pixel here) instead of
+// a per-render-fixed StepPlan.
 Image Renderer::render_parameter_greens_rational(GreensPotential potential, Image* exact,
                                                   const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;

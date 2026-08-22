@@ -737,110 +737,85 @@ int main() {
               "flagged and abandoned");
     }
 
-    // ---- MILESTONE ACCEPTANCE TEST (Stage 4): rational parameter plane, ------------
-    // multi-critical, three strategies, escape-radius-free.
-    std::printf("\nMILESTONE ACCEPTANCE TEST (Stage 4): rational parameter plane is "
-               "escape_radius-invariant, multi-critical, three strategies:\n");
+    // ---- Parameter (escape-time) restored: quadratic still reproduces Mandelbrot ---
+    // The Stage 4 multi-critical/escape-radius-free detour into render_
+    // parameter was retired -- render_parameter is back to its pre-Stage-4
+    // escape-time form (see its own header doc comment). This is the
+    // property test standing in for that revert: Parameter is again an
+    // escape_radius-governed VISUALIZATION, not an escape_radius-invariant
+    // set-membership computation (that's Julia/Green's own job).
+    std::printf("\nParameter (escape-time, restored): quadratic reproduces the Mandelbrot "
+               "set, escape_radius genuinely changes the render:\n");
     {
-        // z^2 + 0.3z + a/z^2 -- deliberately NOT one of the six recognized
-        // shapes (the extra 0.3z term breaks McMullen's own z -> iz
-        // rotational symmetry, so its critical points do NOT all share
-        // escape behaviour the way a real mcmullen(2)'s do -- see
-        // ParameterStrategy's own doc comment for why a RECOGNIZED shape
-        // stays on the single-representative path instead), and has a
-        // pole (not certified) -- exactly the case Stage 4's own multi-
-        // critical path exists for.
-        RationalMap m("multi_crit");
-        m.add_poly({1.0, 0.0}, 2, 0, "z^2");
-        m.add_poly({0.3, 0.0}, 1, 0, "0.3z");
-        m.add_pole({0.0, 0.0}, {1.0, 0.0}, 2, 1, "a/z^2");
-        check(polynomial_escape_certified(m) == false, "sanity: has a pole, not certified");
+        RationalMap mandel = RationalMap::mandelbrot();
+        const Viewport v{{-0.5, 0.0}, 1.5, 81};
+        Renderer r_r2(Map::custom(mandel), v, RenderSettings{80, 2.0, 1e-6, 1});
+        Renderer r_r10(Map::custom(mandel), v, RenderSettings{80, 10.0, 1e-6, 1});
+        const Image param_r2 = r_r2.render_parameter();
+        const Image param_r10 = r_r10.render_parameter();
 
-        const Cplx a0{0.3, 0.1};
-        check(recognize_family(m) == std::nullopt,
-              "sanity: NOT recognized as any of the six built-in shapes -- genuinely "
-              "exercises the general multi-critical path, not the single-representative one");
-        const auto crit_pts = m.distinct_critical_points(a0);
-        check(crit_pts.size() >= 2,
-              "sanity: genuinely multiple distinct critical points at this parameter");
+        // c=0 (deep in the set) has escape-time exactly 0 regardless of
+        // escape_radius.
+        const Cplx c_in{0.0, 0.0};
+        Renderer r_probe(Map::custom(mandel), Viewport{c_in, 0.01, 1}, RenderSettings{80, 2.0, 1e-6, 1});
+        check(r_probe.render_parameter().data[0] == 0.0,
+              "c=0 (deep in the Mandelbrot set) has escape-time exactly 0");
 
-        const Viewport v{{0.0, 0.0}, 2.0, 61};
-        Renderer r2(Map::custom(m, a0), v, RenderSettings{80, 2.0, 1e-6, 1});
-        Renderer r10(Map::custom(m, a0), v, RenderSettings{80, 10.0, 1e-6, 1});
+        bool r2_has_nonzero = false, r10_has_nonzero = false;
+        for (double v2 : param_r2.data) if (v2 > 0.0) r2_has_nonzero = true;
+        for (double v10 : param_r10.data) if (v10 > 0.0) r10_has_nonzero = true;
+        check(r2_has_nonzero && r10_has_nonzero,
+              "sanity: this window has genuinely escaping (outside-the-set) pixels at "
+              "both escape_radius settings");
 
-        const ParameterStrategy strategies[] = {ParameterStrategy::AllCaptured,
-                                                ParameterStrategy::FastestCapture,
-                                                ParameterStrategy::PerCritical};
-        const char* strategy_names[] = {"AllCaptured", "FastestCapture", "PerCritical"};
-        for (int s = 0; s < 3; ++s) {
-            const Image img2 = r2.render_parameter(nullptr, strategies[s], 0);
-            const Image img10 = r10.render_parameter(nullptr, strategies[s], 0);
-            bool identical = true;
-            for (std::size_t i = 0; i < img2.data.size(); ++i) {
-                if (img2.data[i] != img10.data[i]) identical = false;
-            }
-            std::printf("  (%s)\n", strategy_names[s]);
-            check(identical,
-                  "ACCEPTANCE: escape_radius=2 and escape_radius=10 produce "
-                  "BYTE-IDENTICAL values");
+        bool differs = false;
+        for (std::size_t i = 0; i < param_r2.data.size(); ++i) {
+            if (param_r2.data[i] != param_r10.data[i]) differs = true;
         }
+        check(differs,
+              "RESTORED BEHAVIOR: escape_radius=2 vs escape_radius=10 give DIFFERENT "
+              "Parameter renders -- unlike Julia/Green's, this mode is a VISUALIZATION "
+              "where escape_radius is a real tuning knob, not an invariant of the map");
+    }
 
-        const Image all_captured = r2.render_parameter(nullptr, ParameterStrategy::AllCaptured);
-        const Image fastest = r2.render_parameter(nullptr, ParameterStrategy::FastestCapture);
-        const Image pc0 = r2.render_parameter(nullptr, ParameterStrategy::PerCritical, 0);
-        const Image pc1 = r2.render_parameter(nullptr, ParameterStrategy::PerCritical, 1);
-
-        bool ge_everywhere = true;
-        for (std::size_t i = 0; i < all_captured.data.size(); ++i) {
-            if (all_captured.data[i] < fastest.data[i] - 1e-9) ge_everywhere = false;
-        }
-        check(ge_everywhere,
-              "AllCaptured >= FastestCapture at EVERY pixel -- the worst-behaved critical "
-              "orbit's escape value can never be less than the best-behaved one's, over "
-              "the SAME underlying set of orbits");
-
-        bool pc_differs = false;
-        for (std::size_t i = 0; i < pc0.data.size(); ++i) {
-            if (pc0.data[i] != pc1.data[i]) pc_differs = true;
-        }
-        check(pc_differs,
-              "PerCritical(0) and PerCritical(1) differ somewhere -- genuinely two "
-              "INDEPENDENT critical-point orbits are tracked, not the same one duplicated");
-
-        bool implication_holds = true;
-        for (std::size_t i = 0; i < all_captured.data.size(); ++i) {
-            if (all_captured.data[i] == 0.0 && (pc0.data[i] != 0.0 || pc1.data[i] != 0.0))
-                implication_holds = false;
-            if ((pc0.data[i] != 0.0 || pc1.data[i] != 0.0) && all_captured.data[i] == 0.0)
-                implication_holds = false;
-        }
-        check(implication_holds,
-              "AllCaptured == 0 at a pixel iff EVERY tracked critical orbit (including "
-              "both index 0 and 1) also reports 0 under PerCritical -- the combination "
-              "rule is internally consistent, not just plausible-looking");
-
-        // ---- degenerate case: a built-in RATIONAL family still renders sensibly ----
-        Renderer mc(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 41},
-                   RenderSettings{80, 2.0, 1e-6, 1});
+    // ---- Parameter (escape-time, restored): a rational family renders quickly again --
+    std::printf("\nParameter (escape-time, restored): a rational family is fast again "
+               "(early exit on escape), not uniform:\n");
+    {
+        // McMullen2 (z^2 + a/z^2): a built-in RATIONAL family (has a pole,
+        // not certified) -- exactly the case whose Parameter render went
+        // uniform under the retired Stage 4 escape-to-infinity path (every
+        // pixel ran to max_iter, since McMullen2's own critical orbits
+        // don't need to reach INFINITY specifically to be "interesting" --
+        // they can settle into finite attracting cycles that the retired
+        // path had no way to report as anything but "unresolved").
+        Renderer mc(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 61},
+                   RenderSettings{200, 2.0, 1e-6, 1});
         check(mc.map().escape_certified() == false,
               "sanity: McMullen2 is a built-in RATIONAL (non-certified) family");
-        const Image mc_all = mc.render_parameter(nullptr, ParameterStrategy::AllCaptured);
-        const Image mc_fast = mc.render_parameter(nullptr, ParameterStrategy::FastestCapture);
-        const Image mc_pc0 = mc.render_parameter(nullptr, ParameterStrategy::PerCritical, 0);
-        bool degenerate_identical = true;
-        for (std::size_t i = 0; i < mc_all.data.size(); ++i) {
-            if (mc_all.data[i] != mc_fast.data[i] || mc_all.data[i] != mc_pc0.data[i])
-                degenerate_identical = false;
-        }
-        check(degenerate_identical,
-              "DEGENERATE CASE: a built-in rational family (only ever one representative "
-              "critical point tracked) gives IDENTICAL results under all three "
-              "strategies -- nothing to combine, so nothing should differ");
+
+        const Image mc_param = mc.render_parameter();
         bool mc_some_nonzero = false, mc_some_zero = false;
-        for (double v : mc_all.data) { if (v > 0.0) mc_some_nonzero = true; else mc_some_zero = true; }
+        for (double v : mc_param.data) { if (v > 0.0) mc_some_nonzero = true; else mc_some_zero = true; }
         check(mc_some_nonzero && mc_some_zero,
-              "...and it's a REAL classification (some pixels escape, some don't), not a "
-              "flat degenerate image");
+              "RESTORED BEHAVIOR: McMullen2's Parameter render has BOTH escaped (nonzero) "
+              "and non-escaped (0) pixels -- a real escape-time classification, not the "
+              "retired path's uniform max_iter plane");
+
+        // escape_radius genuinely matters again for this rational family
+        // too -- a different, real acceptance target from the retired
+        // path's escape-radius INVARIANCE (which correctly no longer
+        // applies here at all, per render_parameter's own doc comment).
+        Renderer mc_r10(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 61},
+                        RenderSettings{200, 10.0, 1e-6, 1});
+        bool mc_differs = false;
+        const Image mc_param_r10 = mc_r10.render_parameter();
+        for (std::size_t i = 0; i < mc_param.data.size(); ++i) {
+            if (mc_param.data[i] != mc_param_r10.data[i]) mc_differs = true;
+        }
+        check(mc_differs,
+              "...and escape_radius genuinely changes McMullen2's Parameter render too, "
+              "the same VISUALIZATION-knob behavior as the certified-polynomial case above");
     }
 
     std::printf("\n%s (%d failure%s)\n",

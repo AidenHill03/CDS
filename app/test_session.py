@@ -22,7 +22,6 @@ import numpy as np
 import cdx
 from app.orbit_tracker import OrbitTracker
 from app.session import PRESET_FAMILY_NAMES, Session, render_map
-from app.settings import Settings
 
 failures = 0
 
@@ -118,67 +117,6 @@ def main() -> None:
     check(poly_julia.shape == (41, 41),
           "ACCEPTANCE: a certified polynomial's julia render is STILL a plain 2D array, "
           "not stacked -- Stage 2 didn't change its shape or meaning")
-
-    # ---- Stage 4: multi-critical rational parameter plane, three strategies -------
-    print("\nrender mode dispatch: multi-critical rational parameter plane (Stage 4):")
-    # z^2 + 0.3z + a/z^2 -- same construction as the C++ acceptance test
-    # (cdx/test/test_analysis.cpp): NOT one of the six recognized built-in
-    # shapes (the extra 0.3z term breaks McMullen's own rotational
-    # symmetry) and has a pole (not certified), so it genuinely exercises
-    # the general multi-critical path rather than the single-representative
-    # one.
-    multi_crit = cdx.RationalMap("multi_crit")
-    multi_crit.add_poly(complex(1.0, 0.0), 2, 0, "z^2")
-    multi_crit.add_poly(complex(0.3, 0.0), 1, 0, "0.3z")
-    multi_crit.add_pole(complex(0.0, 0.0), complex(1.0, 0.0), 2, 1, "a/z^2")
-    check(cdx.polynomial_escape_certified(multi_crit) is False,
-          "sanity: has a pole, not certified -- takes the rational multi-critical path")
-
-    mc_param_vp = cdx.Viewport(complex(0, 0), 2.0, 41)
-    mc_settings = cdx.RenderSettings(60, 2.0, 1e-6, 1)
-
-    all_captured = render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter",
-                              strategy="all_captured")
-    fastest = render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter",
-                         strategy="fastest_capture")
-    per_crit_0 = render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter",
-                            strategy="per_critical", critical_index=0)
-    per_crit_1 = render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter",
-                            strategy="per_critical", critical_index=1)
-    check(all_captured.shape == (41, 41) == fastest.shape == per_crit_0.shape == per_crit_1.shape,
-          "every strategy's render matches the viewport resolution, as a plain 2D array")
-    check(bool(np.all(all_captured >= fastest - 1e-9)),
-          "AllCaptured >= FastestCapture at every pixel, through the FULL app dispatch "
-          "(string -> cdx.ParameterStrategy -> cdx.Renderer.render_parameter)")
-    check(not np.array_equal(per_crit_0, per_crit_1),
-          "PerCritical(0) and PerCritical(1) differ -- the `critical_index` string-level "
-          "argument genuinely reaches the underlying per-critical-point selection")
-    check(np.array_equal(render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter"),
-                         all_captured),
-          "the default strategy (no `strategy` argument at all) is all_captured, matching "
-          "app.session._parameter_strategy's own documented default")
-
-    # ACCEPTANCE: escape_radius must not affect classification AT ALL, for
-    # every strategy, through the full render_map dispatch.
-    mc_settings_r10 = cdx.RenderSettings(60, 10.0, 1e-6, 1)
-    for strat in ("all_captured", "fastest_capture", "per_critical"):
-        r2 = render_map(multi_crit, 0j, mc_param_vp, mc_settings, "parameter", strategy=strat)
-        r10 = render_map(multi_crit, 0j, mc_param_vp, mc_settings_r10, "parameter", strategy=strat)
-        check(np.array_equal(r2, r10),
-              f"ACCEPTANCE ({strat}): escape_radius=2 vs 10 are BYTE-IDENTICAL through the "
-              "full render_map dispatch")
-
-    # Session-level: parameter_strategy/parameter_critical_index in Settings
-    # reach render_parameter through Session.render, not just the free
-    # render_map function.
-    s_strategy = Session(settings=Settings(parameter_strategy="fastest_capture"))
-    s_strategy.map = multi_crit
-    s_strategy.param = 0j
-    s_strategy.render_settings = mc_settings
-    via_session = s_strategy.render(mc_param_vp, "parameter")
-    check(np.array_equal(via_session, fastest),
-          "Session.render('parameter') picks up session.settings.parameter_strategy, "
-          "matching the equivalent direct render_map(..., strategy='fastest_capture') call")
 
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")

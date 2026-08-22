@@ -113,18 +113,6 @@ DEFAULT_GREENS_POTENTIAL = "pragmatic"
 DEFAULT_PARAM_MARKER_STEP = 2.0
 DEFAULT_PARAM_MARKER_RATE = 20.0
 
-# Stage 4: which of the three multi-critical strategies "parameter" mode
-# uses for a RATIONAL map (see cdx.ParameterStrategy's own doc comment) --
-# ignored entirely for a certified polynomial, where there is only ever
-# one critical point to track. parameter_critical_index only matters for
-# the "per_critical" strategy; clamped (not rejected) out of range by the
-# renderer itself (see combine_parameter_fates in cdx/src/renderer.cpp),
-# since a Custom map's own critical-point count can change as the user
-# edits it -- a stale index should degrade gracefully, not error.
-PARAMETER_STRATEGY_CHOICES = ("all_captured", "fastest_capture", "per_critical")
-DEFAULT_PARAMETER_STRATEGY = "all_captured"
-DEFAULT_PARAMETER_CRITICAL_INDEX = 0
-
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -218,11 +206,6 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "param_marker_rate": FieldSpec(float, 0.0, 120.0, DEFAULT_PARAM_MARKER_RATE,
                                    "Parameter marker repeat rate (moves/sec)",
                                    exclusive_minimum=True),
-    "parameter_strategy": FieldSpec(str, 0, 0, DEFAULT_PARAMETER_STRATEGY,
-                                    "Parameter-plane strategy (rational maps only)",
-                                    choices=PARAMETER_STRATEGY_CHOICES),
-    "parameter_critical_index": FieldSpec(int, 0, 63, DEFAULT_PARAMETER_CRITICAL_INDEX,
-                                          "Parameter-plane critical-point index (per_critical only)"),
 }
 
 
@@ -243,8 +226,6 @@ class Settings:
     greens_potential: str = DEFAULT_GREENS_POTENTIAL
     param_marker_step: float = DEFAULT_PARAM_MARKER_STEP
     param_marker_rate: float = DEFAULT_PARAM_MARKER_RATE
-    parameter_strategy: str = DEFAULT_PARAMETER_STRATEGY
-    parameter_critical_index: int = DEFAULT_PARAMETER_CRITICAL_INDEX
 
     def sanitized(self) -> Settings:
         """A copy with every field individually validated, out-of-range or

@@ -132,28 +132,11 @@ def _greens_potential(potential: str) -> cdx.GreensPotential:
             else cdx.GreensPotential.Pragmatic)
 
 
-_PARAMETER_STRATEGIES = {
-    "all_captured": cdx.ParameterStrategy.AllCaptured,
-    "fastest_capture": cdx.ParameterStrategy.FastestCapture,
-    "per_critical": cdx.ParameterStrategy.PerCritical,
-}
-
-
-def _parameter_strategy(strategy: str) -> cdx.ParameterStrategy:
-    """Translates app.settings.Settings.parameter_strategy's plain string
-    (Stage 4 -- same string-typed-setting convention greens_potential
-    above already uses) into the cdx enum render_parameter takes.
-    """
-    return _PARAMETER_STRATEGIES.get(strategy, cdx.ParameterStrategy.AllCaptured)
-
-
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
                cancel: cdx.CancelToken | None = None,
                cache: RenderCache | None = None,
-               potential: str = "pragmatic",
-               strategy: str = "all_captured",
-               critical_index: int = 0):
+               potential: str = "pragmatic"):
     """Renders `rational_map` at `param` over `viewport`/`settings`, in the
     given mode. A free function rather than a Session method, and taking
     every value explicitly rather than reading them off a Session, so a
@@ -179,14 +162,6 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     numerically -- see cdx.GreensPotential's own doc comment). Ignored
     entirely for a certified polynomial (the two already coincide there)
     and for every other mode.
-
-    `strategy`/`critical_index` (Stage 4) select how "parameter" mode
-    combines a RATIONAL map's multiple critical-point orbits into one
-    pixel -- "all_captured" (default), "fastest_capture", or
-    "per_critical" (using `critical_index` into cdx.RationalMap.
-    distinct_critical_points' own ordering) -- see cdx.ParameterStrategy's
-    own doc comment. Ignored for a certified polynomial (only ever one
-    critical point to track there) and for every other mode.
 
     `cache`, if given, is consulted BEFORE rendering anything (a hit skips
     computation entirely, including find_attractors for basin mode) and
@@ -240,9 +215,7 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     if cache is not None:
         key = make_key(rational_map.serialize(), param, mode, viewport.center, viewport.scale,
                        viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol,
-                       potential if mode in ("greens", "parameter_greens") else None,
-                       strategy if mode == "parameter" else None,
-                       critical_index if mode == "parameter" else None)
+                       potential if mode in ("greens", "parameter_greens") else None)
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -269,7 +242,7 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
             values, labels = renderer.render_julia(cancel, cycles)
             array = np.stack([values, labels])
     elif mode == "parameter":
-        array = renderer.render_parameter(cancel, _parameter_strategy(strategy), critical_index)
+        array = renderer.render_parameter(cancel)
     elif mode == "basin":
         # find_attractors is a real cost for a root-finding-heavy custom
         # map, but only on a cache MISS now -- a repeat request at the same
@@ -374,9 +347,7 @@ class Session:
         """
         return render_map(self.map, self.param, viewport, self.render_settings,
                           render_mode, cancel=cancel, cache=self.cache,
-                          potential=self._settings.greens_potential,
-                          strategy=self._settings.parameter_strategy,
-                          critical_index=self._settings.parameter_critical_index)
+                          potential=self._settings.greens_potential)
 
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/

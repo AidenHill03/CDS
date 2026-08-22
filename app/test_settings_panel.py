@@ -173,31 +173,6 @@ def main() -> None:
     check(applied[-1].param_marker_step == 9.0 and applied[-1].param_marker_rate == 30.0,
           "the applied Settings reflects both spinbox values")
 
-    # ---- Render milestone Stage 4: parameter_strategy/critical_index --------------
-    # (a DIFFERENT "Stage 4" from the arrow-key-nudging batch's own -- this one is
-    # the sphere-aware render milestone's multi-critical parameter plane.)
-    print("\nRender milestone Stage 4 (parameter_strategy/parameter_critical_index -- "
-         "switchable in-app):")
-    strategy_widget = panel._widgets["parameter_strategy"]
-    index_widget = panel._widgets["parameter_critical_index"]
-    check(isinstance(strategy_widget, QComboBox),
-          "parameter_strategy gets a QComboBox, not a spinbox")
-    check(strategy_widget.currentText() == session.settings.parameter_strategy,
-          "the combo box starts on session.settings' current value (all_captured)")
-    check(index_widget.value() == session.settings.parameter_critical_index,
-          "the critical-index spinbox starts on session.settings' current value (0)")
-
-    applied.clear()
-    strategy_widget.setCurrentText("per_critical")
-    index_widget.setValue(3)
-    panel._apply()
-    check(len(applied) == 1,
-          "changing only the strategy combo box/critical-index spinbox still triggers a "
-          "valid Apply")
-    check(applied[-1].parameter_strategy == "per_critical" and
-         applied[-1].parameter_critical_index == 3,
-          "the applied Settings reflects both the combo-box selection and the spinbox value")
-
     # ---- Clear Cache ------------------------------------------------------------------
     print("\nclear cache:")
     session.cache.put(("k",), __import__("numpy").zeros((4, 4)))
