@@ -509,7 +509,7 @@ OrbitFate classify_rational_orbit(double zr, double zi, Step&& step,
 // pin it down the way Boettcher's does), so this value can run either
 // direction. That is a genuine, acknowledged modeling limitation, not a
 // bug: it is still a perfectly good scalar for palette/equipotential-band
-// colouring (colour_scalar_field only needs a scalar field, not a
+// coloring (color_scalar_field only needs a scalar field, not a
 // particular sign), just not one that reduces to the Boettcher convention.
 //
 // PARABOLIC / AMBIGUOUS (|lambda| ~= 1, or no reliable local-rate data at
@@ -1018,7 +1018,7 @@ Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const 
             // wrong, not just overflow-prone: measured on z^2+c, the
             // accumulated sum saturates near 58 while degree^max_iter
             // (2^200) is ~1.6e60, so G ~ 1e-59 everywhere -- a constant
-            // field that renders flat gray at any colour scaling, not a
+            // field that renders flat gray at any color scaling, not a
             // dead pixel here and there. Per-pixel normalization at each
             // pixel's own (usually small) escape step keeps values
             // well-scaled: ~83% of pixels nonzero with genuine ~1e56

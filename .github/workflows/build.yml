@@ -152,7 +152,7 @@ jobs:
         run: |
           export QT_QPA_PLATFORM_PLUGIN_PATH="${{ steps.qt_plugins.outputs.path }}"
           set -e
-          for mod in app.test_about_dialog app.test_colour app.test_complex_field \
+          for mod in app.test_about_dialog app.test_color app.test_complex_field \
                      app.test_facts_panel app.test_library_panel app.test_metadata_header \
                      app.test_orbit_panel app.test_orbit_tracker app.test_render_cache \
                      app.test_sandbox app.test_session app.test_settings \

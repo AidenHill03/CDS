@@ -127,7 +127,7 @@ def _swap_terms(terms, i: int, j: int, fields: tuple[str, ...]) -> bool:
 def _greens_potential(potential: str) -> cdx.GreensPotential:
     """Translates app.settings.Settings.greens_potential's plain string
     (see its own FieldSpec -- "pragmatic"/"conformal", the same
-    string-typed-setting convention colour_palette/colour_scaling already
+    string-typed-setting convention color_palette/color_scaling already
     use) into the cdx enum render_greens/render_parameter_greens actually
     take. Kept a free function rather than inlined at each call site since
     both "greens" and "parameter_greens" need it.
@@ -182,13 +182,13 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         RATIONAL map (Stage 2: has poles, not cdx.polynomial_escape_
         certified) -- index 0 is the smooth chordal approach-rate value (0
         = unresolved), index 1 is which attractor (Cycle.id) each pixel
-        reached (0 = unresolved). ONLY index 0 is actually coloured
-        (through colour_escape_time, the SAME palette/scaling pipeline a
+        reached (0 = unresolved). ONLY index 0 is actually colored
+        (through color_escape_time, the SAME palette/scaling pipeline a
         certified polynomial's plain array already goes through -- see
         app/sandbox.py's array_to_qimage, "GOVERNING PRINCIPLE"); index 1
         is kept only for the cursor readout to report which basin a pixel
         is in (see ImageView._sample_at_pixel) -- which basin was reached
-        is BASIN mode's own question, not something Julia colours by. For
+        is BASIN mode's own question, not something Julia colors by. For
         a CERTIFIED polynomial (the common case), still a plain 2D array
         -- today's escape-time values, UNCHANGED -- since there is no
         label concept on that path at all (see cdx::Renderer::
@@ -196,8 +196,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
       - "basin" returns a STACKED 3D array, shape (2, height, width):
         index 0 is the label (0 = unresolved, else the basin/cycle id, per
         cdx::Renderer::render_basin), index 1 is the iteration count each
-        pixel took to resolve -- for basin SHADING (see app/colour.py's
-        colour_basin). Stacked into one array rather than returned as a
+        pixel took to resolve -- for basin SHADING (see app/color.py's
+        color_basin). Stacked into one array rather than returned as a
         tuple so byte-accounting stays simple (a single array's .nbytes).
       - "greens"/"parameter_greens" return a plain 2D array -- the
         potential G(z) (or G_M(c) on the parameter plane) -- for a

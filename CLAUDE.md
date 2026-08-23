@@ -53,7 +53,7 @@ rendering.
   2^200 is already out of range) — it was mathematically wrong: on
   z²+c the accumulated sum saturates around 58 while `degree^max_iter`
   is astronomically larger, so `G` came out ~1e-59 everywhere, a
-  constant field that renders flat gray at any colour scaling. The
+  constant field that renders flat gray at any color scaling. The
   correct escape-rate potential is `G(z) = log|z_n| / degree^n`, using
   the pixel's OWN escape iteration `n`, not `max_iter` — non-escaping
   pixels are exactly 0. This also removes the overflow case entirely

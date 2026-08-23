@@ -597,7 +597,7 @@ PYBIND11_MODULE(cdx, m) {
              "took to resolve (not a meaningful 'convergence speed' where "
              "labels==0 -- see Renderer::render_basin's own doc comment). "
              "For basin SHADING: hue from labels, brightness from "
-             "iterations (see app/colour.py's colour_basin).")
+             "iterations (see app/color.py's color_basin).")
 
         .def("render_greens",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,

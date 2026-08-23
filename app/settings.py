@@ -23,10 +23,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-# Pure-numpy, no Qt/cdx dependency (see app/colour.py's own docstring) --
+# Pure-numpy, no Qt/cdx dependency (see app/color.py's own docstring) --
 # importing it here doesn't compromise this module's own "must stay
 # importable without the cdx extension" property.
-from app.colour import PALETTE_NAMES, SCALING_MODES
+from app.color import PALETTE_NAMES, SCALING_MODES
 
 # ---- defaults ------------------------------------------------------------------
 # Moved here from app/session.py. Measured three times, each superseding the
@@ -70,20 +70,20 @@ DEFAULT_CACHE_BUDGET_BYTES = 256 * 1024 * 1024
 # P5c's own spec frames viridis/magma as being for "when the image is data,
 # not decoration," which is a choice a user makes deliberately, not the
 # right first impression on a sandbox meant to be explored. log1p is the
-# explicitly-specified default scaling (see app/colour.py's own docstring
+# explicitly-specified default scaling (see app/color.py's own docstring
 # for why: a linear map puts 90% of a typical escaped image in the first 5%
 # of the palette). Period 0 means no cyclic banding -- the plain smooth
 # escape-time look; banding is an adjustable enhancement, not a forced
 # default.
-DEFAULT_COLOUR_PALETTE = "classic"
-DEFAULT_COLOUR_SCALING = "log1p"
-DEFAULT_COLOUR_PERIOD = 0.0
+DEFAULT_COLOR_PALETTE = "classic"
+DEFAULT_COLOR_SCALING = "log1p"
+DEFAULT_COLOR_PERIOD = 0.0
 
 # Green's-function display (both G_f(z) on the dynamical plane and G_M(c)
-# on the parameter plane -- see app.colour.colour_scalar_field, which both
+# on the parameter plane -- see app.color.color_scalar_field, which both
 # share). band_width=1.0 and 12 cyclic bands are a reasonable, legible
 # starting point (roughly matching the classic equipotential-band look
-# fractal software defaults to); NOT tied to colour_period above -- that's
+# fractal software defaults to); NOT tied to color_period above -- that's
 # an escape-time-specific concept (wraps a raw iteration VALUE), this
 # wraps an already-log-scaled BAND INDEX, a different unit entirely.
 # Contour lines default OFF: the spec calls them "optional."
@@ -95,7 +95,7 @@ DEFAULT_GREENS_CONTOUR = False
 # render_parameter_greens computes for a RATIONAL map (see cdx::
 # GreensPotential's own doc comment) -- ignored entirely for a certified
 # polynomial, where the two already coincide. A plain string, like
-# colour_palette/colour_scaling above, not the cdx enum itself -- this
+# color_palette/color_scaling above, not the cdx enum itself -- this
 # module has no cdx dependency (see its own docstring), and app.session is
 # what translates it at the actual render_map call.
 GREENS_POTENTIAL_CHOICES = ("pragmatic", "conformal")
@@ -168,20 +168,20 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     # minimum/maximum/exclusive_minimum are unused for choices-based
     # fields (see FieldSpec's own docstring) -- 0/0 rather than omitted,
     # since FieldSpec has no default for either.
-    "colour_palette": FieldSpec(str, 0, 0, DEFAULT_COLOUR_PALETTE, "Colour palette",
+    "color_palette": FieldSpec(str, 0, 0, DEFAULT_COLOR_PALETTE, "Color palette",
                                 choices=PALETTE_NAMES),
-    "colour_scaling": FieldSpec(str, 0, 0, DEFAULT_COLOUR_SCALING, "Colour scaling",
+    "color_scaling": FieldSpec(str, 0, 0, DEFAULT_COLOR_SCALING, "Color scaling",
                                 choices=SCALING_MODES),
     # 0 (no cyclic banding) is a legitimate, meaningful value here, not
     # excluded the way escape_radius/tol exclude 0 -- so NOT
     # exclusive_minimum. Ceiling is arbitrary headroom past any max_iter a
     # user would realistically set (see FIELD_SPECS["max_iter"]'s own
     # ceiling of 100_000); a period longer than max_iter just never wraps.
-    "colour_period": FieldSpec(float, 0.0, 100_000.0, DEFAULT_COLOUR_PERIOD,
-                               "Colour cycle period (0 = off)"),
+    "color_period": FieldSpec(float, 0.0, 100_000.0, DEFAULT_COLOR_PERIOD,
+                               "Color cycle period (0 = off)"),
     # log(value)/band_width must stay meaningfully sized -- 0 would make
     # every value fall in the same band (division by zero, in fact), so
-    # this one IS exclusive_minimum, unlike colour_period above.
+    # this one IS exclusive_minimum, unlike color_period above.
     "greens_band_width": FieldSpec(float, 0.0, 1000.0, DEFAULT_GREENS_BAND_WIDTH,
                                    "Green's function band width", exclusive_minimum=True),
     "greens_period_bands": FieldSpec(float, 1.0, 1000.0, DEFAULT_GREENS_PERIOD_BANDS,
@@ -217,9 +217,9 @@ class Settings:
     tol: float = DEFAULT_TOL
     threads: int = DEFAULT_THREADS
     cache_budget_bytes: int = DEFAULT_CACHE_BUDGET_BYTES
-    colour_palette: str = DEFAULT_COLOUR_PALETTE
-    colour_scaling: str = DEFAULT_COLOUR_SCALING
-    colour_period: float = DEFAULT_COLOUR_PERIOD
+    color_palette: str = DEFAULT_COLOR_PALETTE
+    color_scaling: str = DEFAULT_COLOR_SCALING
+    color_period: float = DEFAULT_COLOR_PERIOD
     greens_band_width: float = DEFAULT_GREENS_BAND_WIDTH
     greens_period_bands: float = DEFAULT_GREENS_PERIOD_BANDS
     greens_contour: bool = DEFAULT_GREENS_CONTOUR
@@ -352,6 +352,20 @@ def load_settings(path: Path | None = None) -> Settings:
         return Settings()
     if not isinstance(raw, dict):
         return Settings()
+    # LEGACY SPELLING (cosmetic batch, Part B): colour_palette/colour_scaling/
+    # colour_period were the field names before the colour -> color rename.
+    # A settings.json written by an older build still has those three keys,
+    # not color_palette/color_scaling/color_period -- read the old spelling
+    # when the new one is absent, so upgrading doesn't silently reset a
+    # user's palette/scaling/period choice back to defaults. Never written
+    # back out: save_settings always serializes the Settings dataclass's
+    # own (now color_*) field names, so the file is normalized to the new
+    # spelling the next time it's saved.
+    for new_key, old_key in (("color_palette", "colour_palette"),
+                             ("color_scaling", "colour_scaling"),
+                             ("color_period", "colour_period")):
+        if new_key not in raw and old_key in raw:
+            raw[new_key] = raw[old_key]
     # Unknown keys (e.g. from a NEWER version of this file) are ignored
     # rather than rejected; missing keys (from an OLDER one) fall back to
     # Settings()'s own defaults for that field -- this is what keeps adding

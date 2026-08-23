@@ -27,7 +27,7 @@ CAPABILITIES = (
     "with an inline Riemann-Hurwitz check",
     "Critical-point overlay with optional forward-orbit tracing",
     "Click-to-seed orbit tracking with attractor/cycle classification",
-    "A colour pipeline with adjustable scaling, four palettes, basin "
+    "A color pipeline with adjustable scaling, four palettes, basin "
     "shading, and equipotential bands with contour lines",
 )
 

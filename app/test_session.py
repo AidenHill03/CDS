@@ -150,8 +150,8 @@ def main() -> None:
           "c=5+5i: count=1 (both seeds dedupe onto infinity), unresolved=0")
 
     # A real render spanning the cusp shows count genuinely CHANGING across
-    # the plane -- this is what makes colour_parameter_basin's sharp
-    # colour edges meaningful at all, not a uniform/degenerate image.
+    # the plane -- this is what makes color_parameter_basin's sharp
+    # color edges meaningful at all, not a uniform/degenerate image.
     wide_vp = cdx.Viewport(complex(-0.5, 0), 1.5, 61)
     counts_wide, _unresolved_wide = s_pb.render(wide_vp, "parameter_basin")
     unique_counts = set(counts_wide.flatten().tolist())

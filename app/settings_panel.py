@@ -31,7 +31,7 @@ from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_fi
 # (which knows nothing about widgets or layout).
 FIELD_GROUPS = {
     "Rendering": ["resolution", "max_iter", "escape_radius", "tol", "threads"],
-    "Colouring": ["colour_palette", "colour_scaling", "colour_period"],
+    "Coloring": ["color_palette", "color_scaling", "color_period"],
     "Green's function": ["greens_potential", "greens_band_width", "greens_period_bands",
                         "greens_contour"],
     "Parameter marker": ["param_marker_step", "param_marker_rate"],
@@ -52,8 +52,8 @@ def _widget_for(name: str) -> QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox:
     """Builds (but does not populate) the editing widget for one
     FIELD_SPECS entry. cache_budget_bytes is the one NUMERIC field shown
     in different units than it's stored in (MB, not raw bytes) -- see
-    _mb_widget_range/_to_mb/_from_mb. A choices-based field (colour_palette,
-    colour_scaling) gets a QComboBox instead of a spinbox entirely, and a
+    _mb_widget_range/_to_mb/_from_mb. A choices-based field (color_palette,
+    color_scaling) gets a QComboBox instead of a spinbox entirely, and a
     bool field (greens_contour) gets a QCheckBox -- see FieldSpec's own
     docstring for both.
     """

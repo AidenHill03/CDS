@@ -1,4 +1,4 @@
-"""app/colour.py -- turns a raw render array into an RGB image.
+"""app/color.py -- turns a raw render array into an RGB image.
 
 Three input kinds, matching the three things cdx.Renderer actually produces:
   - ESCAPE-TIME (julia/parameter modes): smooth escape value, 0 = never
@@ -13,7 +13,7 @@ Three input kinds, matching the three things cdx.Renderer actually produces:
 SCALING is the part that determines whether images look right. Measured on
 the Mandelbrot parameter plane at max_iter=200: 90% of escaped pixels have
 smooth escape value <= 10 out of a range to 200. A LINEAR map to the palette
-therefore puts 90% of the image in the first 5% of the colour range and
+therefore puts 90% of the image in the first 5% of the color range and
 looks broken.
 
 DEFAULT is log1p scaling (scale_log1p), anchored to a caller-supplied
@@ -29,7 +29,7 @@ HISTOGRAM EQUALISATION (scale_histogram_eq) is offered as an explicit
 enhancement/density mode: it rank-transforms each image against its OWN
 empirical distribution, using the full palette range evenly, at the direct
 cost of the comparability property above -- the same raw value maps to a
-DIFFERENT colour depending on what else is in the image. Never the default
+DIFFERENT color depending on what else is in the image. Never the default
 for exactly that reason; this module never picks it silently.
 
 PALETTES: grayscale, a classic blue/orange two-tone, and two perceptually
@@ -42,8 +42,8 @@ PyInstaller packaging (P5c section 7): bundling all of matplotlib just for
 a 768-byte lookup table would be pure bloat.
 
 NEVER-ESCAPED PIXELS (escape-time) and UNRESOLVED PIXELS (basin) always get
-a flat, separate colour -- NOT palette index 0. Palette index 0 is a real
-(if extreme) data colour; conflating "no data" with "the fastest-escaping
+a flat, separate color -- NOT palette index 0. Palette index 0 is a real
+(if extreme) data color; conflating "no data" with "the fastest-escaping
 pixel in the image" would be a real correctness problem for a research
 tool, not just an aesthetic one.
 """
@@ -103,18 +103,18 @@ def _linear_gray() -> np.ndarray:
 
 def _interpolate_stops(stops: list[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
     xs = np.array([s[0] for s in stops])
-    colours = np.array([s[1] for s in stops], dtype=float)
+    colors = np.array([s[1] for s in stops], dtype=float)
     t = np.linspace(0.0, 1.0, 256)
     out = np.empty((256, 3))
     for ch in range(3):
-        out[:, ch] = np.interp(t, xs, colours[:, ch])
+        out[:, ch] = np.interp(t, xs, colors[:, ch])
     return out.round().clip(0, 255).astype(np.uint8)
 
 
 def _classic_blue_orange() -> np.ndarray:
     # Dark blue -> warm white -> orange: the familiar Mandelbrot-renderer
     # look, deliberately passing through a bright midpoint rather than a
-    # straight two-colour blend (which would look muddy through the
+    # straight two-color blend (which would look muddy through the
     # middle of the range).
     return _interpolate_stops([
         (0.0, (0, 7, 100)),
@@ -135,7 +135,7 @@ PALETTE_NAMES: tuple[str, ...] = tuple(PALETTES.keys())
 NEVER_ESCAPED_RGB: tuple[int, int, int] = (0, 0, 0)
 UNRESOLVED_BASIN_RGB: tuple[int, int, int] = (0, 0, 0)
 # Same flat-black "nothing resolved here" convention as the two above,
-# for colour_parameter_basin's own unresolved-dominant pixels -- a
+# for color_parameter_basin's own unresolved-dominant pixels -- a
 # DIFFERENT question (a whole PARAMETER's worth of critical orbits mostly
 # failing to settle, not one pixel's own orbit never reaching a known
 # attractor), but visually the same "black = nothing here" language this
@@ -157,7 +157,7 @@ def _apply_palette(t: np.ndarray, mask: np.ndarray, palette: np.ndarray,
 # ---- scaling ------------------------------------------------------------------------
 
 def scale_log1p(values: np.ndarray, reference: float, period: float | None = None) -> np.ndarray:
-    """[0,1]-normalized colour position, monotonic in `values` (within a
+    """[0,1]-normalized color position, monotonic in `values` (within a
     period-band, if `period` is given) and independent of THIS array's own
     realized min/max -- the same raw value always maps to the same output
     given the same (reference, period), which is what keeps two renders
@@ -210,7 +210,7 @@ def scale_scalar_field(values: np.ndarray, band_width: float = 1.0,
     of the same map/settings but a different viewport stay comparable,
     the same principle as scale_log1p above. Returns a value in roughly
     [log(eps)/band_width, inf); callers wanting a cyclic banded look wrap
-    this with `np.mod(result, n_bands)` themselves (see colour_scalar_field
+    this with `np.mod(result, n_bands)` themselves (see color_scalar_field
     and, for the discrete equipotential-band UI, app/greens_view.py).
     """
     return np.log(np.clip(np.asarray(values, dtype=float), 0.0, None) + eps) / band_width
@@ -218,13 +218,13 @@ def scale_scalar_field(values: np.ndarray, band_width: float = 1.0,
 
 # ---- escape-time ----------------------------------------------------------------------
 
-def colour_escape_time(values: np.ndarray, max_iter: int, palette: str = "viridis",
+def color_escape_time(values: np.ndarray, max_iter: int, palette: str = "viridis",
                        scaling: str = "log1p", period: float | None = None) -> np.ndarray:
-    """The full escape-time colouring pipeline: raw smooth-escape values
+    """The full escape-time coloring pipeline: raw smooth-escape values
     -> an (H, W, 3) uint8 RGB image. 0 always means "never escaped" (see
     module docstring) and always gets NEVER_ESCAPED_RGB, never a palette
-    colour -- including palette index 0, which is a real escape-value
-    colour, not a stand-in for "no data."
+    color -- including palette index 0, which is a real escape-value
+    color, not a stand-in for "no data."
     """
     if scaling not in SCALING_MODES:
         raise ValueError(f"unknown scaling {scaling!r}; must be one of {SCALING_MODES}")
@@ -246,7 +246,7 @@ _GOLDEN_ANGLE = 0.6180339887498949   # 1/phi -- successive hues land far apart o
 
 def _golden_hue(index: int) -> float:
     """A deterministic, well-separated hue per basin index -- golden-angle
-    spacing, the standard trick for generating N visually distinct colours
+    spacing, the standard trick for generating N visually distinct colors
     without knowing N (the number of basins) in advance.
     """
     return math.fmod(index * _GOLDEN_ANGLE, 1.0)
@@ -257,25 +257,25 @@ def _hue_to_rgb_255(h: float, s: float = 0.75, v: float = 1.0) -> tuple[float, f
     return (r * 255.0, g * 255.0, b * 255.0)
 
 
-def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
+def color_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
                  max_iter: int = 1, period: float | None = None,
                  scaling: str = "log1p") -> np.ndarray:
     """Hue = basin index (golden-angle rotation, see _golden_hue), brightness
     = convergence speed when `iterations` is given -- the SAME scale_log1p/
-    scale_histogram_eq machinery escape-time uses (colour_escape_time),
+    scale_histogram_eq machinery escape-time uses (color_escape_time),
     since basin iteration counts have the identical skew CLAUDE.md's
     measurement describes for escape counts. Unresolved pixels (label == 0,
     per cdx::Renderer::render_basin's own "0 = unresolved" convention) are
     always flat UNRESOLVED_BASIN_RGB, regardless of shading.
 
-    `scaling` picks between the two exactly as colour_escape_time does:
+    `scaling` picks between the two exactly as color_escape_time does:
     "log1p" (default, comparable across renders, `period` gives the cyclic
     banded look) or "histogram" (scale_histogram_eq, ranked against just
     THIS image's own resolved pixels via `mask=resolved` -- unresolved
     pixels take no part in the ranking, the same "restricted to real data"
-    treatment colour_escape_time's own histogram branch gives escaped
+    treatment color_escape_time's own histogram branch gives escaped
     pixels). `period` only has meaning for "log1p" -- scale_histogram_eq
-    has no periodic concept, exactly as colour_escape_time's own histogram
+    has no periodic concept, exactly as color_escape_time's own histogram
     branch already ignores it.
 
     Brighter = converged FASTER (a small iteration count): points deep in
@@ -314,32 +314,32 @@ def colour_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
     return rgb
 
 
-def colour_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = None) -> np.ndarray:
-    """Categorical colouring for Parameter_basin: hue = the COUNT itself
+def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = None) -> np.ndarray:
+    """Categorical coloring for Parameter_basin: hue = the COUNT itself
     (golden-angle spacing, the SAME _golden_hue/_hue_to_rgb_255 primitive
-    colour_basin already uses for basin ids -- N distinct, well-separated
-    colours without needing to know N, the largest count this render will
-    ever show, in advance). Deliberately NOT colour_escape_time's palette-
+    color_basin already uses for basin ids -- N distinct, well-separated
+    colors without needing to know N, the largest count this render will
+    ever show, in advance). Deliberately NOT color_escape_time's palette-
     gradient machinery: a count is a CATEGORY (2 is not "a bit more than
     1" the way a larger escape iteration is), so a gradient would imply an
     ordering relationship between adjacent counts that isn't actually
     there -- count=1 and count=2 should read as two DIFFERENT things, not
     two shades of the same thing. This is what makes a bifurcation
-    boundary (where the count changes) read as a sharp colour EDGE rather
+    boundary (where the count changes) read as a sharp color EDGE rather
     than a subtle gradient shift.
 
     A pixel is UNRESOLVED-DOMINANT -- flat PARAMETER_BASIN_UNRESOLVED_RGB,
-    never a count colour -- when count itself is 0 (nothing was ever
+    never a count color -- when count itself is 0 (nothing was ever
     confirmed, so there is no real category to show) OR when `unresolved`
     (given) exceeds `counts` at that pixel (more of this parameter's
     critical orbits failed to resolve than succeeded, so the confirmed
     count is more noise than signal). A pixel with count >= 1 and SOME,
     but not a majority, of its orbits unresolved still gets its real
-    count's colour -- a confirmed attractor is shown as confirmed
+    count's color -- a confirmed attractor is shown as confirmed
     regardless of what else, separately, didn't resolve.
 
     Shading WITHIN a count region by slowest convergence rate (finer
-    structure inside one colour band) is an intentionally deferred,
+    structure inside one color band) is an intentionally deferred,
     optional refinement -- see cdx::Renderer::render_parameter_basin's own
     doc comment; it does not currently expose a convergence-rate channel
     for this to shade by at all, so there is nothing to wire up yet, not
@@ -363,31 +363,31 @@ def colour_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = N
 
 # ---- Julia, RATIONAL classification (Stage 2 of the sphere-aware milestone) ------------
 #
-# Deliberately NOT a bespoke colourer here. A rational map's "julia" render
-# colours through colour_escape_time -- the SAME function a certified
+# Deliberately NOT a bespoke colorer here. A rational map's "julia" render
+# colors through color_escape_time -- the SAME function a certified
 # polynomial's does -- using only the smooth chordal approach-rate (the
 # stacked payload's own values layer; see cdx::Renderer::render_julia's own
 # doc comment). The basin LABEL a pixel reached is still computed and kept
 # available (for the cursor readout -- see ImageView._sample_at_pixel), just
-# never used for colouring: which basin a pixel is in is BASIN mode's own
+# never used for coloring: which basin a pixel is in is BASIN mode's own
 # question, not Julia's. A per-attractor hue scheme was tried here first and
-# reverted -- it changed Julia's own COLOURING PHILOSOPHY (palette + scaling,
+# reverted -- it changed Julia's own COLORING PHILOSOPHY (palette + scaling,
 # honoured by every other escape-time-shaped mode) into something bespoke,
 # which is exactly what this milestone's own governing principle rules out:
 # the sphere-aware revamp changes CLASSIFICATION and the SCALAR a pixel
-# produces, never a mode's colouring philosophy.
+# produces, never a mode's coloring philosophy.
 
 
 # ---- scalar field (Green's-function-shaped data) ---------------------------------------
 
-def colour_scalar_field(values: np.ndarray, palette: str = "viridis", band_width: float = 1.0,
+def color_scalar_field(values: np.ndarray, palette: str = "viridis", band_width: float = 1.0,
                         period_bands: float = 12.0, eps: float = 1e-9,
                         contour: bool = False,
                         contour_rgb: tuple[int, int, int] = (0, 0, 0)) -> np.ndarray:
-    """Full scalar-field colouring pipeline: quantises log(value+eps) into
+    """Full scalar-field coloring pipeline: quantises log(value+eps) into
     `period_bands` cyclic steps (via the same palette machinery as
     escape-time), giving the classic equipotential-banded look. Every
-    pixel gets a real colour -- there is no "never escaped"-style mask
+    pixel gets a real color -- there is no "never escaped"-style mask
     here, since 0 is a legitimate potential value, not a sentinel.
 
     CONTOUR LINES, when `contour` is set: drawn directly into the pixel

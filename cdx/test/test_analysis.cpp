@@ -1117,7 +1117,7 @@ int main() {
 
         // A REAL render (not just three probed pixels) actually shows the
         // count changing across the image -- this is what makes "sharp
-        // colour edges at bifurcation boundaries" (the app's own colouring
+        // color edges at bifurcation boundaries" (the app's own coloring
         // requirement) possible at all.
         Renderer r_full(Map::custom(quad, Cplx{0.0, 0.0}), Viewport{{-0.5, 0.0}, 1.5, 81},
                         RenderSettings{100, 2.0, 1e-6, 1});

@@ -102,26 +102,26 @@ def main() -> None:
           "a field that WAS valid (resolution=700) also reverts -- Apply is all-or-nothing, "
           "so it goes back to 600 (the last successful Apply), not the rejected 700")
 
-    # ---- colouring fields: QComboBox for choices, generic apply round-trip ------------
-    print("\ncolouring fields (choices widgets):")
-    palette_widget = panel._widgets["colour_palette"]
-    scaling_widget = panel._widgets["colour_scaling"]
-    check(isinstance(palette_widget, QComboBox), "colour_palette gets a QComboBox, not a spinbox")
-    check(isinstance(scaling_widget, QComboBox), "colour_scaling gets a QComboBox, not a spinbox")
+    # ---- coloring fields: QComboBox for choices, generic apply round-trip ------------
+    print("\ncoloring fields (choices widgets):")
+    palette_widget = panel._widgets["color_palette"]
+    scaling_widget = panel._widgets["color_scaling"]
+    check(isinstance(palette_widget, QComboBox), "color_palette gets a QComboBox, not a spinbox")
+    check(isinstance(scaling_widget, QComboBox), "color_scaling gets a QComboBox, not a spinbox")
     check([palette_widget.itemText(i) for i in range(palette_widget.count())]
-          == list(FIELD_SPECS["colour_palette"].choices),
+          == list(FIELD_SPECS["color_palette"].choices),
           "the combo box's items match FIELD_SPECS' choices, in order")
-    check(palette_widget.currentText() == session.settings.colour_palette,
+    check(palette_widget.currentText() == session.settings.color_palette,
           "the combo box starts on session.settings' current palette")
 
     applied.clear()
     palette_widget.setCurrentText("viridis")
     scaling_widget.setCurrentText("histogram")
-    panel._widgets["colour_period"].setValue(15.0)
+    panel._widgets["color_period"].setValue(15.0)
     panel._apply()
     check(len(applied) == 1, "changing only combo-box/period fields still triggers a valid Apply")
-    check(applied[-1].colour_palette == "viridis" and applied[-1].colour_scaling == "histogram"
-         and applied[-1].colour_period == 15.0,
+    check(applied[-1].color_palette == "viridis" and applied[-1].color_scaling == "histogram"
+         and applied[-1].color_period == 15.0,
           "the applied Settings reflects the combo-box selections and the period spinbox")
 
     # ---- Green's function fields: QCheckBox for the bool field ------------------------

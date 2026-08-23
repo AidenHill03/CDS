@@ -39,8 +39,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 
 import cdx
 from app.about_dialog import AboutDialog
-from app.colour import (colour_basin, colour_escape_time, colour_parameter_basin,
-                        colour_scalar_field)
+from app.color import (color_basin, color_escape_time, color_parameter_basin,
+                        color_scalar_field)
 from app.complex_field import ComplexField
 from app.equation_panel import EquationPanel
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
@@ -151,7 +151,7 @@ def trace_critical_orbit(rational_map: cdx.RationalMap, param: complex,
 # as before this stage) and simply ignore `facts`; `facts` remains part of
 # the signature purely for uniformity across layers, and IS what Stage 2's
 # new layers (fixed points, attracting cycles) actually read.
-OverlayColour = tuple[int, int, int, int]
+OverlayColor = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,16 +163,16 @@ class OverlayTrace:
     Points", never independently drawable (paint_overlays' own docstring
     calls this out explicitly; preserved, not a new coupling).
 
-    path_provider returns (polyline, colour) pairs -- paired colour, unlike
+    path_provider returns (polyline, color) pairs -- paired color, unlike
     the spec prose's own "list of polylines" phrasing, because Stage 2's
     attracting-cycle trace needs each cycle's path drawn in that SAME
-    cycle's own (strength-dependent) colour; pairing it inline here is the
+    cycle's own (strength-dependent) color; pairing it inline here is the
     simplest way to carry that without a second, order-dependent list the
     compositor would have to zip against this one.
     """
     key: str
     label: str
-    path_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[list[complex], OverlayColour]]]
+    path_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[list[complex], OverlayColor]]]
     # Shown in the legend (Stage 3) instead of `label` when non-empty --
     # e.g. "Traced orbits" reads better there than the menu action's own
     # "Trace Orbits". Empty means: use `label` as-is (see build_legend_entries).
@@ -183,26 +183,26 @@ class OverlayTrace:
 class OverlayLayer:
     """One declared overlay: a marker style/radius, a gate (which render
     modes it's even meaningful on), and a points_provider returning
-    (point, colour) pairs -- colour may already vary per point (e.g. Stage
-    2's fixed-point classification colouring) since it's computed INSIDE
+    (point, color) pairs -- color may already vary per point (e.g. Stage
+    2's fixed-point classification coloring) since it's computed INSIDE
     the provider, not applied uniformly afterward by some separate field.
     """
     key: str
     label: str
     gate: str   # "dynamical" | "parameter" | "always"
     marker_radius: float
-    points_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[complex, OverlayColour]]]
+    points_provider: Callable[[cdx.RationalMap, complex, object], list[tuple[complex, OverlayColor]]]
     marker_style: str = "circle"   # "circle" | "square" | "diamond" -- see _draw_marker
     # Legend (Stage 3) text/swatches -- legend_label empty means "use
     # `label` as-is" (matches critical points, whose legend entry needs no
     # extra text); legend_swatches is the small set of representative
-    # colours build_legend_entries/draw_legend show beside that text (e.g.
-    # fixed points' three classification colours, or a cycle's two gradient
+    # colors build_legend_entries/draw_legend show beside that text (e.g.
+    # fixed points' three classification colors, or a cycle's two gradient
     # ends) -- kept as their OWN fields rather than derived from
     # points_provider's live output, since the legend describes what a
-    # colour MEANS in general, not whatever happens to be on screen right now.
+    # color MEANS in general, not whatever happens to be on screen right now.
     legend_label: str = ""
-    legend_swatches: tuple[OverlayColour, ...] = ()
+    legend_swatches: tuple[OverlayColor, ...] = ()
     trace: OverlayTrace | None = None
 
     def is_visible_for(self, render_mode: str) -> bool:
@@ -215,40 +215,40 @@ class OverlayLayer:
 CRITICAL_POINTS_LAYER_KEY = "critical_points"
 CRITICAL_TRACE_KEY = "trace_orbits"
 CRITICAL_POINT_MARKER_RADIUS = 5.0
-CRITICAL_POINT_FILL_COLOUR: OverlayColour = (255, 255, 255, 255)   # white -- matches the pre-Stage-1 flat brush
-CRITICAL_TRACE_COLOUR: OverlayColour = (255, 255, 255, 160)        # translucent white -- matches the old trace_pen
+CRITICAL_POINT_FILL_COLOR: OverlayColor = (255, 255, 255, 255)   # white -- matches the pre-Stage-1 flat brush
+CRITICAL_TRACE_COLOR: OverlayColor = (255, 255, 255, 160)        # translucent white -- matches the old trace_pen
 
 
 def _critical_points_provider(rational_map: cdx.RationalMap, param: complex,
-                              facts: object) -> list[tuple[complex, OverlayColour]]:
+                              facts: object) -> list[tuple[complex, OverlayColor]]:
     del facts   # see OVERLAY_LAYERS' own module comment on why this layer ignores it
-    return [(pt, CRITICAL_POINT_FILL_COLOUR)
+    return [(pt, CRITICAL_POINT_FILL_COLOR)
            for pt in rational_map.distinct_critical_points(param)]
 
 
 def _critical_trace_provider(rational_map: cdx.RationalMap, param: complex,
-                             facts: object) -> list[tuple[list[complex], OverlayColour]]:
+                             facts: object) -> list[tuple[list[complex], OverlayColor]]:
     del facts
     points = rational_map.distinct_critical_points(param)
-    return [(trace_critical_orbit(rational_map, param, z0), CRITICAL_TRACE_COLOUR) for z0 in points]
+    return [(trace_critical_orbit(rational_map, param, z0), CRITICAL_TRACE_COLOR) for z0 in points]
 
 
 # ---- fixed points (Stage 2) ---------------------------------------------------
-# Colour BY CLASSIFICATION -- app.facts_panel._classify(fp.multiplier), the
+# Color BY CLASSIFICATION -- app.facts_panel._classify(fp.multiplier), the
 # SAME classification the Facts tab's own Fixed Points table already shows,
 # reused rather than reimplemented here (so this overlay and that table can
 # never disagree about what a given multiplier counts as). _classify returns
 # FOUR labels ("superattracting"/"attracting"/"neutral"/"repelling"), not the
-# three named colours a fixed 3-colour palette implies -- "superattracting"
+# three named colors a fixed 3-color palette implies -- "superattracting"
 # (|multiplier| exactly 0, the common case for e.g. every one of Newton's
 # method's own root fixed points) is the strongest member of the SAME
 # qualitative family as "attracting" (points nearby converge either way), so
-# it shares that family's colour here rather than getting a 4th colour.
+# it shares that family's color here rather than getting a 4th color.
 FIXED_POINTS_LAYER_KEY = "fixed_points"
 FIXED_POINT_MARKER_RADIUS = 5.0
 # green / red / yellow -- clear, distinguishable, and conventional for
 # attracting/repelling/neutral without relying on a legend to be readable.
-_FIXED_POINT_CLASSIFICATION_COLOURS: dict[str, OverlayColour] = {
+_FIXED_POINT_CLASSIFICATION_COLORS: dict[str, OverlayColor] = {
     "attracting": (60, 200, 60, 255),
     "superattracting": (60, 200, 60, 255),
     "repelling": (220, 60, 60, 255),
@@ -257,47 +257,47 @@ _FIXED_POINT_CLASSIFICATION_COLOURS: dict[str, OverlayColour] = {
 
 
 def _fixed_points_provider(rational_map: cdx.RationalMap, param: complex,
-                           facts: object) -> list[tuple[complex, OverlayColour]]:
+                           facts: object) -> list[tuple[complex, OverlayColor]]:
     if facts is None:
         return []
-    return [(fp.point, _FIXED_POINT_CLASSIFICATION_COLOURS[_classify(fp.multiplier)])
+    return [(fp.point, _FIXED_POINT_CLASSIFICATION_COLORS[_classify(fp.multiplier)])
            for fp in facts.fixed_points if not _is_inf(fp.point)]
 
 
 # ---- attracting cycles (Stage 2) -----------------------------------------------
-# Colour BY ATTRACTING STRENGTH -- |cyc.multiplier| ranges over [0, 1) for any
+# Color BY ATTRACTING STRENGTH -- |cyc.multiplier| ranges over [0, 1) for any
 # genuinely attracting cycle (0 = superattracting, approaching 1 = barely
-# attracting), a small two-colour gradient over that range so every point AND
+# attracting), a small two-color gradient over that range so every point AND
 # the traced path of a given cycle -- both computed from the SAME
-# _cycle_colour(cyc.multiplier) call -- share one colour, making which points
+# _cycle_color(cyc.multiplier) call -- share one color, making which points
 # belong to which cycle (and how strongly it attracts) visually legible
 # without a separate legend entry per cycle.
 ATTRACTING_CYCLES_LAYER_KEY = "attracting_cycles"
 CYCLE_TRACE_KEY = "trace_cycle_paths"
 CYCLE_MARKER_RADIUS = 5.0
-_CYCLE_STRONG_COLOUR: OverlayColour = (255, 0, 255, 255)    # magenta -- superattracting (|multiplier| = 0)
-_CYCLE_WEAK_COLOUR: OverlayColour = (140, 140, 255, 255)    # pale blue -- |multiplier| approaching 1
+_CYCLE_STRONG_COLOR: OverlayColor = (255, 0, 255, 255)    # magenta -- superattracting (|multiplier| = 0)
+_CYCLE_WEAK_COLOR: OverlayColor = (140, 140, 255, 255)    # pale blue -- |multiplier| approaching 1
 
 
-def _cycle_colour(multiplier: complex) -> OverlayColour:
+def _cycle_color(multiplier: complex) -> OverlayColor:
     t = min(1.0, abs(multiplier))   # clamp: an attracting cycle's |multiplier| is always < 1, but guard anyway
     return tuple(int(round(a + (b - a) * t))
-                for a, b in zip(_CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR))
+                for a, b in zip(_CYCLE_STRONG_COLOR, _CYCLE_WEAK_COLOR))
 
 
 def _attracting_cycles_provider(rational_map: cdx.RationalMap, param: complex,
-                                facts: object) -> list[tuple[complex, OverlayColour]]:
+                                facts: object) -> list[tuple[complex, OverlayColor]]:
     if facts is None:
         return []
-    colour_points = []
+    color_points = []
     for cyc in facts.attracting_cycles:
-        colour = _cycle_colour(cyc.multiplier)
-        colour_points.extend((pt, colour) for pt in cyc.points if not _is_inf(pt))
-    return colour_points
+        color = _cycle_color(cyc.multiplier)
+        color_points.extend((pt, color) for pt in cyc.points if not _is_inf(pt))
+    return color_points
 
 
 def _attracting_cycles_trace_provider(rational_map: cdx.RationalMap, param: complex,
-                                      facts: object) -> list[tuple[list[complex], OverlayColour]]:
+                                      facts: object) -> list[tuple[list[complex], OverlayColor]]:
     if facts is None:
         return []
     loops = []
@@ -312,7 +312,7 @@ def _attracting_cycles_trace_provider(rational_map: cdx.RationalMap, param: comp
         # relies on, so a cycle that happens to include infinity still
         # draws its finite legs correctly instead of needing a second,
         # divergent filtering rule here.
-        loops.append((list(cyc.points) + [cyc.points[0]], _cycle_colour(cyc.multiplier)))
+        loops.append((list(cyc.points) + [cyc.points[0]], _cycle_color(cyc.multiplier)))
     return loops
 
 
@@ -320,7 +320,7 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
     OverlayLayer(
         key=CRITICAL_POINTS_LAYER_KEY, label="Critical Points", gate="dynamical",
         marker_radius=CRITICAL_POINT_MARKER_RADIUS, points_provider=_critical_points_provider,
-        marker_style="circle", legend_swatches=(CRITICAL_POINT_FILL_COLOUR,),
+        marker_style="circle", legend_swatches=(CRITICAL_POINT_FILL_COLOR,),
         trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
                            path_provider=_critical_trace_provider,
                            legend_label="Traced orbits"),
@@ -330,16 +330,16 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         marker_radius=FIXED_POINT_MARKER_RADIUS, points_provider=_fixed_points_provider,
         marker_style="square",
         legend_label="Fixed points: attracting / repelling / neutral",
-        legend_swatches=(_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
-                         _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
-                         _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]),
+        legend_swatches=(_FIXED_POINT_CLASSIFICATION_COLORS["attracting"],
+                         _FIXED_POINT_CLASSIFICATION_COLORS["repelling"],
+                         _FIXED_POINT_CLASSIFICATION_COLORS["neutral"]),
     ),
     OverlayLayer(
         key=ATTRACTING_CYCLES_LAYER_KEY, label="Attracting Cycles", gate="dynamical",
         marker_radius=CYCLE_MARKER_RADIUS, points_provider=_attracting_cycles_provider,
         marker_style="diamond",
-        legend_label="Attracting cycles: coloured by strength",
-        legend_swatches=(_CYCLE_STRONG_COLOUR, _CYCLE_WEAK_COLOUR),
+        legend_label="Attracting cycles: colored by strength",
+        legend_swatches=(_CYCLE_STRONG_COLOR, _CYCLE_WEAK_COLOR),
         trace=OverlayTrace(key=CYCLE_TRACE_KEY, label="Trace Cycle Paths",
                            path_provider=_attracting_cycles_trace_provider,
                            legend_label="Cycle paths"),
@@ -422,19 +422,19 @@ def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int
 
 
 # ---- overlay legend (Stage 3) ---------------------------------------------------
-# Representative colours for the two overlays that live OUTSIDE the registry
+# Representative colors for the two overlays that live OUTSIDE the registry
 # (the seeded orbit, the parameter marker) -- matching (not necessarily byte-
 # identical to every shade paint_overlays' own orbit/marker branches use, just
-# representative of them) so the legend's swatch reads as the same colour a
+# representative of them) so the legend's swatch reads as the same color a
 # user sees drawn elsewhere on the SAME pane.
-ORBIT_LEGEND_COLOUR: OverlayColour = (255, 120, 0, 255)     # orange -- matches the orbit dots/lines
-PARAM_MARKER_LEGEND_COLOUR: OverlayColour = (255, 0, 0, 255)   # red -- matches the marker crosshair
+ORBIT_LEGEND_COLOR: OverlayColor = (255, 120, 0, 255)     # orange -- matches the orbit dots/lines
+PARAM_MARKER_LEGEND_COLOR: OverlayColor = (255, 0, 0, 255)   # red -- matches the marker crosshair
 
 
 @dataclasses.dataclass(frozen=True)
 class LegendEntry:
     label: str
-    swatches: tuple[OverlayColour, ...] = ()
+    swatches: tuple[OverlayColor, ...] = ()
 
 
 def build_legend_entries(render_mode: str, *, layer_enabled: dict, layer_trace_enabled: dict,
@@ -463,9 +463,9 @@ def build_legend_entries(render_mode: str, *, layer_enabled: dict, layer_trace_e
         if layer.trace is not None and layer_trace_enabled.get(layer.trace.key, False):
             entries.append(LegendEntry(layer.trace.legend_label or layer.trace.label))
     if show_orbit and is_dynamical and orbit_seeded:
-        entries.append(LegendEntry("Seeded orbit", (ORBIT_LEGEND_COLOUR,)))
+        entries.append(LegendEntry("Seeded orbit", (ORBIT_LEGEND_COLOR,)))
     if show_param_marker and not is_dynamical and param_set:
-        entries.append(LegendEntry("Parameter marker", (PARAM_MARKER_LEGEND_COLOUR,)))
+        entries.append(LegendEntry("Parameter marker", (PARAM_MARKER_LEGEND_COLOR,)))
     return entries
 
 
@@ -477,7 +477,7 @@ LEGEND_BOX_WIDTH = 260.0
 
 def draw_legend(painter: QPainter, width: int, height: int, entries: list[LegendEntry]) -> None:
     """A compact, semi-transparent corner box, one line per entry -- a small
-    coloured swatch per meaning (fixed points draw three, side by side, one
+    colored swatch per meaning (fixed points draw three, side by side, one
     per classification; most other entries draw one; a trace sub-entry
     draws none, just its own text) followed by that entry's label. Top-
     right corner, clear of the cursor-readout text paintEvent's caller
@@ -637,10 +637,10 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
 
 
 def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
-                 colour: OverlayColour) -> None:
+                 color: OverlayColor) -> None:
     """One overlay-layer marker -- a BLACK 2px outline (matching critical
     points' own outline treatment, so every layer's markers read as the
-    same visual FAMILY) filled with `colour`, in one of a small set of
+    same visual FAMILY) filled with `color`, in one of a small set of
     shapes distinct enough to tell layers apart without reading a legend:
     circle (critical points), square (fixed points), diamond (attracting
     cycles).
@@ -648,7 +648,7 @@ def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
     pen = QPen(QColor(0, 0, 0))
     pen.setWidth(2)
     painter.setPen(pen)
-    painter.setBrush(QColor(*colour))
+    painter.setBrush(QColor(*color))
     if style == "circle":
         painter.drawEllipse(pixel, radius, radius)
     elif style == "square":
@@ -697,18 +697,18 @@ def paint_registry_layers(painter: QPainter, viewport: cdx.Viewport, width: int,
         if layer.trace is not None and layer_trace_enabled.get(layer.trace.key, False):
             resolved_trace = layer_traces.get(layer.trace.key)
             if resolved_trace:
-                for path, colour in resolved_trace:
-                    pen = QPen(QColor(*colour))
+                for path, color in resolved_trace:
+                    pen = QPen(QColor(*color))
                     pen.setWidth(1)
                     painter.setPen(pen)
                     pixel_points = [complex_to_pixel(w, viewport, width, height) for w in path]
                     for a, b in drawable_polyline_segments(path, pixel_points, inflated_rect):
                         painter.drawLine(a, b)
 
-        for point, colour in layer_points.get(layer.key, []):
+        for point, color in layer_points.get(layer.key, []):
             if finite(point):
                 _draw_marker(painter, complex_to_pixel(point, viewport, width, height),
-                            layer.marker_radius, layer.marker_style, colour)
+                            layer.marker_radius, layer.marker_style, color)
 
 
 def _overscanned(viewport: cdx.Viewport, factor: float) -> cdx.Viewport:
@@ -728,7 +728,7 @@ def array_to_qimage(payload, mode: str, settings: Settings,
                     max_iter: int) -> QImage:
     """Converts a cdx render payload (see session.render_map's own
     docstring for what `payload` actually is per mode) into a displayable,
-    COLOURED QImage.
+    COLORED QImage.
 
     cdx render arrays have row 0 at the BOTTOM (matching Viewport::coord;
     see CLAUDE.md) but QImage has row 0 at the TOP -- flip vertically first,
@@ -739,17 +739,17 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     itself, once, here, is what rules that class of bug out entirely rather
     than relying on every caller remembering an origin='lower'-equivalent.
 
-    Dispatches to app.colour by render mode: "parameter" is always escape-
-    time (colour_escape_time, using `settings`' palette/scaling/period);
+    Dispatches to app.color by render mode: "parameter" is always escape-
+    time (color_escape_time, using `settings`' palette/scaling/period);
     "julia" is escape-time too, ALWAYS -- see below for what changes (and
     what deliberately does not) for a RATIONAL map's render (Stage 2);
-    "basin" is categorical + SHADED basin colouring (hue = basin id,
+    "basin" is categorical + SHADED basin coloring (hue = basin id,
     brightness = convergence speed); "greens"/"parameter_greens" are
-    scalar-field equipotential banding (colour_scalar_field, using
+    scalar-field equipotential banding (color_scalar_field, using
     `settings`' greens_band_width/greens_period_bands/greens_contour) --
     the SAME display treatment for both, since they're the same KIND of
     data (a potential -- Stage 3's CONFORMAL/Koenigs variant is not always
-    non-negative, but colour_scalar_field's own scale_scalar_field already
+    non-negative, but color_scalar_field's own scale_scalar_field already
     clips below 0 before taking a log, so this needs no special-casing
     either) even though they live on different planes (see cdx::Renderer::
     render_parameter_greens' own header comment on why the two are
@@ -757,20 +757,20 @@ def array_to_qimage(payload, mode: str, settings: Settings,
 
     GOVERNING PRINCIPLE: the sphere-aware milestone changes CLASSIFICATION
     and the SCALAR a pixel produces; it must never change a mode's
-    COLOURING PHILOSOPHY. A rational map's "julia" render must look like
+    COLORING PHILOSOPHY. A rational map's "julia" render must look like
     the SAME KIND of image a polynomial's does -- palette + scaling +
-    period, exactly like colour_escape_time already gives every other
+    period, exactly like color_escape_time already gives every other
     escape-time-shaped render -- not a bespoke scheme. Concretely: the
     smooth chordal approach-rate (index 0 of the stacked payload) is the
     direct analog of smooth escape time (fast approach = low value = the
     SAME palette end fast escape already lands at), and an unresolved
     pixel (0, per Renderer::render_julia_rational's own "0 = unresolved"
-    convention) flows into colour_escape_time's existing "0 = never
+    convention) flows into color_escape_time's existing "0 = never
     escaped" branch unmodified -- no special-casing needed at all, since
     both conventions already agree. Labels (index 1) are extracted and
     kept available to the caller (see ImageView._sample_at_pixel) for the
     cursor readout to still report which basin a pixel is in; only the
-    COLOURING ignores them -- which basin was reached is BASIN mode's own
+    COLORING ignores them -- which basin was reached is BASIN mode's own
     job, not Julia's.
 
     "basin" mode's payload is STACKED (see render_map's own docstring):
@@ -785,66 +785,66 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     -- distinguished here by `payload.ndim` (3 = stacked/rational, 2 =
     plain/certified-polynomial) rather than a separate flag, since that IS
     exactly what render_map's own return shape already encodes; only the
-    VALUES layer (index 0) is actually coloured, exactly like a plain 2D
+    VALUES layer (index 0) is actually colored, exactly like a plain 2D
     escape-time array would be. "greens"/"parameter_greens" payloads follow
     the SAME ndim==3-means-stacked/rational convention (Stage 3): index 0
-    = potential value (coloured), index 1 = `exact` (1.0 where CONFORMAL
+    = potential value (colored), index 1 = `exact` (1.0 where CONFORMAL
     was genuinely computed, 0.0 where it fell back to Pragmatic -- kept
     available for the cursor readout, per this function's own GOVERNING
-    PRINCIPLE, never the colourer); a certified polynomial's payload stays
+    PRINCIPLE, never the colorer); a certified polynomial's payload stays
     a plain 2D array, same as "parameter".
 
     "parameter_basin" (Stage 2 of the P/Q-representation-turned-parameter-
     plane batch) is the ONE deliberate exception to the governing
     principle above: its payload is a COUNT (number of distinct attracting
     cycles), not a potential or an escape value, so it gets its own
-    categorical colourer (colour_parameter_basin) rather than being forced
-    through colour_escape_time/colour_scalar_field -- see that function's
+    categorical colorer (color_parameter_basin) rather than being forced
+    through color_escape_time/color_scalar_field -- see that function's
     own docstring for why a count is not a gradient. ALWAYS stacked
     (counts, unresolved), never a plain 2D array (there is no
     certified-polynomial fast path here that would make it one).
 
-    Colouring is a pure DISPLAY-time transform, deliberately not baked into
+    Coloring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
     never be a cache key or trigger a re-render, only a re-paint.
     """
     if mode == "basin":
         labels = np.flipud(payload[0])
         iterations = np.flipud(payload[1])
-        rgb = colour_basin(labels, iterations, max_iter=max_iter,
-                           period=settings.colour_period or None,
-                           scaling=settings.colour_scaling)
+        rgb = color_basin(labels, iterations, max_iter=max_iter,
+                           period=settings.color_period or None,
+                           scaling=settings.color_scaling)
         return _rgb_to_qimage(rgb)
     if mode in ("greens", "parameter_greens"):
         values = payload[0] if np.asarray(payload).ndim == 3 else payload
         flipped = np.flipud(values)
-        rgb = colour_scalar_field(flipped, palette=settings.colour_palette,
+        rgb = color_scalar_field(flipped, palette=settings.color_palette,
                                   band_width=settings.greens_band_width,
                                   period_bands=settings.greens_period_bands,
                                   contour=settings.greens_contour)
         return _rgb_to_qimage(rgb)
     if mode == "parameter_basin":
         # Always stacked (counts, unresolved) -- see render_map's own
-        # docstring; categorical colouring (colour_parameter_basin), NOT
+        # docstring; categorical coloring (color_parameter_basin), NOT
         # the escape-time palette/scaling pipeline every other mode here
         # goes through -- see that function's own docstring for why a
         # COUNT is deliberately not treated as a gradient.
         counts = np.flipud(payload[0])
         unresolved = np.flipud(payload[1])
-        rgb = colour_parameter_basin(counts, unresolved)
+        rgb = color_parameter_basin(counts, unresolved)
         return _rgb_to_qimage(rgb)
-    # A RATIONAL "julia" payload is stacked (values, labels) -- colour ONLY
-    # the values layer, through the exact SAME colour_escape_time call a
+    # A RATIONAL "julia" payload is stacked (values, labels) -- color ONLY
+    # the values layer, through the exact SAME color_escape_time call a
     # plain (certified-polynomial) payload already goes through below; see
     # this function's own "GOVERNING PRINCIPLE" paragraph for why labels
-    # never reach the colourer.
+    # never reach the colorer.
     if mode == "julia" and np.asarray(payload).ndim == 3:
         payload = payload[0]
     flipped = np.flipud(payload)
     if mode in ("julia", "parameter"):
-        rgb = colour_escape_time(flipped, max_iter, palette=settings.colour_palette,
-                                 scaling=settings.colour_scaling,
-                                 period=settings.colour_period or None)
+        rgb = color_escape_time(flipped, max_iter, palette=settings.color_palette,
+                                 scaling=settings.color_scaling,
+                                 period=settings.color_period or None)
         return _rgb_to_qimage(rgb)
     raise AssertionError(f"unreachable: mode={mode!r}")
 
@@ -1146,10 +1146,10 @@ class ImageView(QWidget):
         self._layer_enabled: dict[str, bool] = {layer.key: False for layer in OVERLAY_LAYERS}
         self._layer_trace_enabled: dict[str, bool] = {
             layer.trace.key: False for layer in OVERLAY_LAYERS if layer.trace is not None}
-        # Resolved (point, colour) / (path, colour) pairs, keyed by layer/
+        # Resolved (point, color) / (path, color) pairs, keyed by layer/
         # trace key -- what a future generic paint/legend step iterates.
-        self._layer_points: dict[str, list[tuple[complex, OverlayColour]]] = {}
-        self._layer_traces: dict[str, list[tuple[list[complex], OverlayColour]] | None] = {}
+        self._layer_points: dict[str, list[tuple[complex, OverlayColor]]] = {}
+        self._layer_traces: dict[str, list[tuple[list[complex], OverlayColor]] | None] = {}
         # Plain-point/plain-path PROJECTIONS of the two dicts above, built
         # ONCE per refresh (inside the same memoization gate), not per
         # access -- what _critical_points/_orbit_traces actually read, so
@@ -1360,7 +1360,7 @@ class ImageView(QWidget):
                 resolved = list(layer.points_provider(self.session.map, self.session.param,
                                                        self._cached_facts))
                 self._layer_points[layer.key] = resolved
-                self._layer_point_values[layer.key] = [pt for pt, _colour in resolved]
+                self._layer_point_values[layer.key] = [pt for pt, _color in resolved]
                 if layer.trace is not None:
                     self._layer_traces[layer.trace.key] = None   # stale -- lazily recomputed below
                     self._layer_trace_values[layer.trace.key] = None
@@ -1370,7 +1370,7 @@ class ImageView(QWidget):
                 resolved_trace = list(layer.trace.path_provider(
                     self.session.map, self.session.param, self._cached_facts))
                 self._layer_traces[layer.trace.key] = resolved_trace
-                self._layer_trace_values[layer.trace.key] = [path for path, _colour in resolved_trace]
+                self._layer_trace_values[layer.trace.key] = [path for path, _color in resolved_trace]
 
     def refresh_critical_points(self) -> None:
         """Same-behavior alias for refresh_layers -- kept under its old name
@@ -1848,13 +1848,13 @@ class ImageView(QWidget):
 
 
 def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
-                         render_mode: str, colour_settings: Settings,
+                         render_mode: str, color_settings: Settings,
                          render_settings: cdx.RenderSettings, resolution: int,
                          **overlay_flags) -> QImage:
     """Renders (rational_map, param) at `viewport`'s own center/scale but a
     CHOSEN `resolution` -- via render_map, the SAME free function every
     on-screen render already goes through, not a downsample/upscale of
-    whatever happens to be on screen -- coloured through the identical
+    whatever happens to be on screen -- colored through the identical
     array_to_qimage pipeline the display itself uses (same palette/
     scaling/period, so an export always matches what is actually shown),
     then composites whichever overlays are requested on top (paint_overlays
@@ -1870,13 +1870,13 @@ def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport
     ONE function, called by BOTH the export preview dialog (a live, cheap-
     resolution preview) and SandboxWindow._do_export_image (the actual
     save) -- so the saved PNG can never show something different from what
-    the preview showed; there is no second copy of "render, colour,
+    the preview showed; there is no second copy of "render, color,
     composite" logic that could drift out of sync with this one.
     """
     export_viewport = cdx.Viewport(viewport.center, viewport.scale, resolution)
     array = render_map(rational_map, param, export_viewport, render_settings, render_mode,
-                       potential=colour_settings.greens_potential)
-    image = array_to_qimage(array, render_mode, colour_settings, render_settings.max_iter)
+                       potential=color_settings.greens_potential)
+    image = array_to_qimage(array, render_mode, color_settings, render_settings.max_iter)
     painter = QPainter(image)
     paint_overlays(painter, export_viewport, resolution, resolution, render_mode,
                    param=param, **overlay_flags)
@@ -1896,7 +1896,7 @@ EXPORT_PREVIEW_RESOLUTION = 240
 THUMBNAIL_RESOLUTION = 64
 
 
-def render_thumbnail(rational_map: cdx.RationalMap, param: complex, colour_settings: Settings,
+def render_thumbnail(rational_map: cdx.RationalMap, param: complex, color_settings: Settings,
                      render_settings: cdx.RenderSettings,
                      resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
     """A small CLEAN dynamical-plane render (Julia set, no overlays) of
@@ -1915,7 +1915,7 @@ def render_thumbnail(rational_map: cdx.RationalMap, param: complex, colour_setti
     center, scale = default_dynamical_view(rational_map, param)
     viewport = cdx.Viewport(center, scale, resolution)
     array = render_map(rational_map, param, viewport, render_settings, "julia")
-    return array_to_qimage(array, "julia", colour_settings, render_settings.max_iter)
+    return array_to_qimage(array, "julia", color_settings, render_settings.max_iter)
 
 
 def qimage_to_base64_png(image: QImage) -> str:
@@ -1932,7 +1932,7 @@ def qimage_to_base64_png(image: QImage) -> str:
     return base64.b64encode(buffer.data().data()).decode("ascii")
 
 
-def _regenerate_library_previews(library: cdx.FamilyLibrary, colour_settings: Settings,
+def _regenerate_library_previews(library: cdx.FamilyLibrary, color_settings: Settings,
                                  render_settings: cdx.RenderSettings) -> None:
     """(Re)writes a sidecar thumbnail (see app.settings.preview_path_for) for
     every non-preset entry currently in `library`, and removes any leftover
@@ -1959,7 +1959,7 @@ def _regenerate_library_previews(library: cdx.FamilyLibrary, colour_settings: Se
             continue
         path = preview_path_for(name)
         keep_paths.add(path)
-        image = render_thumbnail(entry, 0j, colour_settings, render_settings)
+        image = render_thumbnail(entry, 0j, color_settings, render_settings)
         image.save(str(path), "PNG")
     for existing in previews_dir().glob("*.png"):
         if existing not in keep_paths:
@@ -2817,7 +2817,7 @@ class SandboxWindow(QMainWindow):
             # Same guard _start_render uses for the live view (see
             # ImageView.no_effect_parameter_message's own docstring) --
             # exporting would otherwise silently write a meaningless
-            # uniform-colour PNG with no indication anything was wrong.
+            # uniform-color PNG with no indication anything was wrong.
             QMessageBox.critical(self, "Export Image failed", message)
             return
         image = compose_export_image(self.session.map, self.session.param, pane.viewport,

@@ -287,7 +287,7 @@ public:
     //   path's own "0 = never escaped/resolved" convention). If `labels`
     //   is given, it is replaced with an Image the same size as the
     //   result, holding which attractor (Cycle::id) each pixel reached (0
-    //   = unresolved) -- for PER-BASIN-HUE colouring, the same (label,
+    //   = unresolved) -- for PER-BASIN-HUE coloring, the same (label,
     //   rate) split render_basin already returns as (primary, iterations).
     //   escape_radius plays NO role anywhere in this path.
     //
@@ -385,15 +385,15 @@ public:
     // as the result, holding the iteration count (n+1, matching
     // render_julia's own n+1 convention) each pixel took to resolve -- for
     // BASIN SHADING (hue = basin id from the primary result, brightness =
-    // this convergence speed; see app/colour.py's colour_basin). No extra
+    // this convergence speed; see app/color.py's color_basin). No extra
     // computation: the per-pixel loop already counts iterations to decide
     // when to stop, this just retains that count instead of discarding it.
     // For an UNRESOLVED pixel (primary result 0), the count is however many
     // iterations were actually run (max_iter if the orbit neither resolved
     // nor blew up, fewer if it hit is_bad first) -- not a meaningful
     // "convergence speed" since nothing converged, callers should treat an
-    // unresolved pixel's shading as undefined and colour it by the primary
-    // result being 0 instead (exactly what colour_basin already does).
+    // unresolved pixel's shading as undefined and color it by the primary
+    // result being 0 instead (exactly what color_basin already does).
     Image render_basin(const std::vector<Cycle>& cycles, Image* iterations = nullptr,
                        const std::atomic<bool>* cancel = nullptr) const;
 

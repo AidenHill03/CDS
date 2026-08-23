@@ -36,16 +36,16 @@ from PySide6.QtWidgets import QApplication
 import cdx
 import app.sandbox as sandbox_module
 import app.settings as settings_module
-from app.colour import NEVER_ESCAPED_RGB, PALETTES
+from app.color import NEVER_ESCAPED_RGB, PALETTES
 from app.library_panel import (_DYNAMICAL_VIEW_FALLBACK, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for)
 from app.pane import Pane
 from app.sandbox import (ATTRACTING_CYCLES_LAYER_KEY, CRITICAL_POINTS_LAYER_KEY, CYCLE_TRACE_KEY,
                          FIXED_POINTS_LAYER_KEY, ExportImageDialog, ImageView, RenderTask,
                          SandboxWindow, _attracting_cycles_provider,
-                         _attracting_cycles_trace_provider, _CYCLE_STRONG_COLOUR,
-                         _CYCLE_WEAK_COLOUR, _cycle_colour, _fixed_points_provider,
-                         _FIXED_POINT_CLASSIFICATION_COLOURS, _OVERLAY_LAYERS_BY_KEY,
+                         _attracting_cycles_trace_provider, _CYCLE_STRONG_COLOR,
+                         _CYCLE_WEAK_COLOR, _cycle_color, _fixed_points_provider,
+                         _FIXED_POINT_CLASSIFICATION_COLORS, _OVERLAY_LAYERS_BY_KEY,
                          array_to_qimage, build_legend_entries, compose_export_image,
                          drawable_polyline_segments, paint_registry_layers)
 from app.facts_panel import _classify, _is_inf
@@ -147,12 +147,12 @@ def main() -> None:
 
     print("=== app.sandbox tests ===")
 
-    # ---- array_to_qimage: mode-aware colouring dispatch ---------------------------
-    print("\narray_to_qimage (mode-aware colouring):")
-    settings = Settings(colour_palette="viridis", colour_scaling="log1p", colour_period=0.0)
+    # ---- array_to_qimage: mode-aware coloring dispatch ---------------------------
+    print("\narray_to_qimage (mode-aware coloring):")
+    settings = Settings(color_palette="viridis", color_scaling="log1p", color_period=0.0)
     # A tiny 1x2 array: row 0 (bottom, per cdx convention) never escapes,
     # row 1 (top) escapes near max_iter -- exercises both the never-escaped
-    # flat colour AND a real palette lookup in one image.
+    # flat color AND a real palette lookup in one image.
     escape_array = np.array([[0.0], [199.0]])   # (height=2, width=1)
 
     img = array_to_qimage(escape_array, "julia", settings, max_iter=200)
@@ -165,12 +165,12 @@ def main() -> None:
     top_pixel = img.pixelColor(0, 0)
     check((top_pixel.red(), top_pixel.green(), top_pixel.blue())
           == tuple(int(c) for c in PALETTES["viridis"][255]),
-          "the escaped pixel (smooth value near max_iter) lands at viridis' top colour, "
+          "the escaped pixel (smooth value near max_iter) lands at viridis' top color, "
           "at the FLIPPED row (QImage top = array row 1)")
     bottom_pixel = img.pixelColor(0, 1)
     check((bottom_pixel.red(), bottom_pixel.green(), bottom_pixel.blue()) == (0, 0, 0),
           "the never-escaped pixel (array row 0, QImage bottom row) is flat black, not "
-          "viridis' own index-0 colour")
+          "viridis' own index-0 color")
 
     img_param = array_to_qimage(escape_array, "parameter", settings, max_iter=200)
     check(img_param.format() == QImage.Format.Format_RGB888,
@@ -192,50 +192,50 @@ def main() -> None:
           "basin mode: an unresolved (label 0) pixel is flat black")
     b1, b3 = basin_img.pixelColor(1, 0), basin_img.pixelColor(3, 0)
     check((b1.red(), b1.green(), b1.blue()) != (b3.red(), b3.green(), b3.blue()),
-          "basin mode: two different basin ids get visually distinct colours")
+          "basin mode: two different basin ids get visually distinct colors")
     fast, slow = basin_img.pixelColor(1, 0), basin_img.pixelColor(2, 0)   # same basin id (1)
     check(fast.red() + fast.green() + fast.blue() > slow.red() + slow.green() + slow.blue(),
           "basin mode: within the same basin, the FAST-converging pixel (iters=3) is brighter "
           "than the slow one (iters=190) -- shading actually reaches the displayed image")
 
-    # Stage 0: settings.colour_scaling/colour_period reach basin mode too, not just
+    # Stage 0: settings.color_scaling/color_period reach basin mode too, not just
     # escape-time/greens -- array_to_qimage's basin branch must actually forward them.
-    basin_hist_settings = Settings(colour_palette="viridis", colour_scaling="histogram",
-                                   colour_period=0.0)
+    basin_hist_settings = Settings(color_palette="viridis", color_scaling="histogram",
+                                   color_period=0.0)
     basin_hist_img = array_to_qimage(basin_array, "basin", basin_hist_settings, max_iter=200)
     log_pixels = [basin_img.pixelColor(x, 0) for x in range(4)]
     hist_pixels = [basin_hist_img.pixelColor(x, 0) for x in range(4)]
     check(any((lp.red(), lp.green(), lp.blue()) != (hp.red(), hp.green(), hp.blue())
              for lp, hp in zip(log_pixels, hist_pixels)),
-          "settings.colour_scaling='histogram' actually reaches basin mode's rendered pixels, "
+          "settings.color_scaling='histogram' actually reaches basin mode's rendered pixels, "
           "producing DIFFERENT bytes than the default 'log1p' -- not silently ignored")
     unresolved_hist = basin_hist_img.pixelColor(0, 0)
     check((unresolved_hist.red(), unresolved_hist.green(), unresolved_hist.blue()) == (0, 0, 0),
           "...and the unresolved pixel stays flat black under histogram scaling too")
 
-    basin_period_settings = Settings(colour_palette="viridis", colour_scaling="log1p",
-                                     colour_period=10.0)
+    basin_period_settings = Settings(color_palette="viridis", color_scaling="log1p",
+                                     color_period=10.0)
     period_labels = np.array([[1.0, 1.0]])
     period_iters = np.array([[1.0, 11.0]])   # one period (10) apart
     period_array = np.stack([period_labels, period_iters])
     basin_period_img = array_to_qimage(period_array, "basin", basin_period_settings, max_iter=200)
     p0, p1 = basin_period_img.pixelColor(0, 0), basin_period_img.pixelColor(1, 0)
     check((p0.red(), p0.green(), p0.blue()) == (p1.red(), p1.green(), p1.blue()),
-          "settings.colour_period reaches basin mode too -- values one period apart land at "
+          "settings.color_period reaches basin mode too -- values one period apart land at "
           "the same shading")
 
     # Stage 2 (corrected): a RATIONAL map's "julia" render is stacked (2,
     # height, width) -- values then labels -- distinguished from the
     # certified-polynomial plain-2D case by ndim alone (see
     # array_to_qimage's own docstring), not a separate flag. GOVERNING
-    # PRINCIPLE: only the VALUES layer is coloured, through the exact same
-    # colour_escape_time pipeline a plain escape-time array already uses --
-    # labels never reach the colourer at all (that's basin mode's own job).
+    # PRINCIPLE: only the VALUES layer is colored, through the exact same
+    # color_escape_time pipeline a plain escape-time array already uses --
+    # labels never reach the colorer at all (that's basin mode's own job).
     # pixel 0: unresolved (value=0, label=0). pixels 1&2: the SAME value
-    # (100) but DIFFERENT labels (1 vs 2) -- must land at the SAME colour,
-    # proving colouring is label-blind. pixel 3: the SAME label as pixel 1
-    # (1) but a DIFFERENT value (199) -- must land at a DIFFERENT colour,
-    # proving colouring follows the smooth value like ordinary escape time.
+    # (100) but DIFFERENT labels (1 vs 2) -- must land at the SAME color,
+    # proving coloring is label-blind. pixel 3: the SAME label as pixel 1
+    # (1) but a DIFFERENT value (199) -- must land at a DIFFERENT color,
+    # proving coloring follows the smooth value like ordinary escape time.
     rational_julia_values = np.array([[0.0, 100.0, 100.0, 199.0]])
     rational_julia_labels = np.array([[0.0, 1.0, 2.0, 1.0]])
     rational_julia_array = np.stack([rational_julia_values, rational_julia_labels])
@@ -243,63 +243,63 @@ def main() -> None:
           "sanity: the stacked rational-julia test array has the expected shape")
     rational_julia_img = array_to_qimage(rational_julia_array, "julia", settings, max_iter=200)
     check(rational_julia_img.format() == QImage.Format.Format_RGB888,
-          "rational julia mode also produces RGB, via the SAME colour_escape_time path a "
+          "rational julia mode also produces RGB, via the SAME color_escape_time path a "
           "certified polynomial's plain array uses")
     check(rational_julia_img.width() == 4 and rational_julia_img.height() == 1,
           "output dimensions match the STACKED array's own (height, width), not (2, height, width)")
     unresolved_j = rational_julia_img.pixelColor(0, 0)
     check((unresolved_j.red(), unresolved_j.green(), unresolved_j.blue()) == NEVER_ESCAPED_RGB,
-          "rational julia: an unresolved (value=0) pixel gets colour_escape_time's own "
-          "NEVER_ESCAPED_RGB sentinel, the SAME flat colour a never-escaped polynomial pixel "
+          "rational julia: an unresolved (value=0) pixel gets color_escape_time's own "
+          "NEVER_ESCAPED_RGB sentinel, the SAME flat color a never-escaped polynomial pixel "
           "gets -- not a separate 'unresolved basin' treatment")
     j1, j2, j3 = (rational_julia_img.pixelColor(1, 0), rational_julia_img.pixelColor(2, 0),
                  rational_julia_img.pixelColor(3, 0))
     check((j1.red(), j1.green(), j1.blue()) == (j2.red(), j2.green(), j2.blue()),
           "rational julia: two pixels with the SAME smooth value but DIFFERENT basin labels "
-          "get the IDENTICAL colour -- colouring genuinely ignores which attractor was reached")
+          "get the IDENTICAL color -- coloring genuinely ignores which attractor was reached")
     check((j1.red(), j1.green(), j1.blue()) != (j3.red(), j3.green(), j3.blue()),
           "...but two pixels with the SAME label and DIFFERENT smooth values get DIFFERENT "
-          "colours -- colouring follows the value, exactly like ordinary escape time")
+          "colors -- coloring follows the value, exactly like ordinary escape time")
 
-    # Palette-sensitivity: changing settings.colour_palette must change a
+    # Palette-sensitivity: changing settings.color_palette must change a
     # rational julia render's output, the same as it would for a certified
-    # polynomial's -- proving this genuinely goes through colour_escape_time
+    # polynomial's -- proving this genuinely goes through color_escape_time
     # (palette-aware) and not some palette-blind bespoke path.
-    magma_settings = Settings(colour_palette="magma", colour_scaling="log1p", colour_period=0.0)
+    magma_settings = Settings(color_palette="magma", color_scaling="log1p", color_period=0.0)
     rational_julia_magma = array_to_qimage(rational_julia_array, "julia", magma_settings,
                                            max_iter=200)
     check(rational_julia_magma.constBits().tobytes() != rational_julia_img.constBits().tobytes(),
-          "rational julia: changing settings.colour_palette changes the rendered bytes -- "
-          "settings.colour_palette/colour_scaling/colour_period are genuinely honoured, "
+          "rational julia: changing settings.color_palette changes the rendered bytes -- "
+          "settings.color_palette/color_scaling/color_period are genuinely honoured, "
           "exactly as the governing principle requires")
 
     # render_map's "greens"/"parameter_greens" return a plain 2D array (see
     # its own docstring) -- array_to_qimage must be fed that same shape.
-    greens_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
+    greens_settings = Settings(color_palette="viridis", greens_band_width=1.0,
                                greens_period_bands=12.0, greens_contour=False)
     greens_payload = np.array([[np.e ** 0, np.e ** 12]])
     greens_img = array_to_qimage(greens_payload, "greens", greens_settings, max_iter=200)
     check(greens_img.format() == QImage.Format.Format_RGB888,
-          "greens mode now gets a real RGB colour treatment (equipotential bands), not the "
+          "greens mode now gets a real RGB color treatment (equipotential bands), not the "
           "old flat grayscale stretch")
     g1, g2 = greens_img.pixelColor(0, 0), greens_img.pixelColor(1, 0)
     check((g1.red(), g1.green(), g1.blue()) == (g2.red(), g2.green(), g2.blue()),
           "e^0 and e^12 (12 bands apart at band_width=1, period_bands=12) land at the "
-          "same colour -- greens_period_bands actually reaches the displayed pixels")
+          "same color -- greens_period_bands actually reaches the displayed pixels")
 
     pgreens_payload = np.array([[1.0, 2.0]])
     _img = array_to_qimage(pgreens_payload, "parameter_greens", greens_settings, max_iter=200)
     check(_img.format() == QImage.Format.Format_RGB888,
           "parameter_greens gets the same scalar-field RGB treatment as greens")
 
-    contour_settings = Settings(colour_palette="viridis", greens_band_width=1.0,
+    contour_settings = Settings(color_palette="viridis", greens_band_width=1.0,
                                 greens_period_bands=12.0, greens_contour=True)
     contour_payload = np.array([[np.e ** 0, np.e ** 3]])
     contour_img = array_to_qimage(contour_payload, "greens", contour_settings, max_iter=200)
     check(contour_img.format() == QImage.Format.Format_RGB888,
           "greens_contour=True still produces a valid RGB image")
 
-    period_settings = Settings(colour_palette="viridis", colour_scaling="log1p", colour_period=10.0)
+    period_settings = Settings(color_palette="viridis", color_scaling="log1p", color_period=10.0)
     # Nonzero values one period apart, so both go through the real palette
     # lookup rather than one of them tripping the never-escaped (value==0)
     # short-circuit.
@@ -307,8 +307,8 @@ def main() -> None:
     wrap_img = array_to_qimage(wrap_array, "julia", period_settings, max_iter=200)
     p1, p2 = wrap_img.pixelColor(0, 0), wrap_img.pixelColor(1, 0)
     check((p1.red(), p1.green(), p1.blue()) == (p2.red(), p2.green(), p2.blue()),
-          "with a colour_period of 10, values one period apart (1.0 and 11.0) land at the "
-          "SAME colour -- the settings' period reaches the actual displayed pixels")
+          "with a color_period of 10, values one period apart (1.0 and 11.0) land at the "
+          "SAME color -- the settings' period reaches the actual displayed pixels")
 
     # ---- pixel <-> complex coordinate mapping -----------------------------------
     print("\npixel <-> complex mapping:")
@@ -419,33 +419,33 @@ def main() -> None:
     check(len(fp_resolved) == len(finite_fixed) == 2,
           "plotted fixed points are exactly the FINITE entries of facts.fixed_points -- the "
           "same source the Facts tab's own table reads, infinity excluded")
-    check({pt for pt, _colour in fp_resolved} == {fp.point for fp in finite_fixed},
+    check({pt for pt, _color in fp_resolved} == {fp.point for fp in finite_fixed},
           "the plotted point SET matches facts.fixed_points' own finite points exactly")
-    check(not any(math.isinf(pt.real) or math.isinf(pt.imag) for pt, _colour in fp_resolved),
+    check(not any(math.isinf(pt.real) or math.isinf(pt.imag) for pt, _color in fp_resolved),
           "infinity itself never appears among the plotted points")
-    for pt, colour in fp_resolved:
+    for pt, color in fp_resolved:
         fp = next(fp for fp in finite_fixed if fp.point == pt)
-        check(colour == _FIXED_POINT_CLASSIFICATION_COLOURS[_classify(fp.multiplier)],
-              f"fixed point at {pt} is coloured by _classify(multiplier) == "
+        check(color == _FIXED_POINT_CLASSIFICATION_COLORS[_classify(fp.multiplier)],
+              f"fixed point at {pt} is colored by _classify(multiplier) == "
               f"{_classify(fp.multiplier)!r}, matching the Facts tab's own classification")
 
-    # Map-independent: every _classify output has a defined colour, and the
-    # palette is genuinely 3 DISTINCT colours (attracting/repelling/neutral)
+    # Map-independent: every _classify output has a defined color, and the
+    # palette is genuinely 3 DISTINCT colors (attracting/repelling/neutral)
     # even though _classify itself returns 4 labels -- superattracting
-    # shares attracting's colour (see _FIXED_POINT_CLASSIFICATION_COLOURS'
+    # shares attracting's color (see _FIXED_POINT_CLASSIFICATION_COLORS'
     # own module comment), not a silent KeyError for the common case of a
     # multiplier-0 fixed point (e.g. every root of Newton's method).
-    check(set(_FIXED_POINT_CLASSIFICATION_COLOURS) == {"attracting", "superattracting",
+    check(set(_FIXED_POINT_CLASSIFICATION_COLORS) == {"attracting", "superattracting",
                                                         "repelling", "neutral"},
-          "every possible _classify(...) output has a defined overlay colour")
-    check(_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"]
-          == _FIXED_POINT_CLASSIFICATION_COLOURS["superattracting"],
-          "superattracting shares attracting's colour, keeping the palette to 3 visually "
-          "distinct colours as specified, not 4")
-    check(len({_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
-              _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
-              _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]}) == 3,
-          "attracting/repelling/neutral are 3 genuinely distinct colours, not two of them "
+          "every possible _classify(...) output has a defined overlay color")
+    check(_FIXED_POINT_CLASSIFICATION_COLORS["attracting"]
+          == _FIXED_POINT_CLASSIFICATION_COLORS["superattracting"],
+          "superattracting shares attracting's color, keeping the palette to 3 visually "
+          "distinct colors as specified, not 4")
+    check(len({_FIXED_POINT_CLASSIFICATION_COLORS["attracting"],
+              _FIXED_POINT_CLASSIFICATION_COLORS["repelling"],
+              _FIXED_POINT_CLASSIFICATION_COLORS["neutral"]}) == 3,
+          "attracting/repelling/neutral are 3 genuinely distinct colors, not two of them "
           "coinciding by accident")
 
     print("\nattracting-cycle layer:")
@@ -458,36 +458,36 @@ def main() -> None:
 
     cyc_resolved = _attracting_cycles_provider(fp_session.map, fp_session.param, fp_facts)
     period2 = next(c for c in fp_facts.attracting_cycles if c.period == 2)
-    check({pt for pt, _colour in cyc_resolved} >= {0j, -1 + 0j},
+    check({pt for pt, _color in cyc_resolved} >= {0j, -1 + 0j},
           "plotted cycle points include the basilica's own period-2 cycle {0, -1}, the same "
           "source the Facts tab's own Attracting Cycles table reads")
-    cyc_colours = {colour for pt, colour in cyc_resolved if pt in (0j, -1 + 0j)}
-    check(len(cyc_colours) == 1,
-          "every point belonging to the SAME cycle shares that cycle's one colour")
+    cyc_colors = {color for pt, color in cyc_resolved if pt in (0j, -1 + 0j)}
+    check(len(cyc_colors) == 1,
+          "every point belonging to the SAME cycle shares that cycle's one color")
 
     # Map-independent: the strength gradient itself, at its two defined ends
     # and part-way between.
-    check(_cycle_colour(0j) == _CYCLE_STRONG_COLOUR,
+    check(_cycle_color(0j) == _CYCLE_STRONG_COLOR,
           "a superattracting cycle (|multiplier| == 0) gets the gradient's STRONG end exactly")
-    check(_cycle_colour(complex(0.999, 0)) != _CYCLE_STRONG_COLOUR,
+    check(_cycle_color(complex(0.999, 0)) != _CYCLE_STRONG_COLOR,
           "a barely-attracting cycle (|multiplier| near 1) is visually distinct from a "
-          "superattracting one -- the gradient actually varies, not a flat colour")
-    mid_colour = _cycle_colour(complex(0.5, 0))
-    check(mid_colour != _CYCLE_STRONG_COLOUR and mid_colour != _CYCLE_WEAK_COLOUR,
+          "superattracting one -- the gradient actually varies, not a flat color")
+    mid_color = _cycle_color(complex(0.5, 0))
+    check(mid_color != _CYCLE_STRONG_COLOR and mid_color != _CYCLE_WEAK_COLOR,
           "a mid-strength cycle (|multiplier| == 0.5) lands strictly BETWEEN the two ends, "
           "not snapped to either one")
-    check(_cycle_colour(complex(5, 0)) == _cycle_colour(complex(1, 0)),
+    check(_cycle_color(complex(5, 0)) == _cycle_color(complex(1, 0)),
           "|multiplier| is clamped at 1 -- an (unexpected, since attracting implies < 1) "
           "out-of-range value doesn't extrapolate past the gradient's own weak end")
 
     cyc_traces = _attracting_cycles_trace_provider(fp_session.map, fp_session.param, fp_facts)
-    period2_trace = next((path, colour) for path, colour in cyc_traces
+    period2_trace = next((path, color) for path, color in cyc_traces
                          if set(path) == {0j, -1 + 0j})
     check(period2_trace[0] == list(period2.points) + [period2.points[0]],
           "a period-2 cycle's traced path is its 2 (ordered) points closed into a loop -- "
           "append points[0] -- not a re-sorted or independently-derived path")
-    check(period2_trace[1] == cyc_colours.pop(),
-          "...drawn in the SAME colour as that cycle's own points, not a separately computed one")
+    check(period2_trace[1] == cyc_colors.pop(),
+          "...drawn in the SAME color as that cycle's own points, not a separately computed one")
 
     print("\noverlay-layer registry: independence + trace gating:")
     fp_view.set_layer_enabled(FIXED_POINTS_LAYER_KEY, True)
@@ -546,14 +546,14 @@ def main() -> None:
         show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
     check([e.label for e in fixed_and_cycles] ==
           ["Fixed points: attracting / repelling / neutral",
-           "Attracting cycles: coloured by strength", "Cycle paths"],
+           "Attracting cycles: colored by strength", "Cycle paths"],
           "enabled+visible layers contribute their OWN legend_label, in registry order, "
           "with a trace's own sub-entry right after its layer's -- built from OVERLAY_LAYERS, "
           "not a hand-written per-overlay list")
     check(fixed_and_cycles[0].swatches ==
-          (_FIXED_POINT_CLASSIFICATION_COLOURS["attracting"],
-           _FIXED_POINT_CLASSIFICATION_COLOURS["repelling"],
-           _FIXED_POINT_CLASSIFICATION_COLOURS["neutral"]),
+          (_FIXED_POINT_CLASSIFICATION_COLORS["attracting"],
+           _FIXED_POINT_CLASSIFICATION_COLORS["repelling"],
+           _FIXED_POINT_CLASSIFICATION_COLORS["neutral"]),
           "fixed points' entry carries all three classification swatches")
     check(len(fixed_and_cycles[1].swatches) == 2,
           "attracting cycles' entry carries the strength gradient's two ends as swatches")
@@ -564,7 +564,7 @@ def main() -> None:
         "julia", layer_enabled={ATTRACTING_CYCLES_LAYER_KEY: True},
         layer_trace_enabled={CYCLE_TRACE_KEY: False},   # layer on, its trace off
         show_orbit=False, orbit_seeded=False, show_param_marker=False, param_set=False)
-    check([e.label for e in cycles_no_trace] == ["Attracting cycles: coloured by strength"],
+    check([e.label for e in cycles_no_trace] == ["Attracting cycles: colored by strength"],
           "a layer's trace sub-entry is independently gated -- present only when the trace "
           "itself is enabled too, same as what actually gets DRAWN")
 
@@ -1577,7 +1577,7 @@ def main() -> None:
     ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
     check(ok, "switching to parameter_basin mode renders and displays successfully end-to-end, "
          "with the new stacked counts+unresolved array flowing all the way through the "
-         "categorical (non-palette) colourer")
+         "categorical (non-palette) colorer")
 
     # A max_iter that would have overflowed the OLD accumulate/degree^
     # max_iter formula (degree^2000 is astronomically outside double
