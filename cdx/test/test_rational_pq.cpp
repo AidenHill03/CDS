@@ -314,6 +314,73 @@ int main() {
                          Cplx{0.0, 0.0}, Viewport{{0.0, 0.0}, 2.0, 61});
     }
 
+    // ---- add_pole_at/add_zero_at: forward root->factor on the canonical P/Q ----
+    std::printf("\nadd_pole_at/add_zero_at: forward root->factor on P/Q:\n");
+    {
+        RationalMap m = build_pq("z^2 + a");
+        const Cplx z{0.7, 0.3}, a{0.1, -0.2};
+        const Cplx before = m.eval(z, a);
+
+        m.add_pole_at(Cplx{2.0, 0.0});
+        const Cplx after_pole = m.eval(z, a);
+        check(close(after_pole, before / (z - Cplx{2.0, 0.0})),
+              "add_pole_at(2): eval matches dividing the PREVIOUS value by (z-2) exactly");
+        check(m.to_formula() == "(z^2 + a) / (z-2)", "to_formula() wraps the previous authored "
+              "text in the new factor -- mathematically exact, not just labelled");
+
+        m.add_zero_at(Cplx{-1.0, 0.0});
+        const Cplx after_zero = m.eval(z, a);
+        check(close(after_zero, after_pole * (z - Cplx{-1.0, 0.0})),
+              "add_zero_at(-1): eval matches multiplying the PREVIOUS value by (z+1) exactly");
+        check(m.to_formula() == "((z^2 + a) / (z-2)) * (z+1)", "to_formula() wraps again, "
+              "nesting correctly");
+
+        // Re-parsing the updated formula reproduces the identical map --
+        // the wrapped text is a faithful, re-parseable description, not
+        // just a display-only label detached from the actual P/Q.
+        RationalMap reparsed = build_pq(m.to_formula());
+        check(close(reparsed.eval(z, a), m.eval(z, a)), "re-parsing to_formula()'s own output "
+              "reproduces the identical map (eval matches)");
+
+        // A repeated add_pole_at at the SAME location is NOT rejected as a
+        // collision the way the term-based add_pole is (see add_pole_at's
+        // own doc comment for why) -- verified via the SAME "divides the
+        // previous value by the new factor" contract as the first
+        // add_pole_at check above, not via pole_orders()'s numerically-
+        // estimated order at that location: a genuine double root's
+        // root-finder estimate isn't precise enough for vanishing_order's
+        // own tolerance to reliably see past the first order of vanishing
+        // (the same Aberth-Ehrlich multiple-root precision limit
+        // documented elsewhere in this codebase -- e.g. cdx::roots' own
+        // docs on repeated-root convergence degrading from cubic to
+        // linear), a pre-existing characteristic of numerically-found
+        // poles, not something add_pole_at introduces or needs to work
+        // around for its OWN correctness (P and Q are exact either way).
+        const Cplx before_repeat = m.eval(z, a);
+        m.add_pole_at(Cplx{2.0, 0.0});
+        check(close(m.eval(z, a), before_repeat / (z - Cplx{2.0, 0.0})),
+              "a repeated add_pole_at at the same location still divides correctly -- it is "
+              "not rejected as a collision");
+
+        // Substituted-parameter bookkeeping survives a pole/zero addition
+        // untouched -- neither operation touches any parameter.
+        RationalMap m2 = RationalMap::from_expression("a*z^2 + b", "a", {{"b", Cplx{0.5, 0.0}}},
+                                                       "sub_then_pole");
+        m2.add_pole_at(Cplx{3.0, 0.0});
+        check(m2.pq_fixed_params().size() == 1 && close(m2.pq_fixed_params().at("b"), Cplx{0.5, 0.0}),
+              "add_pole_at preserves the substituted-parameter record (pq_fixed_params) "
+              "untouched");
+        check(m2.pq_active_param() == "a", "...and the active parameter too");
+
+        // Throws for a term-based map.
+        bool threw = false;
+        try {
+            RationalMap term = RationalMap::mandelbrot();
+            term.add_pole_at(Cplx{1.0, 0.0});
+        } catch (const std::logic_error&) { threw = true; }
+        check(threw, "add_pole_at on a TERM-BASED map throws (not is_pq_backed())");
+    }
+
     // ---- from_canonical rejects more than one parameter -------------------------
     std::printf("\nfrom_canonical: single-active-parameter enforcement:\n");
     {

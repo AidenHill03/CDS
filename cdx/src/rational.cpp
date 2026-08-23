@@ -386,6 +386,58 @@ const std::map<std::string, Cplx>& RationalMap::pq_fixed_params() const {
     return pq_ ? pq_fixed_params_ : kEmpty;
 }
 
+namespace {
+// "(z - location)", or "(z + |location|)" when location is a negative
+// real -- matches to_formula()'s own term-based sign convention (see its
+// pole-factor printing below) so a P/Q map's formula reads the same way a
+// term-based one's does.
+std::string fmt_linear_factor(Cplx location) {
+    if (location.imag() == 0.0 && location.real() < 0) return "(z+" + fmt(-location) + ")";
+    return "(z-" + fmt(location) + ")";
+}
+}  // namespace
+
+void RationalMap::add_pole_at(Cplx location) {
+    if (!pq_) {
+        throw std::logic_error(
+            "RationalMap::add_pole_at: only valid for a P/Q-backed map (is_pq_backed()) -- "
+            "use add_pole for a term-based one");
+    }
+    // Preserved explicitly: set_pq_backing's own defaults would otherwise
+    // wipe the substitution record for a map built via from_expression --
+    // multiplying Q by a plain (z-location) factor doesn't touch any
+    // parameter, fixed or active, so there is nothing here that should
+    // change about it.
+    const std::map<std::string, Cplx> saved_fixed = pq_fixed_params_;
+
+    CanonicalRational cr = *pq_;
+    PolyZ factor;
+    factor.coeffs = {param_const(-location), param_const(Cplx(1.0, 0.0))};   // z - location
+    cr.Q = poly_mul(cr.Q, factor);
+    cr.source = "(" + pq_original_source_ + ") / " + fmt_linear_factor(location);
+
+    set_pq_backing(std::move(cr));
+    pq_fixed_params_ = saved_fixed;
+}
+
+void RationalMap::add_zero_at(Cplx location) {
+    if (!pq_) {
+        throw std::logic_error(
+            "RationalMap::add_zero_at: only valid for a P/Q-backed map (is_pq_backed()) -- "
+            "use add_poly for a term-based one");
+    }
+    const std::map<std::string, Cplx> saved_fixed = pq_fixed_params_;
+
+    CanonicalRational cr = *pq_;
+    PolyZ factor;
+    factor.coeffs = {param_const(-location), param_const(Cplx(1.0, 0.0))};   // z - location
+    cr.P = poly_mul(cr.P, factor);
+    cr.source = "(" + pq_original_source_ + ") * " + fmt_linear_factor(location);
+
+    set_pq_backing(std::move(cr));
+    pq_fixed_params_ = saved_fixed;
+}
+
 // -----------------------------------------------------------------------------
 // 1e-12 absolute, matching pole_locations()'s own "same point" tolerance
 // (rational.cpp's pole_locations, push_unique) -- this check exists to

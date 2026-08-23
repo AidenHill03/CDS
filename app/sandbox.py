@@ -2,11 +2,12 @@
 
 Single window, driven by app.session.Session, with tabs: the image pane
 (render pipeline: threaded, progressive, cursor-anchored zoom, overscan
-buffer, correct orientation), a term editor (app/term_editor_panel.py), a
-read-only dynamical-facts panel (app/facts_panel.py), and a family library
-(app/library_panel.py). Render/cache configuration (app/settings_panel.py)
-lives outside the tab strip, in a non-modal dialog opened from File >
-Settings... (see SandboxWindow._build_settings_dialog).
+buffer, correct orientation), an equation-authoring panel over the P/Q
+model (app/equation_panel.py), a read-only dynamical-facts panel
+(app/facts_panel.py), and a family library (app/library_panel.py).
+Render/cache configuration (app/settings_panel.py) lives outside the tab
+strip, in a non-modal dialog opened from File > Settings... (see
+SandboxWindow._build_settings_dialog).
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -41,6 +42,7 @@ from app.about_dialog import AboutDialog
 from app.colour import (colour_basin, colour_escape_time, colour_parameter_basin,
                         colour_scalar_field)
 from app.complex_field import ComplexField
+from app.equation_panel import EquationPanel
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
@@ -53,7 +55,6 @@ from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_S
                          render_map)
 from app.settings import (Settings, library_path, load_settings, preview_path_for,
                           previews_dir, save_settings)
-from app.term_editor_panel import TermEditorPanel
 from app.settings_panel import SettingsPanel
 from app.version import PRODUCT_NAME
 
@@ -2348,8 +2349,8 @@ class SandboxWindow(QMainWindow):
         # independent of which central-widget tab is showing either way.
         self.tabs = QTabWidget(self)
         self.tabs.addTab(self.view_container, "View")
-        self.term_editor_panel = TermEditorPanel(self.session, self._on_term_edited, self)
-        self.tabs.addTab(self.term_editor_panel, "Terms")
+        self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
+        self.tabs.addTab(self.equation_panel, "Equation")
         self.facts_panel = FactsPanel(self.session, self._on_center_view,
                                       self._on_seed_orbit_from_facts, self)
         self.tabs.addTab(self.facts_panel, "Facts")
@@ -2759,7 +2760,7 @@ class SandboxWindow(QMainWindow):
         # once (map AND param AND every pane's viewport/mode AND settings),
         # so every panel that caches a view of the old state needs the
         # same treatment, not a partial refresh.
-        self.term_editor_panel.refresh_from_session()
+        self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
         self.metadata_header.refresh()
         for pane in self.panes:
@@ -3030,17 +3031,17 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             self._start_render(pane)
 
-    # ---- term edits: live but debounced, reusing the viewport-change path -------
+    # ---- map edits: live but debounced, reusing the viewport-change path -------
     def _on_term_edited(self) -> None:
         # Deliberately the SAME debounced path viewport drag/zoom uses, not
-        # an immediate render the way Settings' explicit Apply is: term
-        # edits are meant to feel live (nudge a coefficient, watch the
-        # picture update), and a burst of edits -- dragging a spinbox,
-        # typing several digits into a coefficient cell -- should coalesce
-        # into one render the same way a scroll burst does, not fire one
-        # render per keystroke. TermEditorPanel has already validated and
-        # applied the edit to self.session.map by the time this is called;
-        # this only has to trigger the render side.
+        # an immediate render the way Settings' explicit Apply is: an
+        # Apply/Add Pole/Add Zero click on the Equation tab is meant to
+        # feel live (click Apply, watch the picture update), and several
+        # edits in quick succession should coalesce into one render the
+        # same way a scroll burst does, not fire one render per click.
+        # EquationPanel has already validated and applied the edit to
+        # self.session.map by the time this is called; this only has to
+        # trigger the render side.
         #
         # session.map is SHARED and UNCONDITIONALLY affects every pane's
         # pixels regardless of mode (unlike a param change, which a
@@ -3115,7 +3116,7 @@ class SandboxWindow(QMainWindow):
         # UNCONDITIONALLY affects every pane regardless of mode (see
         # _apply_param_change's own cache-asymmetry docstring for the
         # contrast with a plain param change).
-        self.term_editor_panel.refresh_from_session()
+        self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
         self.metadata_header.refresh()   # name/formula/param all just changed wholesale
         for pane in self.panes:

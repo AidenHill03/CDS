@@ -45,7 +45,6 @@ from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeade
                                QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 import cdx
-from app.term_editor_panel import _format_complex
 
 CRITICAL_COLUMNS = ("Point", "Multiplicity")
 FIXED_COLUMNS = ("Point", "Multiplier", "Classification")
@@ -56,6 +55,16 @@ POLE_COLUMNS = ("Location", "Order")
 # attracting/repelling -- a display-only grouping choice, not a dynamical
 # claim; the raw multiplier is always shown alongside it anyway.
 _NEUTRAL_TOL = 1e-6
+
+
+def _format_complex(z: complex) -> str:
+    # str(complex) always round-trips through complex() exactly, but wraps
+    # anything with a nonzero imaginary part in parens ("(1+2j)") -- drop
+    # them so the cell shows exactly what a user would type back in.
+    s = str(z)
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    return s
 
 
 def _is_inf(z: complex) -> bool:

@@ -280,6 +280,51 @@ PYBIND11_MODULE(cdx, m) {
         .def_static("multibrot",    &RationalMap::multibrot, py::arg("n"))
         .def_static("mcmullen",     &RationalMap::mcmullen, py::arg("n"))
         .def_static("newton_cubic", &RationalMap::newton_cubic)
+        // ---- P/Q-backed (the equation-authoring path, Stages 2-4) ----------
+        .def_static("from_expression", &RationalMap::from_expression,
+             py::arg("source"), py::arg("active_param"), py::arg("fixed_values"),
+             py::arg("name") = std::string("untitled"),
+             "Parses `source` (a rational expression in z with arbitrary named "
+             "parameters) and reduces it to this engine's single-active-"
+             "parameter P/Q form. `active_param` may be '' iff `source` has at "
+             "most one parameter (exactly one -> auto-active); with two or "
+             "more, it must name which one is active. Every OTHER parameter "
+             "needs a value in `fixed_values` (a dict[str, complex]), "
+             "substituted as a constant. Raises ValueError for a parse "
+             "failure, an unresolvable/ambiguous active parameter, or a "
+             "missing fixed value.")
+        .def("is_pq_backed", &RationalMap::is_pq_backed,
+             "TRUE if this map was built via from_expression (or the lower-"
+             "level from_canonical), not add_poly/add_pole -- poly_terms()/"
+             "pole_terms() are both empty for a map built this way.")
+        .def_property_readonly("pq_source", &RationalMap::pq_source,
+             "The literal authored source text (e.g. 'a*z^3 - b*z + c'), if "
+             "is_pq_backed() -- '' otherwise. Prefer this over to_formula() "
+             "when non-empty: it's the user's own text, not a "
+             "reconstruction, and (unlike the reduced P/Q actually used for "
+             "computation) still shows every parameter the user originally "
+             "typed.")
+        .def_property_readonly("pq_active_param", &RationalMap::pq_active_param,
+             "Which parsed parameter is bound to eval/deriv/etc's own `a`, "
+             "if is_pq_backed() -- '' otherwise (including the genuine "
+             "zero-parameter case).")
+        .def_property_readonly("pq_fixed_params", &RationalMap::pq_fixed_params,
+             "dict[str, complex] of every OTHER parameter from_expression "
+             "substituted as a constant.")
+        .def("add_pole_at", &RationalMap::add_pole_at, py::arg("location"),
+             "P/Q-backed analogue of add_pole: multiplies the denominator by "
+             "(z-location) -- forward root->factor, not a search for a "
+             "location with some PRESCRIBED dynamical property (that's an "
+             "inverse problem, out of scope here). Raises RuntimeError if "
+             "not is_pq_backed().")
+        .def("add_zero_at", &RationalMap::add_zero_at, py::arg("location"),
+             "P/Q-backed analogue of add_poly's own zero-placing role: "
+             "multiplies the numerator by (z-location). Raises RuntimeError "
+             "if not is_pq_backed().")
+        .def("is_polynomial_structurally", &RationalMap::is_polynomial_structurally,
+             "TRUE iff this map is STRUCTURALLY a polynomial of degree >= 2 "
+             "(no pole for ANY parameter value) -- representation-agnostic, "
+             "works identically for a term-based or P/Q-backed map.")
         .def("__repr__", [](const RationalMap& r) {
             return "<cdx.RationalMap '" + r.name() + "': " + r.to_formula() + ">";
         });
@@ -321,6 +366,24 @@ PYBIND11_MODULE(cdx, m) {
         .def("__repr__", [](const Expr& e) {
             return "<cdx.Expr '" + e.source() + "'>";
         });
+
+    // ---- rational-expression parser (Stage 1 of the P/Q milestone) -----------
+    m.def("parse_rational_parameters", [](const std::string& source) {
+              CanonicalRational cr;
+              std::string error;
+              if (!parse_rational(source, cr, error)) throw std::invalid_argument(error);
+              return cr.parameters;
+          }, py::arg("source"),
+          "Validates `source` as a RATIONAL expression (+ - * / integer-^ "
+          "parens unary-minus z i numbers and named parameters -- no "
+          "transcendental functions) and returns its parameter names, "
+          "sorted and deduplicated (never including z/i). Raises ValueError "
+          "with a specific message (unknown symbol, transcendental function "
+          "-- distinguished from an unrecognized one, malformed syntax, a "
+          "non-integer/non-literal exponent, ...) if `source` is not valid "
+          "-- the SAME validation RationalMap.from_expression itself uses "
+          "when actually building a map, exposed standalone for live-typing "
+          "feedback before committing to that.");
 
     // ---- Viewport ----------------------------------------------------------
     py::class_<Viewport>(m, "Viewport")

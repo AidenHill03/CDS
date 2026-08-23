@@ -2,7 +2,7 @@
 
 Tests FactsPanel STANDALONE, constructed with its own Session and a spy
 `on_center_view` callback (same rationale as test_settings_panel.py /
-test_term_editor_panel.py: keeps these off a real SandboxWindow and its
+test_equation_panel.py: keeps these off a real SandboxWindow and its
 debounced render timer).
 
 Run with:

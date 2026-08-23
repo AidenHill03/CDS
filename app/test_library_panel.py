@@ -2,7 +2,7 @@
 
 Tests LibraryPanel STANDALONE, constructed with its own Session and spy
 on_load/on_change callbacks (same rationale as test_settings_panel.py /
-test_term_editor_panel.py / test_facts_panel.py: keeps these off a real
+test_equation_panel.py / test_facts_panel.py: keeps these off a real
 SandboxWindow, its render pipeline, and disk I/O -- this panel itself never
 touches ~/.complexdynamics/library.txt, see its own module docstring).
 

@@ -14,10 +14,10 @@ variable -- this is what turns the general "z^5 + a/z^2 - 0.3" grammar
 into a literal-only check without cdx.Expr needing to expose its own
 opcode list for introspection. Accepts 'i' as the imaginary unit (2-3i,
 i, -i), matching cdx.Expr's own grammar -- deliberately NOT the same
-convention app.term_editor_panel's coefficient/location fields use
-(Python's built-in complex(), which wants 'j') -- that field predates
-this one and reuses working code rather than being touched here; a
-future pass could unify them, but that is a separate decision.
+convention app.facts_panel's read-only table formatting uses (Python's
+built-in complex(), which wants 'j') -- that formatting predates this
+field and reuses working code rather than being touched here; a future
+pass could unify them, but that is a separate decision.
 
 ON MALFORMED INPUT: the field marks itself invalid (red border + a
 tooltip with the parser's own message) and returns without emitting

@@ -373,6 +373,54 @@ class Session:
                           render_mode, cancel=cancel, cache=self.cache,
                           potential=self._settings.greens_potential)
 
+    # ---- equation editing (Stage 4 of the P/Q milestone) ------------------------
+    # The equation panel's own "Apply"/"Add Pole"/"Add Zero" actions, each a
+    # thin wrapper over the P/Q-backed RationalMap operations Stage 2/3 added
+    # (from_expression, add_pole_at, add_zero_at) -- see their own doc
+    # comments (rational.hpp) for the actual math. Every one of these
+    # replaces or mutates self.map only on success; on failure it raises
+    # ValueError (from_expression's own C++ exception, translated by
+    # pybind11) and self.map is left exactly as it was, matching the
+    # existing term-editing methods' own "reject, don't half-apply"
+    # convention below.
+    def build_pq_map(self, source: str, active_param: str, fixed_values: dict[str, complex],
+                     name: str | None = None) -> None:
+        """Parses `source` and replaces self.map wholesale with a fresh
+        P/Q-backed RationalMap (cdx.RationalMap.from_expression) -- see its
+        own doc comment for what `active_param`/`fixed_values` mean and
+        when each raises ValueError. `name` defaults to the CURRENT map's
+        own name (editing a formula doesn't rename it), not "untitled".
+        """
+        target_name = name if name is not None else self.map.name
+        self.map = cdx.RationalMap.from_expression(source, active_param, fixed_values, target_name)
+
+    def add_pq_pole(self, location: complex) -> None:
+        """P/Q-backed analogue of add_pole_term: multiplies the CURRENT
+        map's own denominator by (z-location) -- see RationalMap.
+        add_pole_at's own doc comment. If self.map is not YET P/Q-backed
+        (e.g. a built-in preset just loaded, never edited through the
+        equation field), it is converted first via its own to_formula() --
+        exact for a term-based map, since to_formula() is a faithful
+        reconstruction and every built-in preset has at most one parameter
+        (from_expression's own auto-active rule applies cleanly). Raises
+        ValueError if that implicit conversion itself somehow fails (not
+        expected for any preset, but not assumed either); otherwise never
+        raises (add_pole_at itself only raises for a NON-P/Q-backed map,
+        which this method never leaves self.map as by the time it calls
+        it).
+        """
+        if not self.map.is_pq_backed():
+            self.build_pq_map(self.map.to_formula(), "", {})
+        self.map.add_pole_at(location)
+
+    def add_pq_zero(self, location: complex) -> None:
+        """Same as add_pq_pole, multiplying the numerator instead (see
+        RationalMap.add_zero_at's own doc comment).
+        """
+        if not self.map.is_pq_backed():
+            self.build_pq_map(self.map.to_formula(), "", {})
+        self.map.add_zero_at(location)
+
     # ---- term editing ----------------------------------------------------------
     # Thin wrappers over RationalMap's own term operations. poly_terms()/
     # pole_terms() are already live-mutable (see bindings.cpp's opaque

@@ -42,7 +42,23 @@ def describe_parameter_role(rational_map) -> str:
     offset). A map can combine several of these on different terms at
     once, or (newton_cubic(), confirmed directly) depend on `a` not at
     all -- both are read from the terms, not hardcoded per family.
+
+    P/Q-BACKED (Stage 4): poly_terms()/pole_terms() are both empty for a
+    map built through the equation panel (is_pq_backed()) -- there is no
+    per-term structure to walk, only pq_active_param() (which parsed
+    parameter is bound to `a`, possibly none at all -- e.g. Newton's
+    method typed directly) and pq_source() (the authored text, for
+    context) to report instead. Checked FIRST, before ever touching
+    poly_terms()/pole_terms(), since those being empty is also true of a
+    genuinely empty term-based map -- reading them regardless would
+    silently misreport a P/Q map that DOES depend on `a` as "unused".
     """
+    if rational_map.is_pq_backed():
+        active = rational_map.pq_active_param
+        if not active:
+            return "unused by this map"
+        return f"the '{active}' parameter in {rational_map.pq_source}"
+
     roles: list[str] = []
     for t in rational_map.poly_terms():
         if t.enabled and t.param_power != 0:

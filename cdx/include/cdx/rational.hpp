@@ -350,6 +350,32 @@ public:
     // had at most one parameter (nothing to substitute).
     const std::map<std::string, Cplx>& pq_fixed_params() const;
 
+    // --- P/Q-backed direct pole/zero addition (Stage 4) ----------------------
+    // Forward root->factor on the canonical P/Q: adding a pole multiplies
+    // Q by (z-location) (R_new(z) = R_old(z) / (z-location)); adding a
+    // zero multiplies P by (z-location) (R_new(z) = R_old(z) *
+    // (z-location)). The analogue, for a P/Q-backed map, of add_pole/
+    // add_poly above (which only ever operate on a term-based one).
+    // pq_source()/to_formula() update to match -- wrapping the existing
+    // authored text in the new factor, which is exact (re-parsing the
+    // result reproduces the identical P/Q, up to floating-point printing
+    // precision), not an approximation. Calling this repeatedly at the
+    // SAME location raises that pole's/zero's order by one each time --
+    // not rejected as a collision (unlike add_pole's own term-based
+    // check), since a P/Q map has no per-pole identity to collide with,
+    // just a polynomial that can have as high a root multiplicity as the
+    // caller asks for.
+    //
+    // PRESCRIBING a pole/zero so that R has some SPECIFIC desired
+    // dynamical behavior (a chosen fixed point, a chosen critical orbit,
+    // ...) is the INVERSE of this -- deliberately OUT OF SCOPE, left for
+    // separate future work; this is only the forward direction (place a
+    // root at a chosen LOCATION, see what the dynamics turn out to be).
+    //
+    // Throws std::logic_error if !is_pq_backed().
+    void add_pole_at(Cplx location);
+    void add_zero_at(Cplx location);
+
     // --- identity -----------------------------------------------------------
     const std::string& name() const { return name_; }
     void set_name(std::string n) { name_ = std::move(n); }

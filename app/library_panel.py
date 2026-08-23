@@ -8,15 +8,15 @@ their notes edited. session.save_to_library/rename_in_library/
 delete_from_library/set_library_notes all enforce this themselves (raising
 ValueError) -- the disabled buttons and read-only notes editor here are UI
 convenience layered on top of a real invariant enforced one level down, the
-same _try_mutate-adjacent shape app.term_editor_panel uses for its own
+same _try_mutate-adjacent shape app.equation_panel uses for its own
 validation.
 
 MODAL DIALOGS AREN'T DIRECTLY TESTABLE (QInputDialog.getText blocks on a
 real event loop), so every button handler that pops one is split: the
 button's own slot gathers the text via the dialog, then hands off to a
 `_do_*` method containing the actual mutation logic. Tests call the `_do_*`
-methods directly, the same way app/test_term_editor_panel.py drives
-TermEditorPanel's mutating methods directly rather than through QPushButton
+methods directly, the same way app/test_equation_panel.py drives
+EquationPanel's mutating methods directly rather than through QPushButton
 clicks.
 
 PERSISTENCE. This panel never WRITES to disk itself -- every successful

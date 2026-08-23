@@ -1482,12 +1482,12 @@ def main() -> None:
     # ---- Settings dialog (Stage 5): menu-opened, not a tab -------------------------
     print("\nsettings dialog:")
     check(window.tabs.count() == 4 and window.tabs.tabText(0) == "View"
-          and window.tabs.tabText(1) == "Terms" and window.tabs.tabText(2) == "Facts"
+          and window.tabs.tabText(1) == "Equation" and window.tabs.tabText(2) == "Facts"
           and window.tabs.tabText(3) == "Library",
-          "the window has View, Terms, Facts, and Library tabs, in that order -- Settings is "
+          "the window has View, Equation, Facts, and Library tabs, in that order -- Settings is "
           "no longer one of them")
-    check(window.tabs.widget(1) is window.term_editor_panel,
-          "the Terms tab holds the actual TermEditorPanel instance")
+    check(window.tabs.widget(1) is window.equation_panel,
+          "the Equation tab holds the actual EquationPanel instance")
     check(window.tabs.widget(2) is window.facts_panel,
           "the Facts tab holds the actual FactsPanel instance")
     check(window.tabs.widget(3) is window.library_panel,
@@ -1644,9 +1644,9 @@ def main() -> None:
     window.mode_combo.setCurrentText("julia")
 
     window.session.map.name = "renamed-live"
-    window.term_editor_panel._notify_edit()   # the real path _on_term_edited fires from
+    window.equation_panel._notify_edit()   # the real path _on_term_edited fires from
     check("renamed-live" in window.metadata_header._label.text(),
-          "a term edit refreshes the header's map name/formula")
+          "a map edit refreshes the header's map name/formula")
     check(window._debounce_timers[window.pane].isActive() and
           window._debounce_timers[window.pane2].isActive(),
           "cache asymmetry (Stage 3): session.map is shared, so a term edit debounces BOTH "
