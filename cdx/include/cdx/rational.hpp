@@ -27,10 +27,31 @@
 // PARAMETER BINDING. Every coefficient is c * a^q. q = 0 gives a fixed
 // coefficient; q = 1 makes the term scale linearly with the parameter, which
 // is how the classical families depend on it. Higher/negative q are allowed.
+//
+// A SECOND, P/Q-BACKED representation (Stage 2 of the P/Q milestone) lives
+// alongside the term-based one above, in the SAME class: RationalMap::
+// from_canonical builds a map directly from a cdx::CanonicalRational
+// (rational_parser.hpp) instead of from terms, and every method below
+// branches internally on which representation this particular instance
+// holds (see is_pq_backed()) -- poly_/pole_ simply stay empty for a P/Q-
+// backed map, and its own storage (pq_) stays empty for a term-based one.
+// This keeps every existing consumer (Renderer, cdx::analysis, the Python
+// bindings) working against the SAME `const RationalMap&`/`const
+// RationalMap*` it already holds, with no signature changes anywhere --
+// see ARCHITECTURE.md's own "insulated" framing for why that matters more
+// than which representation happens to be faster to build a given map
+// from. A P/Q-backed map is inherently SINGLE-parameter: whatever one
+// parameter (if any) the source expression referenced is always bound to
+// the `a` a caller passes to eval/deriv/etc, regardless of its literal
+// name -- see from_canonical's own comment for why selecting among SEVERAL
+// parsed parameters is deliberately not this class's job.
 // =============================================================================
 #pragma once
 
+#include "cdx/rational_parser.hpp"
+
 #include <complex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -108,12 +129,27 @@ public:
     // convention. Header-inline so a hot-loop call site can actually be
     // inlined, not just declare intent to be -- see cdx::detail::cipow in
     // this header for the arithmetic itself.
+    //
+    // BRANCHES ONCE per call on which representation this CompiledMap was
+    // built from (is_pq_), not once per RENDER -- but that branch is
+    // exactly as predictable as the existing `t.ci == 0.0` branch below
+    // (same value on every one of the many thousands of calls in a single
+    // render, so free after the first), the same reasoning this class's
+    // own doc comment already applies to that branch.
     inline void step(double& zr, double& zi) const;
 
 private:
     friend class RationalMap;
+    bool is_pq_ = false;
     std::vector<PolyOp> poly_;
     std::vector<PoleOp> pole_;
+    // P/Q Horner form (used when is_pq_ is true; poly_/pole_ stay empty).
+    // Ascending order, coefficients already evaluated at the bound
+    // parameter -- exactly like poly_/pole_ above, just P(z)/Q(z) evaluated
+    // directly instead of decomposed into partial-fraction terms (a P/Q
+    // map has no term list to decompose in the first place).
+    std::vector<double> pr_, pi_;   // P's coefficients
+    std::vector<double> qr_, qi_;   // Q's coefficients
 };
 
 namespace detail {
@@ -175,6 +211,33 @@ inline void cipow(double zr, double zi, int e, double& outr, double& outi) {
 }  // namespace detail
 
 inline void CompiledMap::step(double& zr, double& zi) const {
+    if (is_pq_) {
+        // Horner-evaluate P and Q at the current z, hand-rolled real/imag
+        // throughout (no std::complex -- same convention as detail::cipow
+        // above), then divide via the SAME one-division reciprocal trick.
+        double pr = pr_.empty() ? 0.0 : pr_.back();
+        double pi = pi_.empty() ? 0.0 : pi_.back();
+        for (std::size_t k = pr_.size(); k-- > 1;) {
+            const double nr = pr * zr - pi * zi + pr_[k - 1];
+            const double ni = pr * zi + pi * zr + pi_[k - 1];
+            pr = nr; pi = ni;
+        }
+        double qr = qr_.empty() ? 0.0 : qr_.back();
+        double qi = qi_.empty() ? 0.0 : qi_.back();
+        for (std::size_t k = qr_.size(); k-- > 1;) {
+            const double nr = qr * zr - qi * zi + qr_[k - 1];
+            const double ni = qr * zi + qi * zr + qi_[k - 1];
+            qr = nr; qi = ni;
+        }
+        if (qr == 0.0 && qi == 0.0) { zr = 1e300; zi = 0.0; return; }
+        const double inv_den = 1.0 / (qr * qr + qi * qi);
+        const double numr = pr * qr + pi * qi;
+        const double numi = pi * qr - pr * qi;
+        zr = numr * inv_den;
+        zi = numi * inv_den;
+        return;
+    }
+
     double sumr = 0.0, sumi = 0.0;
     for (const auto& t : poly_) {
         double pr, pi;
@@ -212,6 +275,34 @@ class RationalMap {
 public:
     RationalMap() = default;
     explicit RationalMap(std::string name) : name_(std::move(name)) {}
+
+    // --- P/Q-backed construction (Stage 2 of the P/Q milestone) --------------
+    // Builds a P/Q-BACKED RationalMap directly from a Stage-1
+    // CanonicalRational (rational_parser.hpp) instead of from terms --
+    // poly_terms()/pole_terms() stay empty for a map built this way (see
+    // is_pq_backed()). `cr` must have AT MOST ONE parameter: this engine
+    // stays single-active-parameter, and selecting WHICH of several parsed
+    // parameters plays that role -- substituting the rest as fixed
+    // constants first -- is a LATER stage's job, layered on top of this
+    // constructor via building a fresh single-parameter CanonicalRational
+    // to pass in, not something this constructor does itself. Throws
+    // std::invalid_argument if `cr` has more than one parameter.
+    static RationalMap from_canonical(CanonicalRational cr, std::string name = "untitled");
+
+    // TRUE iff this instance is P/Q-backed (built via from_canonical, not
+    // add_poly/add_pole) -- every method below branches on this internally,
+    // but a caller that only needs to know WHICH representation a map is
+    // using (e.g. to skip a representation-specific fast path -- see
+    // Renderer::recognize_family's own doc comment) can ask directly rather
+    // than inferring it from poly_terms()/pole_terms() both being empty
+    // (which is also true of a genuinely empty term-based map).
+    bool is_pq_backed() const { return pq_ != nullptr; }
+
+    // The authored source expression this map was parsed from, if
+    // is_pq_backed() -- empty string otherwise. Prefer this over
+    // to_formula() when it's non-empty: it's the user's own text verbatim,
+    // not a reconstruction.
+    const std::string& pq_source() const;
 
     // --- identity -----------------------------------------------------------
     const std::string& name() const { return name_; }
@@ -294,6 +385,22 @@ public:
     // Degree as a rational map of the sphere: max(deg numerator, deg
     // denominator) after clearing denominators.
     int degree(Cplx a) const;
+
+    // TRUE iff this map is STRUCTURALLY a polynomial of degree >= 2: the
+    // denominator is a nonzero constant (no pole ANYWHERE, for ANY
+    // parameter value) and the numerator's degree is at least 2 -- exactly
+    // what cdx::analysis::polynomial_escape_certified needs to decide
+    // whether the fixed-|z|>R escape-time fast path is a provably
+    // forward-invariant trap (see that function's own doc comment for why
+    // that specific condition is the right one). Structural, not numeric
+    // at one parameter value, for the SAME reason critical_points_constant
+    // () above is: a coefficient that happens to evaluate to 0 at one `a`
+    // doesn't change what's STRUCTURALLY present for other values, and
+    // this predicate has to hold for the whole family, not one point in
+    // it. Representation-agnostic -- works identically whether this map is
+    // term-based or P/Q-backed (is_pq_backed()) -- so callers outside this
+    // class never need to know or care which.
+    bool is_polynomial_structurally() const;
 
     // Locations of the finite poles (deduplicated), including any pole at the
     // origin implied by a negative polynomial exponent.
@@ -429,10 +536,33 @@ private:
     // same reason add_pole itself does.
     bool pole_location_conflict(Cplx location) const;
 
+    // Shared by from_canonical() and deserialize() (which builds `out`
+    // incrementally as it reads lines, rather than through the public
+    // factory) -- sets pq_/pq_param_/pq_dP_/pq_dQ_ from an already-
+    // validated (<=1 parameter) CanonicalRational.
+    void set_pq_backing(CanonicalRational cr);
+
     std::string           name_ = "untitled";
     std::string           notes_;
     std::vector<PolyTerm> poly_;
     std::vector<PoleTerm> pole_;
+
+    // P/Q-backed storage (Stage 2) -- null for a term-based map. Shared,
+    // not owned uniquely: copying a RationalMap (e.g. Map::custom's own
+    // std::make_shared<const RationalMap> wrap, or FamilyLibrary::add's
+    // push_back) copies this pointer, not the (immutable once parsed) P/Q
+    // structure it points to -- cheap, and safe precisely because nothing
+    // ever mutates a CanonicalRational after from_canonical builds it.
+    std::shared_ptr<const CanonicalRational> pq_;
+    // cr.parameters[0] if from_canonical's `cr` had one; empty otherwise.
+    // Cached here rather than re-read from pq_->parameters on every call,
+    // since every P/Q method needs it.
+    std::string pq_param_;
+    // d/dz of pq_->P and pq_->Q, computed ONCE (set_pq_backing) rather than
+    // rebuilt from scratch on every deriv()/critical_points() call -- a
+    // purely symbolic (ParamExpr-tree) computation each time otherwise,
+    // for information that never changes after construction.
+    PolyZ pq_dP_, pq_dQ_;
 };
 
 // -----------------------------------------------------------------------------

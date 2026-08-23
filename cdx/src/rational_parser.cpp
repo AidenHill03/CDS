@@ -125,16 +125,18 @@ Cplx PolyZ::eval(Cplx z, const std::map<std::string, Cplx>& params) const {
 }
 
 namespace {
-
 // Drops trailing (highest-degree) entries that are structurally the
 // literal 0 -- see ParamExpr::is_zero_literal's own comment on why this is
 // a purely structural check, not a numeric one.
 void trim(PolyZ& p) {
     while (!p.coeffs.empty() && p.coeffs.back()->is_zero_literal()) p.coeffs.pop_back();
 }
-
 PolyZ poly_zero() { return {}; }
+}  // namespace
 
+// PolyZ arithmetic -- exposed via rational_parser.hpp (see its own comment
+// on why: a P/Q-backed RationalMap needs this same algebra, not just the
+// parser).
 PolyZ poly_const(ParamExprPtr c) {
     PolyZ p;
     if (!c->is_zero_literal()) p.coeffs.push_back(std::move(c));
@@ -188,6 +190,39 @@ PolyZ poly_neg(const PolyZ& a) {
     for (const auto& c : a.coeffs) out.coeffs.push_back(param_neg(c));
     return out;
 }
+
+PolyZ poly_deriv(const PolyZ& a) {
+    PolyZ out;
+    if (a.coeffs.size() < 2) return out;   // degree <= 0: derivative is 0
+    out.coeffs.reserve(a.coeffs.size() - 1);
+    for (std::size_t k = 1; k < a.coeffs.size(); ++k) {
+        // k * coeffs[k], via repeated param_add rather than a dedicated
+        // "scale by integer" node -- ParamExpr has no Mul-by-plain-int
+        // shortcut, and k is always small (a realistic map's degree), so
+        // this is not worth a new node kind for.
+        ParamExprPtr scaled = a.coeffs[k];
+        for (std::size_t i = 1; i < k; ++i) scaled = param_add(scaled, a.coeffs[k]);
+        out.coeffs.push_back(std::move(scaled));
+    }
+    trim(out);
+    return out;
+}
+
+bool references_param(const ParamExprPtr& e, const std::string& name) {
+    if (!e) return false;
+    switch (e->kind) {
+        case ParamExpr::Kind::Const: return false;
+        case ParamExpr::Kind::Param: return e->name == name;
+        case ParamExpr::Kind::Neg: return references_param(e->lhs, name);
+        case ParamExpr::Kind::Add:
+        case ParamExpr::Kind::Sub:
+        case ParamExpr::Kind::Mul:
+            return references_param(e->lhs, name) || references_param(e->rhs, name);
+    }
+    return false;
+}
+
+namespace {
 
 // -----------------------------------------------------------------------------
 // Fraction<PolyZ> -- what every subexpression reduces to as parsing proceeds.

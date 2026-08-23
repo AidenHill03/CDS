@@ -43,6 +43,9 @@ target_link_libraries(cdx_test_analysis PRIVATE cdx_core)
 add_executable(cdx_test_rational_parser test/test_rational_parser.cpp)
 target_link_libraries(cdx_test_rational_parser PRIVATE cdx_core)
 
+add_executable(cdx_test_rational_pq test/test_rational_pq.cpp)
+target_link_libraries(cdx_test_rational_pq PRIVATE cdx_core)
+
 # Measurement tool, not a PASS/FAIL suite -- see its own header comment.
 # Diagnoses the Parameter_basin unresolved/slow problem on a Nova-style
 # family; prints a report rather than asserting production behavior.

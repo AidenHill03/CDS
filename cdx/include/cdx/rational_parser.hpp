@@ -139,6 +139,31 @@ struct PolyZ {
     Cplx eval(Cplx z, const std::map<std::string, Cplx>& params) const;
 };
 
+// PolyZ arithmetic, exposed (not just used internally by the parser) so a
+// consumer working directly with canonical P/Q -- e.g. the P/Q-backed
+// RationalMap representation (rational.hpp) computing (P'Q - PQ')/Q^2 in
+// closed form -- can build derived polynomials without duplicating this
+// algebra. All four trim trailing structurally-zero coefficients (see
+// ParamExpr::is_zero_literal); poly_mul of an empty PolyZ (the literal
+// constant 0) with anything is the empty PolyZ.
+PolyZ poly_add(const PolyZ& a, const PolyZ& b);
+PolyZ poly_sub(const PolyZ& a, const PolyZ& b);
+PolyZ poly_mul(const PolyZ& a, const PolyZ& b);
+PolyZ poly_neg(const PolyZ& a);
+
+// d/dz of a PolyZ: coefficient k becomes (k+1)*coeffs[k+1]. The empty PolyZ
+// (degree -infinity, i.e. identically 0) for a degree-<=0 input.
+PolyZ poly_deriv(const PolyZ& a);
+
+// A degree-0 PolyZ holding exactly `c` (empty if c is the literal 0).
+PolyZ poly_const(ParamExprPtr c);
+
+// TRUE iff the parameter named `name` appears anywhere in this expression
+// tree -- a purely structural (not numeric) check, used by callers that
+// need to know whether a coefficient can vary with one specific parameter
+// (e.g. RationalMap::critical_points_constant's P/Q-backed implementation).
+bool references_param(const ParamExprPtr& e, const std::string& name);
+
 // -----------------------------------------------------------------------------
 // The canonical form every authored rational expression collapses to:
 // R(z) = P(z) / Q(z), plus every distinct parameter name referenced

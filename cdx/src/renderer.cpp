@@ -66,8 +66,20 @@ bool close_enough(Cplx a, Cplx b) {
 // mandelbrot() after one save/load cycle. 1e-9 relative is tight enough
 // that no plausible deliberately-DIFFERENT coefficient could pass it by
 // accident, and loose enough to absorb that round-trip.
+//
+// P/Q-BACKED MAPS (Stage 2 of the P/Q milestone) are never recognized --
+// this reads poly_terms()/pole_terms() directly, and a P/Q-backed map has
+// no term list to read (is_pq_backed()). Correct either way: a P/Q map
+// that happens to BE shaped like z^2+a still renders correctly, just
+// through the general/compiled path instead of the hardcoded Family fast
+// path (up to ~10% slower per the P5a.1 benchmark, never wrong) -- a
+// representation-aware structural match against each of the shapes below,
+// done directly on P and Q instead of terms, is future work if that gap
+// ever matters in practice, not required for correctness now.
 // -----------------------------------------------------------------------------
 std::optional<Family> recognize_family(const RationalMap& m) {
+    if (m.is_pq_backed()) return std::nullopt;
+
     std::vector<PolyTerm> polys;
     for (const auto& t : m.poly_terms()) if (t.enabled) polys.push_back(t);
     std::vector<PoleTerm> poles;

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -227,6 +228,30 @@ std::string fmt(Cplx v) {
     return o.str();
 }
 
+// -----------------------------------------------------------------------------
+// P/Q-backed helpers (Stage 2). A P/Q map's coefficients are ParamExpr
+// trees (rational_parser.hpp) in AT MOST one parameter; resolving each one
+// against a single (name -> value) binding turns a PolyZ into a plain
+// ascending-order std::vector<Cplx> -- at that point it is EXACTLY the same
+// shape clear_denominators' own numerator/denominator already are, so
+// every polynomial op below this point (poly_mul, poly_add, poly_negate,
+// poly_shift, vanishing_order, mul_linear, roots(), effective_degree())
+// applies unchanged. A P/Q map needs no "clear denominators" step at all --
+// P and Q already ARE the numerator and denominator, not a term list to
+// combine into one.
+// -----------------------------------------------------------------------------
+std::map<std::string, Cplx> pq_binding(const std::string& param_name, Cplx a) {
+    if (param_name.empty()) return {};
+    return {{param_name, a}};
+}
+
+std::vector<Cplx> eval_coeffs(const PolyZ& p, const std::map<std::string, Cplx>& params) {
+    std::vector<Cplx> out;
+    out.reserve(p.coeffs.size());
+    for (const auto& c : p.coeffs) out.push_back(c->eval(params));
+    return out;
+}
+
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -240,6 +265,37 @@ Cplx PoleTerm::effective_strength(Cplx a) const {
 
 Cplx PoleTerm::effective_location(Cplx a) const {
     return location_is_param ? a : location;
+}
+
+// -----------------------------------------------------------------------------
+// P/Q-backed construction (Stage 2).
+// -----------------------------------------------------------------------------
+void RationalMap::set_pq_backing(CanonicalRational cr) {
+    if (cr.parameters.size() > 1) {
+        throw std::invalid_argument(
+            "RationalMap::from_canonical: '" + cr.source + "' has " +
+            std::to_string(cr.parameters.size()) + " parameters (" +
+            [&] { std::string s; for (std::size_t i = 0; i < cr.parameters.size(); ++i) {
+                      if (i) s += ", "; s += cr.parameters[i]; } return s; }() +
+            "); this engine is single-active-parameter -- select which one plays that "
+            "role and substitute the rest as constants before calling from_canonical "
+            "(see its own doc comment)");
+    }
+    pq_param_ = cr.parameters.empty() ? std::string() : cr.parameters[0];
+    pq_dP_ = poly_deriv(cr.P);
+    pq_dQ_ = poly_deriv(cr.Q);
+    pq_ = std::make_shared<const CanonicalRational>(std::move(cr));
+}
+
+RationalMap RationalMap::from_canonical(CanonicalRational cr, std::string name) {
+    RationalMap m(std::move(name));
+    m.set_pq_backing(std::move(cr));
+    return m;
+}
+
+const std::string& RationalMap::pq_source() const {
+    static const std::string kEmpty;
+    return pq_ ? pq_->source : kEmpty;
 }
 
 // -----------------------------------------------------------------------------
@@ -305,6 +361,14 @@ void RationalMap::clear() { poly_.clear(); pole_.clear(); }
 
 // -----------------------------------------------------------------------------
 Cplx RationalMap::eval(Cplx z, Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const Cplx num = pq_->P.eval(z, params);
+        const Cplx den = pq_->Q.eval(z, params);
+        if (den == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
+        return num / den;
+    }
+
     Cplx sum(0.0, 0.0);
 
     for (const auto& t : poly_) {
@@ -323,6 +387,18 @@ Cplx RationalMap::eval(Cplx z, Cplx a) const {
 }
 
 Cplx RationalMap::deriv(Cplx z, Cplx a) const {
+    if (pq_) {
+        // (P'Q - PQ') / Q^2, closed form -- pq_dP_/pq_dQ_ are precomputed
+        // once (set_pq_backing), not rebuilt symbolically on every call.
+        const auto params = pq_binding(pq_param_, a);
+        const Cplx P = pq_->P.eval(z, params);
+        const Cplx Q = pq_->Q.eval(z, params);
+        if (Q == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
+        const Cplx Pp = pq_dP_.eval(z, params);
+        const Cplx Qp = pq_dQ_.eval(z, params);
+        return (Pp * Q - P * Qp) / (Q * Q);
+    }
+
     Cplx sum(0.0, 0.0);
 
     // d/dz [c z^e] = c e z^(e-1)
@@ -344,6 +420,27 @@ Cplx RationalMap::deriv(Cplx z, Cplx a) const {
 
 // -----------------------------------------------------------------------------
 CompiledMap RationalMap::compile(Cplx a) const {
+    if (pq_) {
+        CompiledMap c;
+        c.is_pq_ = true;
+        const auto params = pq_binding(pq_param_, a);
+        c.pr_.reserve(pq_->P.coeffs.size());
+        c.pi_.reserve(pq_->P.coeffs.size());
+        for (const auto& coeff : pq_->P.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.pr_.push_back(v.real());
+            c.pi_.push_back(v.imag());
+        }
+        c.qr_.reserve(pq_->Q.coeffs.size());
+        c.qi_.reserve(pq_->Q.coeffs.size());
+        for (const auto& coeff : pq_->Q.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.qr_.push_back(v.real());
+            c.qi_.push_back(v.imag());
+        }
+        return c;
+    }
+
     CompiledMap c;
     c.poly_.reserve(poly_.size());
     for (const auto& t : poly_) {
@@ -363,6 +460,13 @@ CompiledMap RationalMap::compile(Cplx a) const {
 
 // -----------------------------------------------------------------------------
 int RationalMap::degree(Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const int p_deg = effective_degree(Polynomial{eval_coeffs(pq_->P, params)});
+        const int q_deg = effective_degree(Polynomial{eval_coeffs(pq_->Q, params)});
+        return std::max(p_deg, q_deg);
+    }
+
     // Clearing denominators: the denominator is the product of (z-p_j)^m_j
     // together with z^{|min negative exponent|}. The numerator degree is the
     // largest positive exponent plus the full denominator degree.
@@ -387,7 +491,52 @@ int RationalMap::degree(Cplx a) const {
     return std::max(num_deg, den_deg);
 }
 
+bool RationalMap::is_polynomial_structurally() const {
+    if (pq_) {
+        // Q is a nonzero constant (degree 0, i.e. at most one coefficient
+        // -- PolyZ trims structurally-zero trailing entries, so an empty
+        // or single-entry Q means no z-dependence at all) and P's
+        // STRUCTURAL degree (coefficient count - 1) is >= 2. Both are
+        // parameter-independent: which coefficient SLOTS exist doesn't
+        // depend on evaluating any of them.
+        if (pq_->Q.coeffs.size() > 1) return false;
+        return pq_->P.coeffs.size() >= 3;
+    }
+    for (const auto& t : pole_) {
+        if (t.enabled) return false;
+    }
+    for (const auto& t : poly_) {
+        if (t.enabled && t.exponent < 0) return false;   // implies a pole at the origin
+    }
+    return degree(Cplx(0.0, 0.0)) >= 2;
+}
+
 std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> raw = roots(Polynomial{eval_coeffs(pq_->Q, params)});
+        // roots() returns WITH multiplicity (a double pole comes back as
+        // two numerically-close, not necessarily bit-identical, estimates
+        // -- same Aberth-Ehrlich degradation distinct_critical_points()'s
+        // own comment documents), but pole_locations() is DEDUPLICATED,
+        // one entry per distinct location, with pole_orders() reporting
+        // each one's own order (see its own contract). A RELATIVE
+        // tolerance, matching distinct_critical_points()'s own default
+        // (not the term-based path's 1e-12 absolute below, which exists
+        // to catch an EXACT declared location told twice, not a
+        // root-finder's own estimate spread).
+        std::vector<Cplx> out;
+        for (Cplx p : raw) {
+            bool dup = false;
+            for (Cplx q : out) {
+                const double scale = std::max(1.0, std::max(std::abs(p), std::abs(q)));
+                if (std::abs(p - q) < 1e-4 * scale) { dup = true; break; }
+            }
+            if (!dup) out.push_back(p);
+        }
+        return out;
+    }
+
     std::vector<Cplx> out;
     auto push_unique = [&out](Cplx p) {
         for (const auto& q : out) if (std::abs(p - q) < 1e-12) return;
@@ -403,6 +552,19 @@ std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
 }
 
 std::vector<int> RationalMap::pole_orders(Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+        std::vector<int> out;
+        for (Cplx p : pole_locations(a)) {
+            const int d_order = vanishing_order(Q, p);
+            const int n_order = vanishing_order(P, p);
+            out.push_back(std::max(0, d_order - n_order));
+        }
+        return out;
+    }
+
     const ClearedFraction frac = own_fraction(poly_, pole_, a);
     std::vector<int> out;
     for (Cplx p : pole_locations(a)) {
@@ -414,6 +576,54 @@ std::vector<int> RationalMap::pole_orders(Cplx a) const {
 }
 
 std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+        const std::vector<Cplx> dP = eval_coeffs(pq_dP_, params);
+        const std::vector<Cplx> dQ = eval_coeffs(pq_dQ_, params);
+        const std::vector<Cplx> poles = pole_locations(a);
+        std::vector<Cplx> out;
+
+        // ---- ordinary critical points: zeros of P'Q - PQ', away from poles --
+        // No "clear denominators" step needed -- P and Q already ARE the
+        // numerator/denominator, not a term list to combine.
+        {
+            const std::vector<Cplx> deriv_num =
+                poly_add(poly_mul(dP, Q), poly_negate(poly_mul(P, dQ)));
+            const std::vector<Cplx> candidates = roots(Polynomial{deriv_num});
+            for (Cplx z : candidates) {
+                bool at_pole = false;
+                for (Cplx p : poles) {
+                    const double scale = std::max(1.0, std::abs(p));
+                    if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+                }
+                if (!at_pole) out.push_back(z);
+            }
+        }
+
+        // ---- each pole of TRUE local order m contributes multiplicity m-1 --
+        for (Cplx p : poles) {
+            const int d_order = vanishing_order(Q, p);
+            const int n_order = vanishing_order(P, p);
+            const int true_order = d_order - n_order;
+            for (int k = 1; k < true_order; ++k) out.push_back(p);
+        }
+
+        // ---- infinity contributes multiplicity |p-q|-1 when |p-q| >= 2 -----
+        const int p_deg = effective_degree(Polynomial{P});
+        const int q_deg = effective_degree(Polynomial{Q});
+        if (p_deg >= 0 && q_deg >= 0) {
+            const int diff = std::abs(p_deg - q_deg);
+            if (diff >= 2) {
+                const Cplx infinity(std::numeric_limits<double>::infinity(), 0.0);
+                for (int k = 1; k < diff; ++k) out.push_back(infinity);
+            }
+        }
+
+        return out;
+    }
+
     const std::vector<Cplx> poles = pole_locations(a);
     std::vector<Cplx> out;
 
@@ -500,6 +710,24 @@ std::vector<Cplx> RationalMap::distinct_critical_points(Cplx a, double rel_tol) 
 }
 
 bool RationalMap::critical_points_constant() const {
+    if (pq_) {
+        if (pq_param_.empty()) return true;   // no free parameter at all
+        // Q must not reference the parameter anywhere: a pole is a
+        // critical point in its own right, so its location/order moving
+        // with `a` disqualifies it outright (mirrors the term-based
+        // path's own pole check below).
+        for (const auto& c : pq_->Q.coeffs) {
+            if (references_param(c, pq_param_)) return false;
+        }
+        // P must not reference the parameter EXCEPT possibly its degree-0
+        // (constant) coefficient -- mirrors the term-based path's own
+        // exponent==0 exemption exactly (see the header's own comment on
+        // why that's safe: such a term never reaches the derivative).
+        for (std::size_t k = 1; k < pq_->P.coeffs.size(); ++k) {
+            if (references_param(pq_->P.coeffs[k], pq_param_)) return false;
+        }
+        return true;
+    }
     // Only terms that survive into the derivative (exponent != 0) can move
     // an ordinary critical point; a param-dependent exponent==0 term (e.g.
     // mandelbrot()'s "+ a") never reaches it. See the header comment for the
@@ -519,6 +747,38 @@ bool RationalMap::critical_points_constant() const {
 }
 
 std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+
+        // R(z) == z  <=>  P(z) - z*Q(z) == 0
+        const std::vector<Cplx> fixed_poly = poly_add(P, poly_negate(poly_shift(Q, 1)));
+        const std::vector<Cplx> candidates = roots(Polynomial{fixed_poly});
+
+        const std::vector<Cplx> poles = pole_locations(a);
+        std::vector<FixedPoint> out;
+        for (Cplx z : candidates) {
+            bool at_pole = false;
+            for (Cplx p : poles) {
+                const double scale = std::max(1.0, std::abs(p));
+                if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+            }
+            if (!at_pole) out.push_back({z, deriv(z, a)});
+        }
+
+        const int p_deg = effective_degree(Polynomial{P});
+        const int q_deg = effective_degree(Polynomial{Q});
+        if (p_deg > q_deg) {
+            const int diff = p_deg - q_deg;
+            const Cplx multiplier = diff >= 2
+                ? Cplx(0.0, 0.0)
+                : Q[static_cast<std::size_t>(q_deg)] / P[static_cast<std::size_t>(p_deg)];
+            out.push_back({Cplx(std::numeric_limits<double>::infinity(), 0.0), multiplier});
+        }
+        return out;
+    }
+
     const ClearedFraction frac = own_fraction(poly_, pole_, a);
 
     // R(z) == z  <=>  N(z) - z*D(z) == 0
@@ -566,6 +826,12 @@ std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
 
 // -----------------------------------------------------------------------------
 std::string RationalMap::to_formula() const {
+    // The user's own authored text, verbatim -- not a reconstruction (see
+    // pq_source's own comment). A later stage may want a normalized/pretty
+    // form here instead; Stage 2 only needs SOMETHING correct, and nothing
+    // is more correct than what the user actually typed.
+    if (pq_) return pq_->source;
+
     std::ostringstream o;
     bool first = true;
     auto sep = [&]() { if (!first) o << " + "; first = false; };
@@ -625,6 +891,18 @@ std::string RationalMap::serialize() const {
     o.precision(17);
     o << "map " << name_ << "\n";
     if (!notes_.empty()) o << "notes " << notes_ << "\n";
+    if (pq_) {
+        // Round-trips through parse_rational + from_canonical on
+        // deserialize -- see its own comment. Full authored-form fidelity
+        // (multiple parameters, which one is active, fixed-parameter
+        // values) is a later stage's job; a P/Q map here has already been
+        // reduced to at most one parameter by construction (from_
+        // canonical's own contract), so the source text alone is already
+        // everything deserialize needs to reconstruct this exact map.
+        o << "pq " << pq_->source << "\n";
+        o << "end\n";
+        return o.str();
+    }
     for (const auto& t : poly_) {
         o << "poly " << t.coeff.real() << ' ' << t.coeff.imag() << ' '
           << t.exponent << ' ' << t.param_power << ' ' << (t.enabled ? 1 : 0)
@@ -681,6 +959,28 @@ bool RationalMap::deserialize(const std::string& text, RationalMap& out,
             t.enabled = (en != 0);
             t.location_is_param = (lp != 0);
             out.pole_.push_back(t);
+        } else if (kind == "pq") {
+            std::string src;
+            std::getline(ls, src);
+            if (!src.empty() && src[0] == ' ') src.erase(0, 1);
+            CanonicalRational cr;
+            std::string parse_error;
+            if (!parse_rational(src, cr, parse_error)) {
+                error = "malformed pq line ('" + src + "'): " + parse_error;
+                return false;
+            }
+            // set_pq_backing itself throws std::invalid_argument for >1
+            // parameter -- shouldn't happen for a line THIS class's own
+            // serialize() wrote (from_canonical already enforced it before
+            // the map existed to serialize), but a hand-edited save file
+            // is exactly the kind of input this should report as a clean
+            // error rather than let escape as an exception.
+            try {
+                out.set_pq_backing(std::move(cr));
+            } catch (const std::invalid_argument& e) {
+                error = e.what();
+                return false;
+            }
         } else if (kind == "end") {
             break;
         }

@@ -499,13 +499,14 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
 }
 
 bool polynomial_escape_certified(const RationalMap& map) {
-    for (const auto& t : map.pole_terms()) {
-        if (t.enabled) return false;
-    }
-    for (const auto& t : map.poly_terms()) {
-        if (t.enabled && t.exponent < 0) return false;   // implies a pole at the origin too
-    }
-    return map.degree(Cplx(0.0, 0.0)) >= 2;   // degree() itself never reads its `a` argument
+    // Representation-agnostic (Stage 2 of the P/Q milestone): works
+    // identically whether `map` is term-based or P/Q-backed, since it goes
+    // through RationalMap::is_polynomial_structurally() rather than
+    // reading poly_terms()/pole_terms() directly -- a P/Q-backed map has
+    // no term list to read. See that method's own doc comment for why the
+    // check has to stay structural (no poles for ANY parameter value, not
+    // just the one degree() happens to be evaluated at).
+    return map.is_polynomial_structurally();
 }
 
 // =============================================================================
