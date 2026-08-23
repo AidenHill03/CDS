@@ -289,20 +289,66 @@ public:
     // std::invalid_argument if `cr` has more than one parameter.
     static RationalMap from_canonical(CanonicalRational cr, std::string name = "untitled");
 
-    // TRUE iff this instance is P/Q-backed (built via from_canonical, not
-    // add_poly/add_pole) -- every method below branches on this internally,
-    // but a caller that only needs to know WHICH representation a map is
-    // using (e.g. to skip a representation-specific fast path -- see
-    // Renderer::recognize_family's own doc comment) can ask directly rather
-    // than inferring it from poly_terms()/pole_terms() both being empty
-    // (which is also true of a genuinely empty term-based map).
+    // --- P/Q-backed construction from a MULTI-parameter source (Stage 3) ----
+    // Parses `source`, then reduces it to the engine's own single-active-
+    // parameter P/Q form: `active_param` stays a free parameter (bound to
+    // whatever `a` a caller passes to eval/deriv/etc, same as
+    // from_canonical); every OTHER parameter the source references is
+    // SUBSTITUTED with its value from `fixed_values`, turning that
+    // coefficient position into a plain constant before construction (see
+    // substitute_param, rational_parser.hpp) -- not carried forward as a
+    // second live parameter, since this engine is single-active-parameter
+    // by design (see the class comment).
+    //
+    // `active_param` may be EMPTY iff the source has zero or exactly one
+    // parameter -- "exactly one parameter -> auto-active". For a source
+    // with two or more parameters, `active_param` must name one of them
+    // explicitly; there is no default to fall back on when the choice is
+    // genuinely ambiguous.
+    //
+    // The ORIGINAL, unsubstituted source text, the chosen active
+    // parameter, and every substituted value are all preserved (pq_source
+    // () and to_formula() return the literal authored text, not a
+    // reconstruction from the reduced P/Q; serialize()/deserialize()
+    // round-trip all three -- see their own comments) even though every
+    // OTHER method only ever touches the reduced, single-parameter P/Q.
+    //
+    // Throws std::invalid_argument if: `source` fails to parse;
+    // `active_param` is non-empty but names something other than one of
+    // `source`'s own parameters (or is given at all when there are zero);
+    // `active_param` is empty when `source` has more than one parameter;
+    // or `fixed_values` is missing an entry for some non-active parameter.
+    static RationalMap from_expression(const std::string& source, const std::string& active_param,
+                                       const std::map<std::string, Cplx>& fixed_values,
+                                       std::string name = "untitled");
+
+    // TRUE iff this instance is P/Q-backed (built via from_canonical or
+    // from_expression, not add_poly/add_pole) -- every method below
+    // branches on this internally, but a caller that only needs to know
+    // WHICH representation a map is using (e.g. to skip a representation-
+    // specific fast path -- see Renderer::recognize_family's own doc
+    // comment) can ask directly rather than inferring it from poly_terms()
+    // /pole_terms() both being empty (which is also true of a genuinely
+    // empty term-based map).
     bool is_pq_backed() const { return pq_ != nullptr; }
 
-    // The authored source expression this map was parsed from, if
-    // is_pq_backed() -- empty string otherwise. Prefer this over
-    // to_formula() when it's non-empty: it's the user's own text verbatim,
-    // not a reconstruction.
+    // The authored source expression this map was built from, if
+    // is_pq_backed() -- empty string otherwise. For from_expression, this
+    // is the ORIGINAL multi-parameter text (e.g. "b*z^2 + a"), NOT the
+    // reduced single-parameter form computation actually uses -- prefer
+    // this over to_formula() when it's non-empty: it's the user's own text
+    // verbatim, not a reconstruction.
     const std::string& pq_source() const;
+
+    // Which parsed parameter is active (bound to eval/deriv/etc's own
+    // `a`), if is_pq_backed() -- empty string otherwise (including the
+    // genuine zero-parameter case, e.g. Newton's method typed directly).
+    const std::string& pq_active_param() const;
+
+    // name -> value for every OTHER parameter from_expression substituted
+    // as a constant -- empty if is_pq_backed() is false, or if the source
+    // had at most one parameter (nothing to substitute).
+    const std::map<std::string, Cplx>& pq_fixed_params() const;
 
     // --- identity -----------------------------------------------------------
     const std::string& name() const { return name_; }
@@ -563,6 +609,17 @@ private:
     // purely symbolic (ParamExpr-tree) computation each time otherwise,
     // for information that never changes after construction.
     PolyZ pq_dP_, pq_dQ_;
+
+    // Authored-form preservation (Stage 3) -- see from_expression's own
+    // comment. Defaulted from cr's own source/parameters by set_pq_backing
+    // (so a map built via the simpler from_canonical still has these
+    // populated consistently: pq_original_source_ == pq_->source,
+    // pq_active_param_ == pq_param_, pq_fixed_params_ empty), then
+    // OVERWRITTEN by from_expression with the true pre-substitution
+    // values once set_pq_backing returns.
+    std::string pq_original_source_;
+    std::string pq_active_param_;
+    std::map<std::string, Cplx> pq_fixed_params_;
 };
 
 // -----------------------------------------------------------------------------

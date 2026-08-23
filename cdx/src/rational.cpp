@@ -268,7 +268,7 @@ Cplx PoleTerm::effective_location(Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
-// P/Q-backed construction (Stage 2).
+// P/Q-backed construction (Stage 2 + Stage 3).
 // -----------------------------------------------------------------------------
 void RationalMap::set_pq_backing(CanonicalRational cr) {
     if (cr.parameters.size() > 1) {
@@ -284,6 +284,14 @@ void RationalMap::set_pq_backing(CanonicalRational cr) {
     pq_param_ = cr.parameters.empty() ? std::string() : cr.parameters[0];
     pq_dP_ = poly_deriv(cr.P);
     pq_dQ_ = poly_deriv(cr.Q);
+    // Defaults for the authored-form fields (Stage 3): correct as-is for a
+    // map built directly through from_canonical (source and active
+    // parameter both come straight from `cr`, nothing was substituted);
+    // from_expression overwrites all three with the true pre-substitution
+    // values once this call returns.
+    pq_original_source_ = cr.source;
+    pq_active_param_ = pq_param_;
+    pq_fixed_params_.clear();
     pq_ = std::make_shared<const CanonicalRational>(std::move(cr));
 }
 
@@ -293,9 +301,89 @@ RationalMap RationalMap::from_canonical(CanonicalRational cr, std::string name) 
     return m;
 }
 
+RationalMap RationalMap::from_expression(const std::string& source, const std::string& active_param,
+                                         const std::map<std::string, Cplx>& fixed_values,
+                                         std::string name) {
+    CanonicalRational cr;
+    std::string error;
+    if (!parse_rational(source, cr, error)) {
+        throw std::invalid_argument("RationalMap::from_expression: " + error);
+    }
+
+    std::string active = active_param;
+    if (cr.parameters.empty()) {
+        if (!active.empty()) {
+            throw std::invalid_argument(
+                "RationalMap::from_expression: '" + source + "' has no parameters, but "
+                "active_param='" + active + "' was given");
+        }
+    } else if (cr.parameters.size() == 1) {
+        if (active.empty()) {
+            active = cr.parameters[0];   // exactly one parameter -> auto-active
+        } else if (active != cr.parameters[0]) {
+            throw std::invalid_argument(
+                "RationalMap::from_expression: active_param='" + active + "' doesn't match "
+                "'" + source + "'s own single parameter '" + cr.parameters[0] + "'");
+        }
+    } else {
+        if (active.empty()) {
+            throw std::invalid_argument(
+                "RationalMap::from_expression: '" + source + "' has " +
+                std::to_string(cr.parameters.size()) + " parameters; active_param must "
+                "name which one is active (there is no default when the choice is "
+                "genuinely ambiguous)");
+        }
+        if (std::find(cr.parameters.begin(), cr.parameters.end(), active) == cr.parameters.end()) {
+            throw std::invalid_argument(
+                "RationalMap::from_expression: active_param='" + active + "' is not one of "
+                "'" + source + "'s own parameters");
+        }
+    }
+
+    PolyZ reduced_P = cr.P, reduced_Q = cr.Q;
+    std::map<std::string, Cplx> used_fixed;
+    for (const auto& pname : cr.parameters) {
+        if (pname == active) continue;
+        auto it = fixed_values.find(pname);
+        if (it == fixed_values.end()) {
+            throw std::invalid_argument(
+                "RationalMap::from_expression: '" + source + "' references parameter '" +
+                pname + "', which is not the active parameter ('" + active + "') and has "
+                "no fixed value in fixed_values");
+        }
+        reduced_P = substitute_param(reduced_P, pname, it->second);
+        reduced_Q = substitute_param(reduced_Q, pname, it->second);
+        used_fixed[pname] = it->second;
+    }
+
+    CanonicalRational reduced;
+    reduced.P = std::move(reduced_P);
+    reduced.Q = std::move(reduced_Q);
+    reduced.parameters = active.empty() ? std::vector<std::string>{}
+                                        : std::vector<std::string>{active};
+    reduced.source = source;   // placeholder -- pq_original_source_ below is authoritative
+
+    RationalMap m(std::move(name));
+    m.set_pq_backing(std::move(reduced));
+    m.pq_original_source_ = source;
+    m.pq_active_param_ = active;
+    m.pq_fixed_params_ = std::move(used_fixed);
+    return m;
+}
+
 const std::string& RationalMap::pq_source() const {
     static const std::string kEmpty;
-    return pq_ ? pq_->source : kEmpty;
+    return pq_ ? pq_original_source_ : kEmpty;
+}
+
+const std::string& RationalMap::pq_active_param() const {
+    static const std::string kEmpty;
+    return pq_ ? pq_active_param_ : kEmpty;
+}
+
+const std::map<std::string, Cplx>& RationalMap::pq_fixed_params() const {
+    static const std::map<std::string, Cplx> kEmpty;
+    return pq_ ? pq_fixed_params_ : kEmpty;
 }
 
 // -----------------------------------------------------------------------------
@@ -826,11 +914,12 @@ std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
 
 // -----------------------------------------------------------------------------
 std::string RationalMap::to_formula() const {
-    // The user's own authored text, verbatim -- not a reconstruction (see
-    // pq_source's own comment). A later stage may want a normalized/pretty
-    // form here instead; Stage 2 only needs SOMETHING correct, and nothing
-    // is more correct than what the user actually typed.
-    if (pq_) return pq_->source;
+    // The user's own ORIGINAL authored text, verbatim -- not a
+    // reconstruction, and not the reduced single-parameter form
+    // from_expression actually computes with (see pq_source's own
+    // comment). A later stage may want a normalized/pretty form instead;
+    // nothing is more correct than what the user actually typed.
+    if (pq_) return pq_original_source_;
 
     std::ostringstream o;
     bool first = true;
@@ -892,14 +981,18 @@ std::string RationalMap::serialize() const {
     o << "map " << name_ << "\n";
     if (!notes_.empty()) o << "notes " << notes_ << "\n";
     if (pq_) {
-        // Round-trips through parse_rational + from_canonical on
-        // deserialize -- see its own comment. Full authored-form fidelity
-        // (multiple parameters, which one is active, fixed-parameter
-        // values) is a later stage's job; a P/Q map here has already been
-        // reduced to at most one parameter by construction (from_
-        // canonical's own contract), so the source text alone is already
-        // everything deserialize needs to reconstruct this exact map.
-        o << "pq " << pq_->source << "\n";
+        // "pq2": full authored-form fidelity (Stage 3) -- the ORIGINAL,
+        // possibly multi-parameter source text, which parsed parameter is
+        // active ("-" for none), and one "pqfixed" line per substituted
+        // parameter. deserialize() reconstructs via from_expression,
+        // exactly reproducing the substitution this instance itself was
+        // built with -- not just a map that happens to compute the same
+        // way right now.
+        o << "pq2 " << (pq_active_param_.empty() ? "-" : pq_active_param_) << ' '
+          << pq_original_source_ << "\n";
+        for (const auto& [pname, pval] : pq_fixed_params_) {
+            o << "pqfixed " << pname << ' ' << pval.real() << ' ' << pval.imag() << "\n";
+        }
         o << "end\n";
         return o.str();
     }
@@ -924,6 +1017,13 @@ bool RationalMap::deserialize(const std::string& text, RationalMap& out,
     std::string line;
     out = RationalMap();
     bool saw_map = false;
+    // "pq2"/"pqfixed" (Stage 3): buffered until "end", since from_expression
+    // needs the full picture (source, active parameter, EVERY fixed value)
+    // at once, not incrementally the way poly/pole lines build up out.poly_/
+    // pole_ directly.
+    bool has_pq2 = false;
+    std::string pq2_active_token, pq2_source;
+    std::map<std::string, Cplx> pq2_fixed;
 
     while (std::getline(in, line)) {
         std::istringstream ls(line);
@@ -981,11 +1081,47 @@ bool RationalMap::deserialize(const std::string& text, RationalMap& out,
                 error = e.what();
                 return false;
             }
+        } else if (kind == "pq2") {
+            // Full authored-form fidelity (Stage 3) -- see serialize()'s
+            // own comment for the format. "-" (a token, not the empty
+            // string, since >> can't read an empty token) means no active
+            // parameter.
+            if (!(ls >> pq2_active_token)) {
+                error = "malformed pq2 line (missing active-parameter token): " + line;
+                return false;
+            }
+            std::string src;
+            std::getline(ls, src);
+            if (!src.empty() && src[0] == ' ') src.erase(0, 1);
+            has_pq2 = true;
+            pq2_source = src;
+        } else if (kind == "pqfixed") {
+            std::string pname;
+            double re, im;
+            if (!(ls >> pname >> re >> im)) {
+                error = "malformed pqfixed line: " + line; return false;
+            }
+            pq2_fixed[pname] = Cplx(re, im);
         } else if (kind == "end") {
             break;
         }
     }
     if (!saw_map) { error = "no 'map' header found"; return false; }
+    if (has_pq2) {
+        const std::string active = pq2_active_token == "-" ? std::string() : pq2_active_token;
+        // from_expression returns a FRESH RationalMap -- reassigning `out`
+        // to it would silently drop the name_/notes_ already set above by
+        // the "map"/"notes" lines, so carry them across explicitly.
+        const std::string saved_name = out.name_;
+        const std::string saved_notes = out.notes_;
+        try {
+            out = RationalMap::from_expression(pq2_source, active, pq2_fixed, saved_name);
+        } catch (const std::invalid_argument& e) {
+            error = e.what();
+            return false;
+        }
+        out.notes_ = saved_notes;
+    }
     error.clear();
     return true;
 }

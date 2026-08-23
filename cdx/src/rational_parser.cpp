@@ -222,6 +222,35 @@ bool references_param(const ParamExprPtr& e, const std::string& name) {
     return false;
 }
 
+ParamExprPtr substitute_param(const ParamExprPtr& e, const std::string& name, Cplx value) {
+    switch (e->kind) {
+        case ParamExpr::Kind::Const:
+            return e;
+        case ParamExpr::Kind::Param:
+            return e->name == name ? param_const(value) : e;
+        case ParamExpr::Kind::Neg:
+            return param_neg(substitute_param(e->lhs, name, value));
+        case ParamExpr::Kind::Add:
+            return param_add(substitute_param(e->lhs, name, value),
+                             substitute_param(e->rhs, name, value));
+        case ParamExpr::Kind::Sub:
+            return param_sub(substitute_param(e->lhs, name, value),
+                             substitute_param(e->rhs, name, value));
+        case ParamExpr::Kind::Mul:
+            return param_mul(substitute_param(e->lhs, name, value),
+                             substitute_param(e->rhs, name, value));
+    }
+    return e;
+}
+
+PolyZ substitute_param(const PolyZ& p, const std::string& name, Cplx value) {
+    PolyZ out;
+    out.coeffs.reserve(p.coeffs.size());
+    for (const auto& c : p.coeffs) out.coeffs.push_back(substitute_param(c, name, value));
+    while (!out.coeffs.empty() && out.coeffs.back()->is_zero_literal()) out.coeffs.pop_back();
+    return out;
+}
+
 namespace {
 
 // -----------------------------------------------------------------------------

@@ -121,6 +121,17 @@ using ParamExprPtr = std::shared_ptr<ParamExpr>;
 ParamExprPtr param_const(Cplx v);
 ParamExprPtr param_named(std::string name);
 
+// Returns a NEW tree with every Param node named `name` replaced by
+// Const(value) -- everything else rebuilt through the SAME constant-
+// folding constructors parsing itself uses (param_add/sub/mul/neg), so a
+// substitution that leaves no remaining reference to any OTHER parameter
+// folds down exactly as far as parsing an already-substituted source
+// would have. Used by a later stage (RationalMap::from_expression,
+// rational.hpp) to fix every non-active parameter's value before reducing
+// a multi-parameter CanonicalRational to the engine's own single-active-
+// parameter P/Q form.
+ParamExprPtr substitute_param(const ParamExprPtr& e, const std::string& name, Cplx value);
+
 // -----------------------------------------------------------------------------
 // A polynomial in z whose coefficients live in the ring of parameter
 // expressions above. Ascending order, matching cdx::Polynomial's own
@@ -163,6 +174,14 @@ PolyZ poly_const(ParamExprPtr c);
 // need to know whether a coefficient can vary with one specific parameter
 // (e.g. RationalMap::critical_points_constant's P/Q-backed implementation).
 bool references_param(const ParamExprPtr& e, const std::string& name);
+
+// substitute_param, applied to every coefficient of a whole PolyZ, with
+// trailing entries re-trimmed afterward -- substituting a parameter's
+// value can turn a previously-nonzero leading coefficient into a literal
+// zero (e.g. "b*z^2 + a" with b fixed to 0), which must lower the
+// polynomial's own STRUCTURAL degree, not leave a phantom zero leading
+// term.
+PolyZ substitute_param(const PolyZ& p, const std::string& name, Cplx value);
 
 // -----------------------------------------------------------------------------
 // The canonical form every authored rational expression collapses to:
