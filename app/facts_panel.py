@@ -47,8 +47,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeade
 import cdx
 
 CRITICAL_COLUMNS = ("Point", "Multiplicity")
-FIXED_COLUMNS = ("Point", "Multiplier", "Classification")
-CYCLE_COLUMNS = ("Period", "Multiplier", "Points")
+FIXED_COLUMNS = ("Point", "Multiplier", "|Multiplier|", "Classification")
+CYCLE_COLUMNS = ("Period", "Multiplier", "|Multiplier|", "Points")
 POLE_COLUMNS = ("Location", "Order")
 
 # |multiplier - 1| within this counts as neutral rather than "just barely"
@@ -69,6 +69,16 @@ def _format_complex(z: complex) -> str:
 
 def _is_inf(z: complex) -> bool:
     return math.isinf(z.real) or math.isinf(z.imag)
+
+
+def _format_magnitude(z: complex) -> str:
+    # A plain, real, non-negative number -- never routed through
+    # _format_complex (which always prints a "+0j" suffix, correct for an
+    # actual complex value but wrong for a magnitude). ".4g" matches the
+    # convention other magnitude-like readouts already use (see
+    # app.orbit_tracker's own cycle-multiplier text, app.sandbox's status-
+    # bar readouts).
+    return f"{abs(z):.4g}"
 
 
 def _classify(multiplier: complex) -> str:
@@ -156,9 +166,11 @@ def facts_to_dict(session, render_mode: str, viewport: cdx.Viewport) -> dict:
         "critical_points": [{"point": c(point), "multiplicity": mult}
                             for point, mult in critical_groups],
         "fixed_points": [{"point": c(fp.point), "multiplier": c(fp.multiplier),
+                          "multiplier_magnitude": abs(fp.multiplier),
                           "classification": _classify(fp.multiplier)}
                          for fp in facts.fixed_points],
         "attracting_cycles": [{"period": cyc.period, "multiplier": c(cyc.multiplier),
+                               "multiplier_magnitude": abs(cyc.multiplier),
                                "points": [c(p) for p in cyc.points]}
                               for cyc in facts.attracting_cycles],
         "poles": [{"location": c(loc), "order": order}
@@ -279,7 +291,8 @@ class FactsPanel(QWidget):
         for row, fp in enumerate(pts):
             table.setItem(row, 0, QTableWidgetItem(_format_complex(fp.point)))
             table.setItem(row, 1, QTableWidgetItem(_format_complex(fp.multiplier)))
-            table.setItem(row, 2, QTableWidgetItem(_classify(fp.multiplier)))
+            table.setItem(row, 2, QTableWidgetItem(_format_magnitude(fp.multiplier)))
+            table.setItem(row, 3, QTableWidgetItem(_classify(fp.multiplier)))
             points.append(fp.point)
         self._row_points[id(table)] = points
 
@@ -291,7 +304,8 @@ class FactsPanel(QWidget):
         for row, cyc in enumerate(cycles):
             table.setItem(row, 0, QTableWidgetItem(str(cyc.period)))
             table.setItem(row, 1, QTableWidgetItem(_format_complex(cyc.multiplier)))
-            table.setItem(row, 2, QTableWidgetItem(", ".join(_format_complex(p)
+            table.setItem(row, 2, QTableWidgetItem(_format_magnitude(cyc.multiplier)))
+            table.setItem(row, 3, QTableWidgetItem(", ".join(_format_complex(p)
                                                               for p in cyc.points)))
             # A cycle row centres on its FIRST point -- some single choice
             # has to be made, and points[0] is the critical point's own

@@ -22,8 +22,8 @@ import math
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.facts_panel import (FactsPanel, _classify, _critical_points_with_multiplicity, _is_inf,
-                             facts_to_dict)
+from app.facts_panel import (FactsPanel, _classify, _critical_points_with_multiplicity,
+                             _format_magnitude, _is_inf, facts_to_dict)
 from app.session import Session
 
 failures = 0
@@ -86,6 +86,21 @@ def main() -> None:
     check(panel._pole_table.rowCount() == 1,
           "poles table: newton_cubic has one pole")
     check(panel._pole_table.item(0, 1).text() == "2", "the pole's order column reads 2")
+
+    # ---- |multiplier| column (cosmetic batch, Part A) --------------------------------
+    print("\n|multiplier| column:")
+    fixed_points = session.dynamical_facts().fixed_points
+    for row, fp in enumerate(fixed_points):
+        shown = float(panel._fixed_table.item(row, 2).text())
+        check(abs(shown - abs(fp.multiplier)) < 1e-4 * max(1.0, abs(fp.multiplier)),
+              f"fixed-points row {row}'s |Multiplier| column matches abs(multiplier)")
+    cycles = session.dynamical_facts().attracting_cycles
+    for row, cyc in enumerate(cycles):
+        shown = float(panel._cycle_table.item(row, 2).text())
+        check(abs(shown - abs(cyc.multiplier)) < 1e-4 * max(1.0, abs(cyc.multiplier)),
+              f"attracting-cycles row {row}'s |Multiplier| column matches abs(multiplier)")
+    check(_format_magnitude(3 - 4j) == "5",
+          "_format_magnitude computes abs(), not some other norm (|3-4i| = 5)")
 
     # ---- clicking a row: poles centre the view, fixed/critical seed an orbit --------
     # (Stage 5) -- spy callbacks, not a real viewport/orbit tracker.
@@ -191,6 +206,12 @@ def main() -> None:
     check(all(fp["classification"] in ("attracting", "repelling", "neutral", "superattracting")
               for fp in data["fixed_points"]),
           "every fixed point's classification is one of the real, documented outcomes")
+    check(all(fp["multiplier_magnitude"] == abs(complex(*fp["multiplier"]))
+              for fp in data["fixed_points"]),
+          "every exported fixed point's multiplier_magnitude equals abs(multiplier) exactly")
+    check(all(cyc["multiplier_magnitude"] == abs(complex(*cyc["multiplier"]))
+              for cyc in data["attracting_cycles"]),
+          "every exported attracting cycle's multiplier_magnitude equals abs(multiplier) exactly")
     check(any(math.isinf(fp["point"][0]) for fp in data["fixed_points"]),
           "newton_cubic() genuinely has a fixed point AT infinity, included here like any "
           "other point -- not excluded (sphere-first, per CLAUDE.md)")
