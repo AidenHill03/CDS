@@ -821,12 +821,16 @@ int main() {
     // ---- Parameter_basin: find_attractors_from_seeds' unresolved_count -------------
     // Pure-function test of the counting/clustering logic itself, no
     // rendering involved: z^2+c at c=0.2499 (just inside the main
-    // cardioid's cusp, c=0.25, where the finite fixed point's multiplier
-    // is on the verge of 1) -- the finite critical orbit's own closure
-    // either never completes within max_period, or completes onto a cycle
-    // the multiplier check then rejects; either way it must show up in
-    // `unresolved_count`, not be silently absorbed into the returned
-    // cycle count.
+    // cardioid's own cusp, c=0.25) has a genuinely, if weakly, attracting
+    // finite fixed point (multiplier 0.98) -- MULTIPLIER-CONFIRMED
+    // detection (this batch's own fix) resolves it correctly, where the
+    // OLD closure-tolerance-only detection rejected it as unresolved
+    // purely because it converged too slowly to close within the strict
+    // budget (see find_attractors_from_seeds' own doc comment). c=0.25
+    // EXACTLY, the cusp itself, is the genuinely parabolic case (multiplier
+    // exactly 1) this confirmation path must still correctly reject, not
+    // a false positive from Newton's own floating-point residual there
+    // (see FindAttractorsOptions::attracting_margin's own doc comment).
     std::printf("\nParameter_basin: find_attractors_from_seeds' unresolved_count "
                "(pure-function test):\n");
     {
@@ -842,16 +846,33 @@ int main() {
               "c=0 (deep inside the cardioid): 2 distinct attracting cycles (the "
               "superattracting fixed point at 0, plus infinity), nothing unresolved");
 
-        const Cplx c_cusp{0.2499, 0.0};
+        const Cplx c_weak{0.2499, 0.0};
+        int unresolved_weak = -1;
+        const auto cyc_weak = find_attractors_from_seeds(quad.distinct_critical_points(c_weak),
+                                                         quad, c_weak, {}, &unresolved_weak);
+        check(cyc_weak.size() == 2 && unresolved_weak == 0,
+              "FIX: c=0.2499 (genuinely, weakly attracting -- multiplier ~0.98) now resolves "
+              "to 2 distinct attracting cycles (the finite fixed point AND infinity), "
+              "nothing unresolved -- multiplier confirmation caught what strict closure "
+              "tolerance alone missed");
+        check(cyc_weak[0].points.size() == 1,
+              "...and the resolved cycle is genuinely period-1 (a single point), not a "
+              "spurious multi-point 'cycle' from mistaking convergence time for period "
+              "(the exact bug this fix's own Newton-polish re-anchoring avoids)");
+        check(close(cyc_weak[0].points[0], Cplx{0.49, 0.0}, 1e-6),
+              "...at the analytically correct fixed point z=0.49 (solving z^2-z+0.2499=0)");
+
+        const Cplx c_true_cusp{0.25, 0.0};
         int unresolved_cusp = -1;
-        const auto cyc_cusp = find_attractors_from_seeds(quad.distinct_critical_points(c_cusp),
-                                                         quad, c_cusp, {}, &unresolved_cusp);
+        const auto cyc_cusp = find_attractors_from_seeds(quad.distinct_critical_points(c_true_cusp),
+                                                         quad, c_true_cusp, {}, &unresolved_cusp);
         check(cyc_cusp.size() == 1,
-              "c=0.2499 (just inside the cusp): only infinity is confirmed attracting -- "
-              "the near-parabolic finite fixed point is NOT found as a second cycle");
+              "SAFETY: c=0.25 EXACTLY (the cusp itself, multiplier exactly 1 -- genuinely "
+              "parabolic) still correctly finds only infinity, NOT a false-positive "
+              "'attracting' cycle from Newton's own floating-point residual there");
         check(unresolved_cusp >= 1,
-              "...and that near-parabolic critical orbit is honestly reported as "
-              "UNRESOLVED, not silently dropped or miscounted as a third attractor");
+              "...and the parabolic critical orbit is honestly reported as unresolved, "
+              "not silently dropped");
 
         const Cplx c_far{5.0, 5.0};
         int unresolved_far = -1;
@@ -882,10 +903,16 @@ int main() {
         check(count_inside == 2.0 && unresolved_inside2 == 0.0,
               "RENDER matches the pure-function result at c=0: count=2, unresolved=0");
 
-        auto [count_cusp, unresolved_cusp2] = count_at(Cplx{0.2499, 0.0});
+        auto [count_weak, unresolved_weak2] = count_at(Cplx{0.2499, 0.0});
+        check(count_weak == 2.0 && unresolved_weak2 == 0.0,
+              "RENDER matches the pure-function result at c=0.2499 (post-fix): count=2, "
+              "unresolved=0");
+
+        auto [count_cusp, unresolved_cusp2] = count_at(Cplx{0.25, 0.0});
         check(count_cusp == 1.0 && unresolved_cusp2 >= 1.0,
-              "RENDER matches the pure-function result at c=0.2499: count=1, unresolved>=1 -- "
-              "count and unresolved are tracked as SEPARATE channels, never conflated");
+              "RENDER matches the pure-function result at the TRUE cusp c=0.25: count=1, "
+              "unresolved>=1 -- count and unresolved are tracked as SEPARATE channels, "
+              "never conflated, and the genuinely parabolic case still isn't a false positive");
 
         auto [count_far, unresolved_far2] = count_at(Cplx{5.0, 5.0});
         check(count_far == 1.0 && unresolved_far2 == 0.0,
@@ -997,6 +1024,50 @@ int main() {
               "degrades to an honest all-zero image (both channels) rather than crashing "
               "or guessing -- this path is never actually reached by the app itself, which "
               "always renders through Map::custom (see app/session.py's render_map)");
+    }
+
+    // ---- fact sheet self-consistency: fixed-points table vs attracting-cycles table ---
+    // The SECOND symptom this fix addresses, distinct from Parameter_basin's
+    // own artifacts: dynamical_facts() bundles RationalMap::fixed_points()
+    // (an ALGEBRAIC root-find + exact deriv() evaluation, entirely
+    // independent of any iterative discovery) alongside find_attractors()'
+    // own attracting_cycles (previously closure-tolerance-only). Before
+    // this fix, the SAME map at the SAME parameter could have its fixed-
+    // points table correctly mark a point attracting (multiplier < 1)
+    // while its attracting-cycles table omitted it entirely -- both
+    // computed from ONE dynamical_facts() call, both about the exact same
+    // point, disagreeing with each other.
+    std::printf("\nfact sheet self-consistency: fixed-points table agrees with "
+               "attracting-cycles table (the SAME map, SAME parameter):\n");
+    {
+        RationalMap quad("quad");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+        const Cplx c{0.2499, 0.0};   // multiplier ~0.98 -- genuinely, weakly attracting
+        const auto facts = dynamical_facts(quad, c);
+
+        const FixedPoint* weak_fp = nullptr;
+        for (const auto& fp : facts.fixed_points) {
+            if (close(fp.point, Cplx{0.49, 0.0}, 1e-6)) { weak_fp = &fp; break; }
+        }
+        check(weak_fp != nullptr, "sanity: the algebraic fixed-points table finds z=0.49 "
+              "at all (RationalMap::fixed_points, independent of any iteration)");
+        check(weak_fp != nullptr && std::abs(weak_fp->multiplier) < 1.0,
+              "ORACLE: the fixed-points table's own ALGEBRAIC multiplier correctly marks "
+              "z=0.49 as attracting (|multiplier| < 1) -- this is the ground truth the "
+              "attracting-cycles table must agree with");
+
+        bool cycles_table_agrees = false;
+        for (const auto& ac : facts.attracting_cycles) {
+            for (Cplx pt : ac.points) {
+                if (close(pt, Cplx{0.49, 0.0}, 1e-6)) cycles_table_agrees = true;
+            }
+        }
+        check(cycles_table_agrees,
+              "FIX: the SAME dynamical_facts() call's attracting-cycles table (fed by "
+              "find_attractors, this batch's own fix) now agrees -- it includes z=0.49 "
+              "too, where before this fix it silently omitted it despite the fixed-points "
+              "table, computed in the SAME call, already knowing it was attracting");
     }
 
     std::printf("\n%s (%d failure%s)\n",

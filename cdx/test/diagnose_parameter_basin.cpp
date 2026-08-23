@@ -1,8 +1,13 @@
 // =============================================================================
 // diagnose_parameter_basin.cpp -- MEASUREMENT ONLY, no production behavior
-// changed by this file. Diagnoses the Parameter_basin "thick unresolved
-// boundary band + scattered bulk specks + slowness" problem on a Nova-style
-// rational family, per the batch's own Stage 1 spec.
+// changed by this file (Stage 2's own multiplier-confirmed-detection fix
+// lives in cdx/src/analysis.cpp, not here). Diagnoses the Parameter_basin
+// "thick unresolved boundary band + scattered bulk specks + slowness"
+// problem on a Nova-style rational family (Stage 1), and verifies the
+// fix's real-world before/after impact on the SAME family by calling the
+// real find_attractors_from_seeds directly with confirm_weakly_attracting
+// toggled off vs its own default (Stage 2's own verification section, at
+// the bottom of this file).
 //
 // This is a REPORT tool, not a PASS/FAIL test suite (though it includes a
 // couple of basic sanity checks using the same [PASS]/[FAIL] convention as
@@ -385,14 +390,30 @@ int main() {
     std::printf("  pixels with >=1 unresolved seed: %d / %d\n\n", n_pixels_with_any_unresolved,
                v.resolution * v.resolution);
 
-    // Cross-check: this file's own diagnose_seed reimplementation should
-    // agree with the REAL, unmodified render_parameter_basin (via
-    // find_attractors_from_seeds directly) on which pixels have any
-    // unresolved seed -- confirms every measurement above reflects
-    // production behavior, not a diverged reimplementation.
-    check(n_pixels_with_any_unresolved == n_unresolved_pixels,
-          "the instrumented reimplementation's own unresolved-pixel count matches "
-          "render_parameter_basin's real, unmodified output exactly");
+    // Cross-check: this file's own diagnose_seed reimplementation (which
+    // only ever checks resolved_strict, the OLD closure-tolerance-only
+    // acceptance test) should agree with the PRE-FIX behavior specifically
+    // -- confirmed directly below by calling find_attractors_from_seeds
+    // with confirm_weakly_attracting explicitly OFF, not against render_
+    // parameter_basin's own CURRENT output, which (as of Stage 2's fix)
+    // no longer matches the strict-only baseline by design.
+    {
+        FindAttractorsOptions strict_only;
+        strict_only.confirm_weakly_attracting = false;
+        int n_pixels_strict_unresolved = 0;
+        for (int row = 0; row < v.resolution; ++row) {
+            for (int col = 0; col < v.resolution; ++col) {
+                int unresolved_here = 0;
+                find_attractors_from_seeds(crit_pts, nova, v.coord(col, row), strict_only,
+                                           &unresolved_here);
+                if (unresolved_here > 0) ++n_pixels_strict_unresolved;
+            }
+        }
+        check(n_pixels_with_any_unresolved == n_pixels_strict_unresolved,
+              "the instrumented reimplementation's own unresolved-pixel count matches "
+              "find_attractors_from_seeds' real output with confirm_weakly_attracting "
+              "explicitly off (the pre-fix baseline) exactly");
+    }
 
     // ---- SUPPLEMENTARY: is find_attractors_from_seeds' eval() cost avoidable? -----
     // RationalMap::eval(z, a) redoes every term's effective_coeff/
@@ -433,6 +454,95 @@ int main() {
         check(std::abs(z.real() - zr) < 1e-6 && std::abs(z.imag() - zi) < 1e-6,
               "sanity: eval(z,a) and compile(a)+step(z) compute the SAME orbit -- the "
               "speedup above would be a free, behavior-preserving win if wired in");
+    }
+
+    // ---- STAGE 2 VERIFICATION: multiplier-confirmed detection, before vs after ----
+    // Re-renders the SAME Nova viewport through the REAL, current
+    // render_parameter_basin ("after", the fix as shipped) and, separately,
+    // through find_attractors_from_seeds called directly with
+    // confirm_weakly_attracting explicitly off ("before", the pre-fix
+    // strict-only baseline) -- both via the real production API, not this
+    // file's own reimplementation.
+    std::printf("\n---- STAGE 2 VERIFICATION: before vs after on Nova, %dx%d ----\n", v.resolution,
+               v.resolution);
+    {
+        FindAttractorsOptions before_opts;
+        before_opts.confirm_weakly_attracting = false;
+
+        const auto t_before_start = Clock::now();
+        int n_unresolved_before = 0;
+        std::vector<double> counts_before(static_cast<std::size_t>(v.resolution * v.resolution));
+        for (int row = 0; row < v.resolution; ++row) {
+            for (int col = 0; col < v.resolution; ++col) {
+                int unresolved_here = 0;
+                const auto cyc = find_attractors_from_seeds(crit_pts, nova, v.coord(col, row),
+                                                            before_opts, &unresolved_here);
+                counts_before[static_cast<std::size_t>(row * v.resolution + col)] =
+                    static_cast<double>(cyc.size());
+                if (unresolved_here > 0) ++n_unresolved_before;
+            }
+        }
+        const auto t_before_end = Clock::now();
+        const double before_ms =
+            std::chrono::duration<double, std::milli>(t_before_end - t_before_start).count();
+
+        const auto t_after_start = Clock::now();
+        Image unresolved_after_img;
+        const Image counts_after = r.render_parameter_basin(nullptr, &unresolved_after_img);
+        const auto t_after_end = Clock::now();
+        const double after_ms =
+            std::chrono::duration<double, std::milli>(t_after_end - t_after_start).count();
+        int n_unresolved_after = 0;
+        for (double u : unresolved_after_img.data) if (u > 0.0) ++n_unresolved_after;
+
+        std::printf("  BEFORE (confirm_weakly_attracting=false): %.1f ms, %d/%d unresolved "
+                   "pixels (%.1f%%)\n", before_ms, n_unresolved_before,
+                   v.resolution * v.resolution,
+                   100.0 * n_unresolved_before / static_cast<double>(v.resolution * v.resolution));
+        std::printf("  AFTER  (confirm_weakly_attracting=true,  default): %.1f ms, %d/%d "
+                   "unresolved pixels (%.1f%%)\n", after_ms, n_unresolved_after,
+                   v.resolution * v.resolution,
+                   100.0 * n_unresolved_after / static_cast<double>(v.resolution * v.resolution));
+        std::printf("  unresolved pixels reduced by %.1f%%\n",
+                   n_unresolved_before
+                       ? 100.0 * (1.0 - static_cast<double>(n_unresolved_after) /
+                                            static_cast<double>(n_unresolved_before))
+                       : 0.0);
+
+        check(n_unresolved_after < n_unresolved_before,
+              "AFTER has strictly FEWER unresolved pixels than BEFORE -- the fix resolves "
+              "pixels the strict-only baseline missed, on this real family");
+
+        // NO FALSE COUNTS: everywhere BEFORE already resolved (found a
+        // count), AFTER must report the EXACT SAME count -- the fix must
+        // only ever ADD confirmations the strict path missed, never change
+        // one it already had right.
+        bool counts_unchanged_where_resolved = true;
+        int n_checked = 0;
+        for (int row = 0; row < v.resolution; ++row) {
+            for (int col = 0; col < v.resolution; ++col) {
+                // BEFORE's own "resolved" signal isn't separately stored
+                // above (only its count and unresolved-pixel membership
+                // are) -- a pixel counts as "already resolved before" here
+                // when NONE of its seeds were unresolved, i.e. it is
+                // absent from the before-unresolved accounting entirely.
+                // Recomputed directly for clarity rather than threading a
+                // third parallel array through the loop above.
+                int unresolved_here = 0;
+                const auto cyc_before = find_attractors_from_seeds(
+                    crit_pts, nova, v.coord(col, row), before_opts, &unresolved_here);
+                if (unresolved_here > 0) continue;   // wasn't fully resolved before -- not this check's concern
+                ++n_checked;
+                if (counts_after.at(col, row) != static_cast<double>(cyc_before.size())) {
+                    counts_unchanged_where_resolved = false;
+                }
+            }
+        }
+        std::printf("  pixels fully resolved BEFORE, count re-checked AFTER: %d\n", n_checked);
+        check(counts_unchanged_where_resolved,
+              "NO FALSE COUNTS: every pixel already fully resolved before the fix gets the "
+              "EXACT SAME count after it -- the fix only adds missed confirmations, never "
+              "changes an already-correct one");
     }
 
     std::printf("%s (%d failure%s)\n",

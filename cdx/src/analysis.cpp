@@ -54,6 +54,109 @@ void add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double t
     cycles.push_back(std::move(c));
 }
 
+// Attempts to confirm a WEAKLY ATTRACTING cycle after the strict closure
+// pass has already failed for this orbit -- see find_attractors_from_seeds'
+// own doc comment for the full reasoning. `orbit` is the still-live,
+// post-burn-in orbit accumulated so far (orbit.front() is z_0; this
+// function CONTINUES iterating it, extending `orbit` in place, rather than
+// restarting). Returns the refined cycle's points on success, or an empty
+// vector if no weakly-attracting cycle could be confirmed within budget --
+// callers must not mistake an empty return for "period zero", only for
+// "nothing to add here".
+std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const RationalMap& map,
+                                            Cplx a, const FindAttractorsOptions& opts) {
+    if (!opts.verify_multiplier || !opts.confirm_weakly_attracting) return {};
+
+    // ---- extra burn-in, THEN a FRESH bounded period search -------------------
+    // The strict pass's own period search only works because its z_0 is
+    // ALREADY close to the cycle (burn_in got it there) -- comparing a
+    // BOUNDED number of subsequent iterates against that SAME nearby
+    // reference correctly finds the smallest closing period. Naively
+    // continuing to compare against that SAME z_0 far past max_period does
+    // NOT generalize: for a genuinely low-period but SLOWLY converging
+    // orbit, z_0 may still be numerically far from the cycle, so "however
+    // many extra steps until close enough to the ORIGINAL z_0" measures
+    // total remaining convergence time, not the period -- and Newton-
+    // polishing under that wrong assumed period silently converges back
+    // onto the correct point anyway, but returns it duplicated period-many
+    // times (a real bug caught by this project's own tests -- see the
+    // git history). The fix mirrors the strict pass's own structure
+    // exactly: settle FURTHER first (extended_max_period more steps,
+    // continuing the SAME live orbit), THEN re-anchor to that now-better-
+    // converged point and run a FRESH, ordinary bounded (max_period-sized)
+    // closure search from it, at the loose tolerance.
+    Cplx z = orbit.back();
+    for (int n = 0; n < opts.extended_max_period; ++n) {
+        z = map.eval(z, a);
+        if (counts_as_infinite(z, opts.inf_cutoff)) return {};
+        orbit.push_back(z);
+    }
+
+    std::vector<Cplx> loose_orbit;
+    loose_orbit.reserve(static_cast<std::size_t>(opts.max_period) + 1);
+    loose_orbit.push_back(z);
+    int loose_found = 0;
+    for (int k = 0; k < opts.max_period; ++k) {
+        Cplx zn = map.eval(loose_orbit.back(), a);
+        if (counts_as_infinite(zn, opts.inf_cutoff)) return {};
+        loose_orbit.push_back(zn);
+        if (chordal(zn, loose_orbit.front()) < opts.loose_tol) { loose_found = k + 1; break; }
+    }
+    if (loose_found <= 0) return {};
+
+    // ---- Newton-polish the candidate toward the TRUE periodic point ---------
+    // g(z) = f^p(z) - z; g'(z) = (f^p)'(z) - 1, the chain-rule product of
+    // deriv() over the p points -- the SAME quantity the multiplier check
+    // itself needs, computed once per Newton step rather than derived
+    // separately.
+    Cplx z0 = loose_orbit.front();
+    for (int iter = 0; iter < opts.newton_iterations; ++iter) {
+        Cplx zk = z0;
+        Cplx deriv_prod(1.0, 0.0);
+        bool ok = true;
+        for (int i = 0; i < loose_found; ++i) {
+            if (!is_finite_cplx(zk)) { ok = false; break; }
+            deriv_prod *= map.deriv(zk, a);
+            zk = map.eval(zk, a);
+        }
+        if (!ok || !is_finite_cplx(zk)) return {};
+        const Cplx gprime = deriv_prod - Cplx(1.0, 0.0);
+        // A degenerate (near-zero) derivative here means the candidate is
+        // near-PARABOLIC (multiplier near 1) -- Newton's own method is
+        // unreliable there, and a parabolic cycle isn't attracting anyway,
+        // so bailing out (leaving it correctly unresolved) is the right
+        // answer, not a missed case.
+        if (std::abs(gprime) < 1e-9) return {};
+        z0 -= (zk - z0) / gprime;
+        if (!is_finite_cplx(z0)) return {};
+    }
+
+    // ---- recompute the EXACT cycle points + multiplier at the refined point --
+    std::vector<Cplx> refined;
+    refined.reserve(static_cast<std::size_t>(loose_found));
+    Cplx zk = z0;
+    Cplx multiplier(1.0, 0.0);
+    for (int i = 0; i < loose_found; ++i) {
+        if (!is_finite_cplx(zk)) return {};
+        refined.push_back(zk);
+        multiplier *= map.deriv(zk, a);
+        zk = map.eval(zk, a);
+    }
+    // The refined point must genuinely close (f^p(z0) ~= z0) at a tolerance
+    // much tighter than the LOOSE one that found the candidate in the first
+    // place -- confirms Newton's polish actually converged to a real
+    // periodic point, not a spurious nearby root of the linearization.
+    if (chordal(zk, z0) >= opts.tol * 1e2) return {};
+    // See attracting_margin's own doc comment for why this needs a safety
+    // margin below 1.0 (not just < 1.0 outright): Newton's method's own
+    // linear (not quadratic) convergence at a genuinely parabolic
+    // candidate leaves a small floating-point residual that would
+    // otherwise read as "just barely attracting".
+    if (!(std::abs(multiplier) < 1.0 - opts.attracting_margin)) return {};
+
+    return refined;
+}
+
 }  // namespace
 
 std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
@@ -161,6 +264,20 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
         }
 
         if (found <= 0 || hit_inf_mid_orbit) {
+            // The strict pass failed to close -- before giving up, see
+            // whether this orbit is actually converging (slowly) toward a
+            // genuinely attracting cycle the strict tol/period budget just
+            // didn't catch in time (see confirm_weakly_attracting's own
+            // doc comment). Not attempted after hit_inf_mid_orbit: the
+            // orbit has already run off past inf_cutoff there, so there is
+            // no live finite state left to continue iterating.
+            std::vector<Cplx> refined =
+                !hit_inf_mid_orbit ? confirm_weakly_attracting(orbit, map, a, opts)
+                                   : std::vector<Cplx>{};
+            if (!refined.empty()) {
+                add_cycle(cycles, std::move(refined), opts.tol * 1e3);
+                continue;
+            }
             if (unresolved_count) ++*unresolved_count;   // no cycle detected, or punted
             continue;
         }

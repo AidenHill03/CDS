@@ -599,7 +599,12 @@ PYBIND11_MODULE(cdx, m) {
         .def_readwrite("max_period",        &FindAttractorsOptions::max_period)
         .def_readwrite("tol",               &FindAttractorsOptions::tol)
         .def_readwrite("inf_cutoff",        &FindAttractorsOptions::inf_cutoff)
-        .def_readwrite("verify_multiplier", &FindAttractorsOptions::verify_multiplier);
+        .def_readwrite("verify_multiplier", &FindAttractorsOptions::verify_multiplier)
+        .def_readwrite("confirm_weakly_attracting", &FindAttractorsOptions::confirm_weakly_attracting)
+        .def_readwrite("loose_tol",              &FindAttractorsOptions::loose_tol)
+        .def_readwrite("extended_max_period",    &FindAttractorsOptions::extended_max_period)
+        .def_readwrite("newton_iterations",      &FindAttractorsOptions::newton_iterations)
+        .def_readwrite("attracting_margin",      &FindAttractorsOptions::attracting_margin);
 
     m.def("find_attractors", &find_attractors, py::arg("map"), py::arg("a"),
           py::arg("opts") = FindAttractorsOptions{},

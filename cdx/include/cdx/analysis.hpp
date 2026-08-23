@@ -56,6 +56,53 @@ struct FindAttractorsOptions {
     double tol               = 1e-9; // chordal tolerance for cycle closure and dedup
     double inf_cutoff        = 1e12; // |z| beyond which a value counts as infinity
     bool   verify_multiplier = true; // reject candidates with |multiplier| >= 1
+
+    // WEAKLY ATTRACTING cycle confirmation (multiplier close to, but under,
+    // 1): a cycle that is genuinely attracting but converges slowly can
+    // fail to close within `tol`/`max_period` above -- the strict pass
+    // alone would then reject it as unresolved even though it is real.
+    // When `confirm_weakly_attracting` (on by default) and a seed's
+    // strict pass fails, the SAME orbit continues for up to
+    // `extended_max_period` MORE steps looking for a closure at the much
+    // looser `loose_tol`; if found, the candidate periodic point is
+    // Newton-polished (`newton_iterations` steps) against f^p(z)-z=0 and
+    // the EXACT multiplier is recomputed at the refined point before
+    // accepting -- see find_attractors_from_seeds' own doc comment for
+    // why this is strictly more correct, never less, than the strict
+    // pass alone. Only ever consulted when opts.verify_multiplier is also
+    // true (there is nothing to "confirm" if multiplier verification
+    // itself is disabled).
+    bool   confirm_weakly_attracting = true;
+    double loose_tol             = 1e-4;  // closure tolerance for the extended search
+    int    extended_max_period   = 500;   // additional steps tried beyond max_period
+    // Generous relative to the "few Newton iterations" a SIMPLE root would
+    // need: Newton's method only converges LINEARLY (not quadratically)
+    // at a DOUBLE root, i.e. exactly a parabolic candidate -- see
+    // attracting_margin's own comment for why that specific case matters
+    // here. Measured: ~20 iterations to reach the double-precision noise
+    // floor starting from a loose_tol=1e-4 candidate; 25 leaves headroom.
+    int    newton_iterations     = 25;    // Newton-polish steps on the candidate point
+
+    // Safety margin below 1.0 the CONFIRMATION path's own refined
+    // multiplier must clear: |multiplier| < 1.0 - attracting_margin. NOT
+    // applied to the strict pass's own multiplier check (a cycle that
+    // already closed within `tol` chordally in only `max_period` steps
+    // couldn't have done so if it were genuinely parabolic, so that
+    // check's plain < 1.0 is already reliable). It IS needed here because
+    // Newton's method loses its normal quadratic convergence at a
+    // genuinely parabolic point (multiplier exactly 1 means f^p(z)-z has
+    // a DOUBLE root there, and Newton's method only converges LINEARLY at
+    // a double root) -- polishing a truly parabolic candidate still lands
+    // extremely close to the exact point, but the multiplier computed
+    // there comes out as 1.0 minus a small floating-point residual
+    // (observed ~1e-9, the double-precision noise floor for this
+    // computation) rather than being reliably >= 1.0. Without this
+    // margin, that residual alone would falsely confirm a genuinely
+    // parabolic cycle as attracting -- exactly the false-positive this
+    // whole confirmation path exists to avoid, not introduce. 1e-6 is
+    // comfortably above the observed noise floor while still well below
+    // any multiplier a real, if very weakly, attracting cycle would have.
+    double attracting_margin     = 1e-6;
 };
 
 std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
@@ -80,6 +127,41 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 // report "unresolved" honestly rather than silently folding it into the
 // attracting-cycle count (see its own doc comment) -- every other existing
 // caller ignores it (nullptr, the default), unchanged.
+//
+// WEAKLY ATTRACTING CYCLES (multiplier close to, but under, 1 in
+// magnitude): the strict pass alone accepts a cycle by CLOSURE first
+// (chordal(z_k, z_0) < opts.tol within opts.max_period steps) and only
+// THEN checks the multiplier -- so a genuinely attracting cycle that
+// simply converges too slowly to close within that strict budget is
+// rejected as unresolved before the multiplier is ever examined, even
+// though the multiplier alone (the actual mathematical definition of
+// "attracting") would confirm it. This showed up as two SEPARATE bugs
+// sharing one root cause: Parameter_basin's own artifact count-regions
+// and unresolved band/specks on weakly-hyperbolic families, AND a fact
+// sheet whose fixed-points table (RationalMap::fixed_points, an
+// independent ALGEBRAIC root-find + exact deriv() evaluation, no
+// iteration involved) correctly marks such a point attracting while its
+// attracting-cycles table (fed by this very function) omits it -- same
+// map, same parameter, two different verdicts.
+//
+// When `opts.confirm_weakly_attracting` (default on) and the strict pass
+// fails for a seed, the SAME orbit is continued for up to
+// `opts.extended_max_period` further steps, checking closure against the
+// much looser `opts.loose_tol`. A loose closure only identifies an
+// APPROXIMATE periodic point -- if the orbit is still converging slowly,
+// it isn't yet ON the cycle, so its raw multiplier there would be
+// unreliable. The candidate is therefore Newton-polished
+// (`opts.newton_iterations` steps, solving f^p(z)-z=0 via g'(z) =
+// (f^p)'(z)-1, itself just the SAME product-of-deriv() the strict path's
+// own multiplier check already computes) to the TRUE periodic point,
+// where the EXACT multiplier is recomputed and checked. This is strictly
+// MORE correct than the strict pass alone: it can only ever ADD a
+// genuinely attracting cycle the strict pass missed on convergence speed
+// alone, never accept anything the multiplier itself would reject (a
+// repelling or parabolic candidate fails the SAME |multiplier| < 1 test,
+// now evaluated more accurately, if anything making a false accept LESS
+// likely), and a cycle the strict pass already found closes and returns
+// exactly as before (this extended search never runs for it at all).
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
                                               const FindAttractorsOptions& opts = {},
