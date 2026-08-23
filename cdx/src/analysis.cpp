@@ -31,6 +31,25 @@ bool counts_as_infinite(Cplx z, double inf_cutoff) {
     return !is_finite_cplx(z) || std::abs(z) > inf_cutoff;
 }
 
+// TRUE if z is already chordally indistinguishable from infinity at
+// (a safety margin above) the given tol -- i.e. its chordal distance to the
+// north pole is itself comparable to the tolerance a closure test would
+// use. Two points that are BOTH this close to infinity are automatically
+// chordally close to EACH OTHER too (triangle inequality), no matter how
+// different they are as raw numbers or whether the orbit is remotely
+// periodic -- the sphere compactifies arbitrarily large values together.
+// A transient excursion near a pole can pass through this zone (large but
+// still under inf_cutoff) while still very much diverging, not settling;
+// the OLD, always-500-steps burn-in silently outlasted it before ever
+// attempting a closure comparison. The interleaved settle-and-detect loop
+// checks closure far earlier, so it must exclude this zone explicitly
+// instead of relying on brute iteration count to avoid it by accident.
+// margin_factor gives headroom above the raw tolerance so the guard itself
+// can't become the source of a missed (or falsely accepted) detection.
+bool near_infinity_chordally(Cplx z, double tol) {
+    return chordal(z, Cplx(std::numeric_limits<double>::infinity(), 0.0)) < tol * 100.0;
+}
+
 // Appends new_cycle unless it matches an existing one up to cyclic rotation
 // (chordally, within tol).
 void add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double tol) {
@@ -67,49 +86,103 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
                                             Cplx a, const FindAttractorsOptions& opts) {
     if (!opts.verify_multiplier || !opts.confirm_weakly_attracting) return {};
 
-    // ---- extra burn-in, THEN a FRESH bounded period search -------------------
-    // The strict pass's own period search only works because its z_0 is
-    // ALREADY close to the cycle (burn_in got it there) -- comparing a
-    // BOUNDED number of subsequent iterates against that SAME nearby
-    // reference correctly finds the smallest closing period. Naively
-    // continuing to compare against that SAME z_0 far past max_period does
-    // NOT generalize: for a genuinely low-period but SLOWLY converging
-    // orbit, z_0 may still be numerically far from the cycle, so "however
-    // many extra steps until close enough to the ORIGINAL z_0" measures
-    // total remaining convergence time, not the period -- and Newton-
-    // polishing under that wrong assumed period silently converges back
-    // onto the correct point anyway, but returns it duplicated period-many
-    // times (a real bug caught by this project's own tests -- see the
-    // git history). The fix mirrors the strict pass's own structure
-    // exactly: settle FURTHER first (extended_max_period more steps,
-    // continuing the SAME live orbit), THEN re-anchor to that now-better-
-    // converged point and run a FRESH, ordinary bounded (max_period-sized)
-    // closure search from it, at the loose tolerance.
-    Cplx z = orbit.back();
-    for (int n = 0; n < opts.extended_max_period; ++n) {
-        z = map.eval(z, a);
-        if (counts_as_infinite(z, opts.inf_cutoff)) return {};
-        orbit.push_back(z);
-    }
-
-    std::vector<Cplx> loose_orbit;
-    loose_orbit.reserve(static_cast<std::size_t>(opts.max_period) + 1);
-    loose_orbit.push_back(z);
+    // ---- settle further, re-anchoring progressively instead of waiting for --
+    // ---- the full extended_max_period budget before ever looking ------------
+    // Same mechanism as the strict pass' own settle loop below (see its own
+    // comment for the full reasoning): try establishing an anchor and
+    // searching up to `max_period` steps forward from it -- EXACTLY the old
+    // algorithm's own single-anchor, fixed-budget search, just possibly
+    // triggered from an earlier point. If a trial fails, its own steps
+    // become the settling progress toward the NEXT, later anchor -- no
+    // wasted work -- with the FINAL trial always landing exactly at
+    // `extended_max_period`, replicating the old algorithm's own one-shot
+    // trial exactly as a safety net. This has IDENTICAL detection power to
+    // the old fixed-budget search at every trial (same single-anchor
+    // comparison, same tolerance, same per-trial budget): an earlier trial
+    // can only succeed if the orbit is ALREADY close enough to a genuine
+    // periodic point for that same strict test to pass, so it can never
+    // find something the old algorithm's own final trial wouldn't also
+    // confirm -- unlike comparing against a WINDOW of several different
+    // prior points, which is a strictly more permissive (and therefore
+    // WRONG for a pure speed change) test.
+    std::size_t anchor_idx = 0;
+    bool anchor_established = false;
+    int current_anchor_step = 0;
+    const int first_anchor_step = std::min(opts.max_period, opts.extended_max_period);
     int loose_found = 0;
-    for (int k = 0; k < opts.max_period; ++k) {
-        Cplx zn = map.eval(loose_orbit.back(), a);
+
+    const int total_budget = opts.extended_max_period + opts.max_period;
+    for (int n = 0; n < total_budget; ++n) {
+        Cplx zn = map.eval(orbit.back(), a);
         if (counts_as_infinite(zn, opts.inf_cutoff)) return {};
-        loose_orbit.push_back(zn);
-        if (chordal(zn, loose_orbit.front()) < opts.loose_tol) { loose_found = k + 1; break; }
+        orbit.push_back(zn);
+        const int steps_done = n + 1;
+
+        if (!anchor_established && steps_done >= first_anchor_step) {
+            anchor_idx = orbit.size() - 1;
+            current_anchor_step = steps_done;
+            anchor_established = true;
+            continue;
+        }
+
+        if (anchor_established && !near_infinity_chordally(zn, opts.loose_tol) &&
+            !near_infinity_chordally(orbit[anchor_idx], opts.loose_tol) &&
+            chordal(zn, orbit[anchor_idx]) < opts.loose_tol) {
+            const int k = static_cast<int>(orbit.size() - 1 - anchor_idx);
+            bool accept = true;
+            if (current_anchor_step < opts.extended_max_period) {
+                // Same speculative-anchor restriction as the strict pass
+                // (see its own, fuller comment): a slowly-converging
+                // MULTI-POINT cycle's residual doesn't shrink monotonically
+                // as it settles, so an early anchor can land on a lucky
+                // phase and spuriously "confirm" a period the old
+                // algorithm's own single, fully-converged anchor genuinely
+                // does not -- not just find the SAME thing faster, which
+                // is the one thing this optimization must never do. k>1 is
+                // therefore trusted ONLY at the FINAL trial, matching old
+                // code's own single-check acceptance there exactly. k==1
+                // remains safe with one extra confirmation step.
+                if (k == 1) {
+                    Cplx zc = map.eval(zn, a);
+                    accept = !counts_as_infinite(zc, opts.inf_cutoff) && chordal(zc, zn) < opts.loose_tol;
+                } else {
+                    accept = false;
+                }
+            }
+            if (accept) {
+                loose_found = k;
+                break;
+            }
+            // else: not (yet) trustworthy -- keep scanning larger k
+            // against the SAME anchor.
+        }
+        if (anchor_established) {
+            // Same overshoot guard as the strict pass (see its own
+            // comment): cap a speculative trial's window so the final
+            // (extended_max_period) trial is always reached exactly, never
+            // skipped past.
+            const int trial_end = current_anchor_step >= opts.extended_max_period
+                ? current_anchor_step + opts.max_period
+                : std::min(current_anchor_step + opts.max_period, opts.extended_max_period);
+            if (steps_done >= trial_end) {
+                if (current_anchor_step >= opts.extended_max_period) break;   // final trial exhausted
+                // Re-anchor IMMEDIATELY at the current point -- see the
+                // strict pass' own comment for why deferring to the next
+                // iteration's establishment check drifts the final anchor
+                // away from `extended_max_period` by one step per trial.
+                anchor_idx = orbit.size() - 1;
+                current_anchor_step = steps_done;
+            }
+        }
     }
     if (loose_found <= 0) return {};
+    Cplx z0 = orbit[anchor_idx];
 
     // ---- Newton-polish the candidate toward the TRUE periodic point ---------
     // g(z) = f^p(z) - z; g'(z) = (f^p)'(z) - 1, the chain-rule product of
     // deriv() over the p points -- the SAME quantity the multiplier check
     // itself needs, computed once per Newton step rather than derived
     // separately.
-    Cplx z0 = loose_orbit.front();
     for (int iter = 0; iter < opts.newton_iterations; ++iter) {
         Cplx zk = z0;
         Cplx deriv_prod(1.0, 0.0);
@@ -131,15 +204,13 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
         if (!is_finite_cplx(z0)) return {};
     }
 
-    // ---- recompute the EXACT cycle points + multiplier at the refined point --
+    // ---- recompute the EXACT cycle points at the refined point ---------------
     std::vector<Cplx> refined;
     refined.reserve(static_cast<std::size_t>(loose_found));
     Cplx zk = z0;
-    Cplx multiplier(1.0, 0.0);
     for (int i = 0; i < loose_found; ++i) {
         if (!is_finite_cplx(zk)) return {};
         refined.push_back(zk);
-        multiplier *= map.deriv(zk, a);
         zk = map.eval(zk, a);
     }
     // The refined point must genuinely close (f^p(z0) ~= z0) at a tolerance
@@ -147,11 +218,14 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
     // place -- confirms Newton's polish actually converged to a real
     // periodic point, not a spurious nearby root of the linearization.
     if (chordal(zk, z0) >= opts.tol * 1e2) return {};
+
     // See attracting_margin's own doc comment for why this needs a safety
     // margin below 1.0 (not just < 1.0 outright): Newton's method's own
     // linear (not quadratic) convergence at a genuinely parabolic
     // candidate leaves a small floating-point residual that would
     // otherwise read as "just barely attracting".
+    Cplx multiplier(1.0, 0.0);
+    for (Cplx zc : refined) multiplier *= map.deriv(zc, a);
     if (!(std::abs(multiplier) < 1.0 - opts.attracting_margin)) return {};
 
     return refined;
@@ -195,11 +269,156 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
         }
 
         bool at_inf = false;
+        bool hit_inf_mid_orbit = false;
 
-        // ---- burn-in: skip the transient ----------------------------------
-        for (int n = 0; n < opts.burn_in; ++n) {
-            z = map.eval(z, a);
-            if (counts_as_infinite(z, opts.inf_cutoff)) { at_inf = true; break; }
+        // ---- settle onto the cycle, re-anchoring progressively -------------
+        // Old approach: burn `burn_in` steps unconditionally to eliminate
+        // the transient, THEN search up to `max_period` more steps for
+        // closure against the single point burn-in happened to leave off
+        // at. That means every non-escaping seed pays the full `burn_in`
+        // cost even when the orbit actually settles in a fraction of that
+        // -- the dominant per-pixel cost for an ordinary (not weakly
+        // attracting) interior parameter.
+        //
+        // This tries establishing the anchor EARLIER, at `max_period`,
+        // `2*max_period`, ... and running the OLD algorithm's own single-
+        // anchor, fixed-budget forward search from each -- stopping the
+        // instant one succeeds. A failed trial's own steps become the
+        // settling progress toward the next, later anchor (no wasted
+        // work), and the FINAL trial always lands exactly at `burn_in`,
+        // replicating the old algorithm's own one-shot check exactly as a
+        // safety net. This has IDENTICAL detection power to the old
+        // fixed-budget search at every trial (same single-anchor
+        // comparison, same tolerance, same per-trial budget): an earlier
+        // trial can only succeed if the orbit is ALREADY close enough to a
+        // genuine periodic point for that SAME strict test to pass, so it
+        // can never find something the old algorithm's own final trial
+        // wouldn't also confirm -- unlike comparing against a WINDOW of
+        // several different prior points (an earlier version of this
+        // change did exactly that), which is a strictly more permissive
+        // test and therefore WRONG for a pure speed change: it could
+        // resolve pixels the old algorithm's own single check genuinely
+        // couldn't, not just resolve the SAME ones faster.
+        //
+        // The escape-to-infinity classification below preserves the exact
+        // same step-count boundary the old two-phase split had: an
+        // excursion within the first `burn_in` evals is still treated as a
+        // possibly-spurious transient (verified against the algebraic
+        // oracle just below), a LATER excursion is still
+        // `hit_inf_mid_orbit` -- unresolved, no oracle check -- since by
+        // that point the orbit was presumed already close to a cycle, same
+        // as before. Only WHEN closure can be detected has changed, not
+        // this classification.
+        std::vector<Cplx> orbit;
+        orbit.reserve(static_cast<std::size_t>(opts.burn_in + opts.max_period) + 1);
+        orbit.push_back(z);
+
+        std::size_t anchor_idx = 0;
+        bool anchor_established = false;
+        int current_anchor_step = 0;
+        const int first_anchor_step = std::min(opts.max_period, opts.burn_in);
+        int found = 0;
+
+        const int settle_budget = opts.burn_in + opts.max_period;
+        for (int n = 0; n < settle_budget; ++n) {
+            Cplx zn = map.eval(orbit.back(), a);
+            const bool zn_inf = counts_as_infinite(zn, opts.inf_cutoff);
+            if (zn_inf) {
+                if (n < opts.burn_in) at_inf = true;
+                else hit_inf_mid_orbit = true;
+                break;
+            }
+            orbit.push_back(zn);
+            const int steps_done = n + 1;
+
+            if (!anchor_established && steps_done >= first_anchor_step) {
+                anchor_idx = orbit.size() - 1;
+                current_anchor_step = steps_done;
+                anchor_established = true;
+                continue;   // don't compare the anchor to itself
+            }
+
+            if (anchor_established && !near_infinity_chordally(zn, opts.tol) &&
+                !near_infinity_chordally(orbit[anchor_idx], opts.tol) &&
+                chordal(zn, orbit[anchor_idx]) < opts.tol) {
+                const int k = static_cast<int>(orbit.size() - 1 - anchor_idx);
+                bool accept = true;
+                if (current_anchor_step < opts.burn_in) {
+                    // A SPECULATIVE (earlier-than-burn_in) anchor may not
+                    // have fully settled yet. For a genuine FIXED point
+                    // (k==1) this is safe with one extra check: CONFIRM
+                    // f(zn)~zn too, guarding against a still-spiralling
+                    // orbit (a multiplier with a rotational component)
+                    // passing transiently near an under-converged anchor
+                    // without being genuinely periodic -- a risk old
+                    // code's own generous, always-`burn_in` anchor never
+                    // runs into (by then the spiral radius is negligible).
+                    //
+                    // For k>1, confirmation is NOT enough to trust: a
+                    // slowly-converging MULTI-POINT cycle's residual
+                    // distance to itself does not shrink monotonically as
+                    // it settles (it oscillates while the overall envelope
+                    // shrinks), so an early anchor can land on a lucky
+                    // phase where ITS OWN residual dips under `tol` even
+                    // though the SAME point, compared at the exact
+                    // burn_in anchor, would not -- and that luck can
+                    // recur for several periods, defeating even repeated
+                    // confirmation (found and root-caused with an actual
+                    // period-9 Nova cycle: the old algorithm's single
+                    // burn_in-anchor trial genuinely fails to resolve it,
+                    // while an earlier speculative anchor spuriously
+                    // "succeeds"). So k>1 is trusted ONLY at the FINAL
+                    // (burn_in) trial, replicating old code exactly there
+                    // -- no confirmation needed at that trial either,
+                    // matching old code's own unconfirmed acceptance.
+                    if (k == 1) {
+                        Cplx zc = map.eval(zn, a);
+                        accept = !counts_as_infinite(zc, opts.inf_cutoff) && chordal(zc, zn) < opts.tol;
+                    } else {
+                        accept = false;
+                    }
+                }
+                if (accept) {
+                    found = k;
+                    break;
+                }
+                // else: not (yet) trustworthy -- keep scanning larger k
+                // against the SAME anchor rather than re-anchoring
+                // immediately.
+            }
+            if (anchor_established) {
+                // A speculative trial's own max_period-sized search window
+                // must never overshoot burn_in: if it did, giving up on it
+                // would land the NEXT anchor somewhere PAST burn_in
+                // instead of exactly there, drifting away from old code's
+                // own exact final-anchor position (the guarantee this
+                // whole design depends on). Cap this trial's window so the
+                // final (burn_in) trial is always reached cleanly, with no
+                // overshoot.
+                const int trial_end = current_anchor_step >= opts.burn_in
+                    ? current_anchor_step + opts.max_period
+                    : std::min(current_anchor_step + opts.max_period, opts.burn_in);
+                if (steps_done >= trial_end) {
+                    if (current_anchor_step >= opts.burn_in) break;   // final trial exhausted
+                    // Re-anchor IMMEDIATELY at the CURRENT point (steps_done
+                    // == trial_end exactly here) rather than deferring to
+                    // the next iteration's own establishment check -- that
+                    // check only fires on evals AFTER this one, landing the
+                    // new anchor one step late every single time, which
+                    // compounds across trials into a final anchor that has
+                    // drifted away from `burn_in` entirely (a real bug this
+                    // design hit and had to be fixed: the drift caused a
+                    // genuine period-11 cycle to be missed at anchor 501
+                    // when old code's own exact anchor at 500 finds it).
+                    anchor_idx = orbit.size() - 1;
+                    current_anchor_step = steps_done;
+                }
+            }
+        }
+        if (found > 0) {
+            std::vector<Cplx> cyc(orbit.begin() + static_cast<std::ptrdiff_t>(anchor_idx),
+                                  orbit.begin() + static_cast<std::ptrdiff_t>(anchor_idx) + found);
+            orbit = std::move(cyc);
         }
 
         if (at_inf) {
@@ -236,31 +455,6 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
             }
             add_cycle(cycles, {Cplx(kInf, 0.0)}, opts.tol);
             continue;
-        }
-
-        // ---- detect period: smallest k with f^k(z) ~ z chordally ----------
-        std::vector<Cplx> orbit;
-        orbit.reserve(static_cast<std::size_t>(opts.max_period) + 1);
-        orbit.push_back(z);
-
-        int found = 0;
-        bool hit_inf_mid_orbit = false;
-        for (int k = 0; k < opts.max_period; ++k) {
-            Cplx zn = map.eval(orbit.back(), a);
-            const bool zn_inf = counts_as_infinite(zn, opts.inf_cutoff);
-            if (zn_inf) zn = Cplx(kInf, 0.0);
-            orbit.push_back(zn);
-
-            if (chordal(zn, orbit.front()) < opts.tol) { found = k + 1; break; }
-            if (zn_inf) {
-                // Passed through Inf without closing. A genuine attracting
-                // cycle running through a pole would need the 1/z chart to
-                // continue iterating numerically; rare enough to skip rather
-                // than silently mishandle (matches FindAttractors.m's own
-                // documented scope).
-                hit_inf_mid_orbit = true;
-                break;
-            }
         }
 
         if (found <= 0 || hit_inf_mid_orbit) {

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 using namespace cdx;
 
@@ -33,6 +34,201 @@ static bool has_point_near(const std::vector<Cplx>& pts, Cplx target, double tol
     for (Cplx p : pts) if (close(p, target, tol)) return true;
     return false;
 }
+
+// =============================================================================
+// Regression oracle for the "exit cycle detection on convergence instead of
+// fixed settling budgets" speed optimization (cdx/src/analysis.cpp): a
+// faithful copy of the PRE-OPTIMIZATION find_attractors_from_seeds, kept here
+// ONLY so the optimized version can be checked against it forever, not
+// against a one-time snapshot of expected values that would rot as the
+// algorithm evolves. This is deliberately the OLD (slow: unconditional
+// burn_in, then a bounded closure search against a single fixed anchor)
+// two-phase structure, unchanged since before that optimization -- see the
+// "identical math" test below for what it's compared against and why.
+// =============================================================================
+namespace {
+
+bool old_is_finite(Cplx z) { return std::isfinite(z.real()) && std::isfinite(z.imag()); }
+
+double old_chordal(Cplx z, Cplx w) {
+    return chordal_distance(z.real(), z.imag(), w.real(), w.imag());
+}
+
+bool old_counts_as_infinite(Cplx z, double inf_cutoff) {
+    return !old_is_finite(z) || std::abs(z) > inf_cutoff;
+}
+
+void old_add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double tol) {
+    for (const auto& existing : cycles) {
+        if (existing.points.size() != new_cycle.size()) continue;
+        const std::size_t n = existing.points.size();
+        for (std::size_t shift = 0; shift < n; ++shift) {
+            bool all_close = true;
+            for (std::size_t i = 0; i < n; ++i) {
+                if (old_chordal(new_cycle[(i + shift) % n], existing.points[i]) >= tol) {
+                    all_close = false;
+                    break;
+                }
+            }
+            if (all_close) return;
+        }
+    }
+    Cycle c;
+    c.points = std::move(new_cycle);
+    c.id = static_cast<int>(cycles.size()) + 1;
+    cycles.push_back(std::move(c));
+}
+
+std::vector<Cplx> old_confirm_weakly_attracting(std::vector<Cplx>& orbit, const RationalMap& map,
+                                                Cplx a, const FindAttractorsOptions& opts) {
+    if (!opts.verify_multiplier || !opts.confirm_weakly_attracting) return {};
+
+    Cplx z = orbit.back();
+    for (int n = 0; n < opts.extended_max_period; ++n) {
+        z = map.eval(z, a);
+        if (old_counts_as_infinite(z, opts.inf_cutoff)) return {};
+        orbit.push_back(z);
+    }
+
+    std::vector<Cplx> loose_orbit;
+    loose_orbit.push_back(z);
+    int loose_found = 0;
+    for (int k = 0; k < opts.max_period; ++k) {
+        Cplx zn = map.eval(loose_orbit.back(), a);
+        if (old_counts_as_infinite(zn, opts.inf_cutoff)) return {};
+        loose_orbit.push_back(zn);
+        if (old_chordal(zn, loose_orbit.front()) < opts.loose_tol) { loose_found = k + 1; break; }
+    }
+    if (loose_found <= 0) return {};
+
+    Cplx z0 = loose_orbit.front();
+    for (int iter = 0; iter < opts.newton_iterations; ++iter) {
+        Cplx zk = z0;
+        Cplx deriv_prod(1.0, 0.0);
+        bool ok = true;
+        for (int i = 0; i < loose_found; ++i) {
+            if (!old_is_finite(zk)) { ok = false; break; }
+            deriv_prod *= map.deriv(zk, a);
+            zk = map.eval(zk, a);
+        }
+        if (!ok || !old_is_finite(zk)) return {};
+        const Cplx gprime = deriv_prod - Cplx(1.0, 0.0);
+        if (std::abs(gprime) < 1e-9) return {};
+        z0 -= (zk - z0) / gprime;
+        if (!old_is_finite(z0)) return {};
+    }
+
+    std::vector<Cplx> refined;
+    Cplx zk = z0;
+    Cplx multiplier(1.0, 0.0);
+    for (int i = 0; i < loose_found; ++i) {
+        if (!old_is_finite(zk)) return {};
+        refined.push_back(zk);
+        multiplier *= map.deriv(zk, a);
+        zk = map.eval(zk, a);
+    }
+    if (old_chordal(zk, z0) >= opts.tol * 1e2) return {};
+    if (!(std::abs(multiplier) < 1.0 - opts.attracting_margin)) return {};
+    return refined;
+}
+
+std::vector<Cycle> old_find_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                                  const RationalMap& map, Cplx a,
+                                                  const FindAttractorsOptions& opts,
+                                                  int* unresolved_count) {
+    const double kInfLocal = std::numeric_limits<double>::infinity();
+    std::vector<Cycle> cycles;
+    if (unresolved_count) *unresolved_count = 0;
+
+    for (Cplx seed : seeds) {
+        Cplx z = old_is_finite(seed) ? seed : Cplx(opts.inf_cutoff, 0.0);
+        if (old_is_finite(z)) {
+            for (Cplx p : map.pole_locations(a)) {
+                if (std::abs(z - p) < 1e-9) { z += Cplx(1e-4, 3.7e-5); break; }
+            }
+        }
+
+        bool at_inf = false;
+        for (int n = 0; n < opts.burn_in; ++n) {
+            z = map.eval(z, a);
+            if (old_counts_as_infinite(z, opts.inf_cutoff)) { at_inf = true; break; }
+        }
+
+        if (at_inf) {
+            if (opts.verify_multiplier) {
+                bool infinity_attracting = false;
+                for (const FixedPoint& fp : map.fixed_points(a)) {
+                    if (!old_is_finite(fp.point) && std::abs(fp.multiplier) < 1.0) {
+                        infinity_attracting = true;
+                        break;
+                    }
+                }
+                if (!infinity_attracting) {
+                    if (unresolved_count) ++*unresolved_count;
+                    continue;
+                }
+            }
+            old_add_cycle(cycles, {Cplx(kInfLocal, 0.0)}, opts.tol);
+            continue;
+        }
+
+        std::vector<Cplx> orbit;
+        orbit.push_back(z);
+        int found = 0;
+        bool hit_inf_mid_orbit = false;
+        for (int k = 0; k < opts.max_period; ++k) {
+            Cplx zn = map.eval(orbit.back(), a);
+            const bool zn_inf = old_counts_as_infinite(zn, opts.inf_cutoff);
+            if (zn_inf) zn = Cplx(kInfLocal, 0.0);
+            orbit.push_back(zn);
+            if (old_chordal(zn, orbit.front()) < opts.tol) { found = k + 1; break; }
+            if (zn_inf) { hit_inf_mid_orbit = true; break; }
+        }
+
+        if (found <= 0 || hit_inf_mid_orbit) {
+            std::vector<Cplx> refined = !hit_inf_mid_orbit
+                ? old_confirm_weakly_attracting(orbit, map, a, opts)
+                : std::vector<Cplx>{};
+            if (!refined.empty()) {
+                old_add_cycle(cycles, std::move(refined), opts.tol * 1e3);
+                continue;
+            }
+            if (unresolved_count) ++*unresolved_count;
+            continue;
+        }
+
+        std::vector<Cplx> cyc(orbit.begin(), orbit.begin() + found);
+        if (opts.verify_multiplier) {
+            const bool has_inf = std::any_of(cyc.begin(), cyc.end(),
+                                             [](Cplx zz) { return !old_is_finite(zz); });
+            if (!has_inf) {
+                Cplx multiplier(1.0, 0.0);
+                for (Cplx zc : cyc) multiplier *= map.deriv(zc, a);
+                if (!(std::abs(multiplier) < 1.0)) {
+                    if (unresolved_count) ++*unresolved_count;
+                    continue;
+                }
+            }
+        }
+        old_add_cycle(cycles, std::move(cyc), opts.tol * 1e3);
+    }
+    return cycles;
+}
+
+// (period, |multiplier|) for a cycle -- the Inf-cycle case reuses
+// fixed_points()' own algebraic multiplier there, same as dynamical_facts().
+std::pair<int, double> old_cycle_signature(const Cycle& cyc, const RationalMap& map, Cplx a) {
+    if (cyc.points.size() == 1 && !old_is_finite(cyc.points[0])) {
+        for (const auto& fp : map.fixed_points(a)) {
+            if (!old_is_finite(fp.point)) return {1, std::abs(fp.multiplier)};
+        }
+    }
+    Cplx multiplier(1.0, 0.0);
+    for (Cplx z : cyc.points) multiplier *= map.deriv(z, a);
+    return {static_cast<int>(cyc.points.size()), std::abs(multiplier)};
+}
+
+}  // namespace
 
 int main() {
     std::printf("=== cdx analysis tests ===\n");
@@ -1068,6 +1264,99 @@ int main() {
               "find_attractors, this batch's own fix) now agrees -- it includes z=0.49 "
               "too, where before this fix it silently omitted it despite the fixed-points "
               "table, computed in the SAME call, already knowing it was attracting");
+    }
+
+    // ---- IDENTICAL MATH (hard gate): interleaved settle-and-detect vs the OLD ------
+    // fixed-budget two-phase algorithm -- a pure SPEED optimization
+    // (cdx/src/analysis.cpp: exit cycle detection on convergence instead of
+    // burning a fixed budget every seed) must never change WHAT is found,
+    // only how fast. old_find_attractors_from_seeds above is a faithful,
+    // frozen copy of the pre-optimization algorithm, kept specifically as
+    // this regression's own oracle. Compared across a grid of parameters
+    // spanning interior/exterior/boundary on Mandelbrot (z^2+a) and across
+    // Nova (Newton's method for z^3-1, plus an additive parameter -- the
+    // family the optimization was actually diagnosed and profiled against,
+    // see cdx/test/diagnose_parameter_basin.cpp), using the SAME seeds and
+    // options for both: same cycle count, same unresolved count, and for
+    // every cycle a (period, |multiplier|) match on the other side -- exact
+    // on period (an integer, and the SAME minimal period the SAME tolerance
+    // must produce either way), close on |multiplier| (both algorithms
+    // settle to within `tol`/`loose_tol` of the true cycle, just via
+    // different step counts, so points differ only at the numerical-noise
+    // level, not the multiplier itself).
+    std::printf("\nIDENTICAL MATH (hard gate): interleaved settle-and-detect matches the OLD "
+               "fixed-budget algorithm exactly, across a grid on Mandelbrot and Nova:\n");
+    {
+        RationalMap nova("nova");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        RationalMap mandel = RationalMap::mandelbrot();
+
+        auto compare_at = [&](const RationalMap& map, Cplx a, int& n_mismatches,
+                              int& n_params_checked) {
+            const auto seeds = map.distinct_critical_points(a);
+            int unresolved_new = -1, unresolved_old = -1;
+            const auto cycles_new = find_attractors_from_seeds(seeds, map, a, {}, &unresolved_new);
+            const auto cycles_old =
+                old_find_attractors_from_seeds(seeds, map, a, {}, &unresolved_old);
+            ++n_params_checked;
+
+            if (cycles_new.size() != cycles_old.size() || unresolved_new != unresolved_old) {
+                ++n_mismatches;
+                std::printf("    MISMATCH a=(%.6f%+.6fi): new count=%zu unresolved=%d | old count=%zu unresolved=%d\n",
+                           a.real(), a.imag(), cycles_new.size(), unresolved_new, cycles_old.size(), unresolved_old);
+                return;
+            }
+            std::vector<std::pair<int, double>> sig_new, sig_old;
+            for (const auto& c : cycles_new) sig_new.push_back(old_cycle_signature(c, map, a));
+            for (const auto& c : cycles_old) sig_old.push_back(old_cycle_signature(c, map, a));
+            std::vector<bool> matched(sig_old.size(), false);
+            for (const auto& [period, mult] : sig_new) {
+                bool found_match = false;
+                for (std::size_t j = 0; j < sig_old.size(); ++j) {
+                    if (matched[j]) continue;
+                    if (sig_old[j].first == period && std::abs(sig_old[j].second - mult) < 1e-6) {
+                        matched[j] = true;
+                        found_match = true;
+                        break;
+                    }
+                }
+                if (!found_match) {
+                    ++n_mismatches;
+                    std::printf("    MISMATCH a=(%.6f%+.6fi): no old match for new (period=%d, |mult|=%.9f)\n",
+                               a.real(), a.imag(), period, mult);
+                    return;
+                }
+            }
+        };
+
+        int n_mismatches = 0, n_checked = 0;
+        for (int i = 0; i < 9; ++i) {
+            for (int j = 0; j < 9; ++j) {
+                const double re = -2.0 + 2.5 * i / 8.0;    // -2.0 .. 0.5
+                const double im = -1.2 + 2.4 * j / 8.0;    // -1.2 .. 1.2
+                compare_at(mandel, Cplx{re, im}, n_mismatches, n_checked);
+            }
+        }
+        const int mandel_checked = n_checked;
+        for (int i = 0; i < 7; ++i) {
+            for (int j = 0; j < 7; ++j) {
+                const double re = -0.6 + 0.4 * i / 6.0;    // -0.6 .. -0.2
+                const double im = -0.15 + 0.3 * j / 6.0;   // -0.15 .. 0.15
+                compare_at(nova, Cplx{re, im}, n_mismatches, n_checked);
+            }
+        }
+        std::printf("  checked %d parameters (%d Mandelbrot interior/exterior/boundary, %d "
+                   "Nova), %d mismatch%s\n", n_checked, mandel_checked, n_checked - mandel_checked,
+                   n_mismatches, n_mismatches == 1 ? "" : "es");
+        check(n_checked > 0, "sanity: the grid actually ran");
+        check(n_mismatches == 0,
+              "every parameter's cycle count, unresolved count, and per-cycle (period, "
+              "|multiplier|) signature is IDENTICAL between the interleaved early-exit "
+              "algorithm and the frozen pre-optimization reference -- the optimization "
+              "changed WHEN closure is detected, never WHAT is found");
     }
 
     std::printf("\n%s (%d failure%s)\n",

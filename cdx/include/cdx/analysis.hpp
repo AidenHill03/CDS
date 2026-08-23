@@ -51,7 +51,9 @@ namespace cdx {
 // fixed points) or infinity itself.
 // -----------------------------------------------------------------------------
 struct FindAttractorsOptions {
-    int    burn_in          = 500;   // iterations discarded as transient
+    int    burn_in          = 500;   // SAFETY CAP on transient-elimination steps, not a
+                                      // mandatory count -- see find_attractors_from_seeds'
+                                      // own doc comment for how closure is detected earlier
     int    max_period       = 64;    // largest cycle period detected
     double tol               = 1e-9; // chordal tolerance for cycle closure and dedup
     double inf_cutoff        = 1e12; // |z| beyond which a value counts as infinity
@@ -162,6 +164,18 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 // now evaluated more accurately, if anything making a false accept LESS
 // likely), and a cycle the strict pass already found closes and returns
 // exactly as before (this extended search never runs for it at all).
+//
+// SPEED: both passes above exit as soon as closure is confirmed rather than
+// always burning their full settling budget (`burn_in`/`extended_max_period`)
+// first -- a deep-interior, quickly-converging orbit typically settles in
+// tens of steps, not hundreds, and previously paid the FULL budget
+// regardless. This changes ONLY when closure is detected, never what is
+// found: every accepted cycle's period and multiplier are identical to what
+// the fixed-budget search would have found, just often discovered sooner
+// (see analysis.cpp's own, fuller comment on the mechanism and the two
+// numerical pitfalls -- chordal saturation near infinity, and a
+// slowly-converging multi-point cycle's non-monotonic residual -- that a
+// naive early-exit falls into).
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
                                               const FindAttractorsOptions& opts = {},
