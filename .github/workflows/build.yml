@@ -185,9 +185,9 @@ jobs:
         run: |
           set -e
           if [ "${{ runner.os }}" = "macOS" ]; then
-            APP_EXE="dist/ComplexDynamics.app/Contents/MacOS/ComplexDynamics"
+            APP_EXE="dist/Project Phoenix.app/Contents/MacOS/Project Phoenix"
           else
-            APP_EXE="dist/ComplexDynamics/ComplexDynamics.exe"
+            APP_EXE="dist/Project Phoenix/Project Phoenix.exe"
           fi
           set +e
           OUT=$("$APP_EXE" 2>&1)
@@ -220,7 +220,7 @@ jobs:
           QT_DEBUG_PLUGINS: "1"
         run: |
           set +e
-          OUT=$(xvfb-run -a dist/ComplexDynamics/ComplexDynamics 2>&1)
+          OUT=$(xvfb-run -a "dist/Project Phoenix/Project Phoenix" 2>&1)
           CODE=$?
           set -e
           echo "$OUT"
@@ -234,17 +234,23 @@ jobs:
         run: |
           set -e
           mkdir -p out
+          # "ProjectPhoenix" (no space) here is a release-artifact/zip
+          # NAMING convention only (spaces in a downloaded .zip filename
+          # are an unnecessary annoyance) -- the paths being archived
+          # below are the REAL bundle paths PyInstaller produced from
+          # PRODUCT_NAME verbatim ("Project Phoenix", with the space),
+          # quoted so bash treats each as one argument.
           if [ "${{ runner.os }}" = "macOS" ]; then
-            ditto -c -k --sequesterRsrc --keepParent dist/ComplexDynamics.app out/ComplexDynamics-macOS.zip
+            ditto -c -k --sequesterRsrc --keepParent "dist/Project Phoenix.app" out/ProjectPhoenix-macOS.zip
           elif [ "${{ runner.os }}" = "Windows" ]; then
-            (cd dist && 7z a -r ../out/ComplexDynamics-Windows.zip ComplexDynamics)
+            (cd dist && 7z a -r ../out/ProjectPhoenix-Windows.zip "Project Phoenix")
           else
-            (cd dist && zip -r ../out/ComplexDynamics-Linux.zip ComplexDynamics)
+            (cd dist && zip -r ../out/ProjectPhoenix-Linux.zip "Project Phoenix")
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ComplexDynamics-${{ runner.os }}
+          name: ProjectPhoenix-${{ runner.os }}
           path: out/*.zip
           if-no-files-found: error
 

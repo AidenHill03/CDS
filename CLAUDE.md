@@ -1,4 +1,4 @@
-# ComplexDynamics — project instructions
+# Project Phoenix — project instructions
 
 Rational-map dynamics sandbox. C++ numerics core, Python bindings, migrating
 off a MATLAB prototype. Goal: a distributable app for exploring rational maps

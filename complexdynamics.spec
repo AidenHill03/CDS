@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the ComplexDynamics desktop app -- macOS .app,
+"""PyInstaller spec for the Project Phoenix desktop app -- macOS .app,
 Windows onedir .exe, or Linux onedir binary, whichever platform this runs
-on. PyInstaller cannot cross-compile, so each platform's artifact must be
+on. (This spec file itself keeps its ComplexDynamics-era basename --
+complexdynamics.spec -- renaming it is a source-tree/CI-path change, not
+a display-name one, so it's out of scope for a cosmetic rename.)
+PyInstaller cannot cross-compile, so each platform's artifact must be
 built ON that platform -- see .github/workflows/build.yml, which runs
 this exact spec on macos-latest/windows-latest/ubuntu-latest separately
 to produce three genuine, native artifacts, not one file pretending to
@@ -13,10 +16,11 @@ Build (from the repository root, after building cdx -- see CLAUDE.md):
     pip install pyinstaller
     pyinstaller complexdynamics.spec
 
-Produces dist/ComplexDynamics.app (macOS) or dist/ComplexDynamics/ (a
-onedir folder containing ComplexDynamics.exe on Windows, or the
-ComplexDynamics ELF binary on Linux, plus every DLL/.so it needs
-alongside it).
+Produces dist/{PRODUCT_NAME}.app (macOS) or dist/{PRODUCT_NAME}/ (a
+onedir folder containing {PRODUCT_NAME}.exe on Windows, or the
+{PRODUCT_NAME} ELF binary on Linux, plus every DLL/.so it needs alongside
+it) -- the actual name always comes from app.version.PRODUCT_NAME below,
+not hardcoded here.
 """
 
 import sys

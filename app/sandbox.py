@@ -2493,7 +2493,7 @@ class SandboxWindow(QMainWindow):
         # On macOS, Qt moves a menu titled "Help" (and any action inside
         # named "About <AppName>") into the system application menu
         # automatically -- this is the standard, idiomatic way to get a
-        # real "About ComplexDynamics" entry there, not a bespoke button.
+        # real "About Project Phoenix" entry there, not a bespoke button.
         #
         # Stored on self DELIBERATELY, not left as a local -- addMenu()/
         # addAction() return a wrapper PySide6 can garbage-collect (deleting
@@ -2662,7 +2662,7 @@ class SandboxWindow(QMainWindow):
     # QPushButton click.
     def _on_save_experiment(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Experiment", "", "ComplexDynamics experiment (*.cdsx);;All files (*)")
+            self, "Save Experiment", "", f"{PRODUCT_NAME} experiment (*.cdsx);;All files (*)")
         if path:
             self._do_save_experiment(path)
 
@@ -2698,7 +2698,7 @@ class SandboxWindow(QMainWindow):
 
     def _on_open_experiment(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Experiment", "", "ComplexDynamics experiment (*.cdsx);;All files (*)")
+            self, "Open Experiment", "", f"{PRODUCT_NAME} experiment (*.cdsx);;All files (*)")
         if path:
             self._do_open_experiment(path)
 

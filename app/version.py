@@ -4,6 +4,6 @@ dialog, and (via the PyInstaller spec) the packaged .app's own metadata --
 one place to bump for a release, not three.
 """
 
-PRODUCT_NAME = "ComplexDynamics"
+PRODUCT_NAME = "Project Phoenix"
 VERSION = "0.5.0-beta"
 AUTHOR = "Aiden Hill"

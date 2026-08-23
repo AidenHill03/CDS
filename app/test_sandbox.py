@@ -51,6 +51,7 @@ from app.sandbox import (ATTRACTING_CYCLES_LAYER_KEY, CRITICAL_POINTS_LAYER_KEY,
 from app.facts_panel import _classify, _is_inf
 from app.session import Session, render_map
 from app.settings import Settings, preview_path_for
+from app.version import PRODUCT_NAME
 
 
 def _pane_view(session: Session, center: complex = 0j, scale: float = 1.5,
@@ -1092,7 +1093,7 @@ def main() -> None:
 
     # ---- window title / About dialog -----------------------------------------------
     print("\nwindow title / About dialog:")
-    check(window.windowTitle() == "ComplexDynamics",
+    check(window.windowTitle() == PRODUCT_NAME,
           "the window title is the product name, not an internal milestone tag")
     menu_titles = [a.text() for a in window.menuBar().actions()]
     check("Help" in menu_titles, "a Help menu exists (macOS moves it into the app menu)")
@@ -1106,13 +1107,13 @@ def main() -> None:
     # findChildren) -- a quirk of that particular lookup path, not evidence
     # the menu itself is actually gone.
     about_actions = [a.text() for a in window.help_menu.actions()]
-    check("About ComplexDynamics" in about_actions,
-          "the Help menu has an 'About ComplexDynamics' action")
-    check(window.about_action.text() == "About ComplexDynamics",
+    check(f"About {PRODUCT_NAME}" in about_actions,
+          f"the Help menu has an 'About {PRODUCT_NAME}' action")
+    check(window.about_action.text() == f"About {PRODUCT_NAME}",
           "window.about_action (what _build_ui actually wires the click handler to) matches too")
     from app.about_dialog import AboutDialog
     about = AboutDialog(window)
-    check(about.windowTitle() == "About ComplexDynamics", "the dialog's own title matches too")
+    check(about.windowTitle() == f"About {PRODUCT_NAME}", "the dialog's own title matches too")
     about.close()
 
     # ---- View menu: mirrors the toolbar's own controls, bidirectionally (Stage 3) ---
