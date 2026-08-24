@@ -265,7 +265,7 @@ PYBIND11_MODULE(cdx, m) {
              "critical point rather than iterating multiplicity times.")
         .def("fixed_points", &RationalMap::fixed_points, py::arg("a"),
              "ALL fixed points R(z)==z (not just attracting ones -- see "
-             "cdx.find_attractors for that), each with its multiplier. "
+             "cdx.complete_attractors for that), each with its multiplier. "
              "Includes infinity when R(infinity)==infinity.")
         .def("to_formula", &RationalMap::to_formula)
         .def("serialize", &RationalMap::serialize)
@@ -672,7 +672,23 @@ PYBIND11_MODULE(cdx, m) {
     m.def("find_attractors", &find_attractors, py::arg("map"), py::arg("a"),
           py::arg("opts") = FindAttractorsOptions{},
           "Discovers attracting cycles via critical orbits (Fatou's theorem). "
-          "Returns a list of Cycle, ready to pass to Renderer.render_basin.");
+          "Returns a list of Cycle, ready to pass to Renderer.render_basin. "
+          "PURELY critical-seeded -- a finite-budget numerical search, not a "
+          "completeness guarantee; prefer complete_attractors for any real "
+          "consumer that wants the full attractor set (see its own doc "
+          "comment). This is kept as its own, unreconciled function because "
+          "some callers -- and this project's own tests -- specifically want "
+          "the plain critical-seeded algorithm's own behavior.");
+
+    m.def("complete_attractors", &complete_attractors, py::arg("map"), py::arg("a"),
+          py::arg("opts") = FindAttractorsOptions{},
+          "find_attractors' own critical-seeded cycles, UNIONED with every "
+          "algebraically-attracting fixed point map.fixed_points(a) reports "
+          "(|multiplier| < 1, including infinity) that no critical-seeded "
+          "cycle already represents -- see the C++ analysis.hpp doc comment "
+          "for why find_attractors alone is not a completeness guarantee. "
+          "This is what the fact sheet, basin classification, and "
+          "Parameter_basin all actually use for 'the attractor set'.");
 
     m.def("polynomial_escape_certified", &polynomial_escape_certified, py::arg("map"),
           "True iff `map` has no poles anywhere (structurally -- independent of the "

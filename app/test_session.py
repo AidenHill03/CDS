@@ -498,6 +498,58 @@ def main() -> None:
     check(n_2cycle == 1, "basilica: one attracting 2-cycle")
     check(n_finite_fixed_attracting == 0, "basilica: zero finite attracting fixed points")
 
+    # ---- attracting fixed points: complete_attractors' union (cosmetic batch) ------
+    # Nova, a=(-0.345714,-0.100000): cdx.find_attractors mislabels the
+    # genuinely attracting fixed point (0.74392,-0.0516) as a spurious
+    # period-9 cycle (see cdx/test/test_analysis.cpp's own "complete_
+    # attractors" section for how this real case was found and root-
+    # caused) -- dynamical_facts() must show it correctly as period 1.
+    print("\nattracting fixed points: complete_attractors' union (real Nova reproduction):")
+    nova = cdx.RationalMap("nova")
+    nova.add_poly(2.0 / 3.0 + 0j, 1, 0, "(2/3)z")
+    nova.add_pole(0j, 1.0 / 3.0 + 0j, 2, 0, "(1/3)z^-2")
+    nova.add_poly(1 + 0j, 0, 1, "a")
+    a_repro = -0.345714 - 0.1j
+    target = 0.74392 - 0.0516219j
+
+    s7 = Session()
+    s7.map = nova
+    s7.param = a_repro
+    facts_nova = s7.dynamical_facts()
+
+    target_fp = next((fp for fp in facts_nova.fixed_points if abs(fp.point - target) < 1e-3), None)
+    check(target_fp is not None and 0.9 < abs(target_fp.multiplier) < 0.9701,
+          "sanity: fixed_points() reports this point attracting, |mult|~0.965")
+
+    broken_cycles = cdx.find_attractors(nova, a_repro)
+    period9_present = any(len(c.points) == 9 and abs(c.points[0] - target) < 1e-3
+                          for c in broken_cycles)
+    check(period9_present,
+          "cdx.find_attractors alone still mislabels this point as a period-9 cycle "
+          "(pre-existing behavior, unchanged by this fix)")
+
+    target_ac = next((ac for ac in facts_nova.attracting_cycles
+                      if len(ac.points) == 1 and abs(ac.points[0] - target) < 1e-3), None)
+    check(target_ac is not None and target_ac.period == 1,
+          "FIX: session.dynamical_facts()'s attracting_cycles table shows this point "
+          "correctly as its own period-1 entry -- the fact sheet the user actually sees "
+          "is correct even though find_attractors' own raw output is not")
+
+    complete_cycles = cdx.complete_attractors(nova, a_repro)
+    check(any(len(c.points) == 1 and abs(c.points[0] - target) < 1e-3 for c in complete_cycles),
+          "cdx.complete_attractors (exposed to Python, what session.py's basin mode now "
+          "uses) recovers the same correct period-1 entry directly")
+
+    # basin-mode render: a pixel AT this fixed point must resolve to a real
+    # basin, not stay unresolved or only match the spurious period-9 cycle.
+    tiny_vp = cdx.Viewport(target, 0.01, 3)
+    basin_repro = s7.render(tiny_vp, "basin")
+    center_label = basin_repro[0][1, 1]
+    check(center_label != 0.0,
+          "session.render(..., 'basin') resolves the pixel at this fixed point to a real "
+          "attractor id -- this is the basin-mode region the fix claims, through the "
+          "actual render path the app uses")
+
     # ---- experiment snapshots: round-trip (map/param/layout/settings/orbit) --------
     print("\nexperiment snapshots (snapshot_to_dict/restore_from_snapshot):")
 

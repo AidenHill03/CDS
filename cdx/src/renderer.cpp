@@ -737,10 +737,18 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 // honestly-tracked residual (Siegel/Herman/parabolic land in `unresolved`,
 // never in the attracting-cycle count). No native/compiled step dispatch
 // here at all -- unlike every OTHER render_* method, this one's inner loop
-// is find_attractors_from_seeds' own map.eval()/map.deriv() calls (the
+// is complete_attractors_from_seeds' own map.eval()/map.deriv() calls (the
 // general RationalMap evaluator), not a per-render StepPlan/CompiledMap;
 // a recognized built-in shape gets no fast-path benefit here, since the
 // discovery machinery being reused doesn't take a custom step function.
+//
+// complete_attractors_from_seeds, not find_attractors_from_seeds directly
+// (see analysis.hpp's own doc comment): the count this method reports must
+// agree with the fact sheet's attracting_cycles and with basin-mode's own
+// classification for the SAME (map, a) -- using the plain critical-seeded
+// count here would silently under-count at exactly the parameter pixels
+// where those other two consumers' union recovers an extra, algebraically-
+// attracting fixed point.
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved) const {
     const int res = view_.resolution;
@@ -782,7 +790,7 @@ Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* u
 
             int unresolved_n = 0;
             const std::vector<Cycle> cycles =
-                find_attractors_from_seeds(crit_pts, *custom, p, opts, &unresolved_n);
+                complete_attractors_from_seeds(crit_pts, *custom, p, opts, &unresolved_n);
 
             img.at(col, row) = static_cast<double>(cycles.size());
             if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);

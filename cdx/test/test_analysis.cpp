@@ -1359,6 +1359,358 @@ int main() {
               "changed WHEN closure is detected, never WHAT is found");
     }
 
+    // =============================================================================
+    // complete_attractors: find_attractors UNION algebraically-attracting
+    // fixed points (cosmetic-batch follow-on: "every attracting fixed point
+    // must appear as an attracting cycle, everywhere it's used").
+    //
+    // AUDIT NOTE on reproduction: an initial broad search (random
+    // polynomials and multi-pole rational maps, degree 3-7; Newton/
+    // McMullen/relaxed-Newton families; roughly 200,000 total (map,
+    // parameter) evaluations, filtered to |multiplier| < 0.9) found no
+    // naturally-occurring miss -- but that filter was itself too
+    // conservative. cdx_diagnose_parameter_basin.cpp's OWN "before vs
+    // after" sanity check (comparing render_parameter_basin's real output
+    // against a direct find_attractors_from_seeds call) started failing
+    // once render_parameter_basin was wired to complete_attractors_from_
+    // seeds, and pinning down exactly why surfaced a REAL, reproducible
+    // case on the exact Nova family/viewport that file already uses: at
+    // a=(-0.345714,-0.100000), fixed_points() reports (0.74392,-0.0516)
+    // as attracting (|multiplier|=0.9652 -- not superattracting, not so
+    // close to 1 that it needs anything special), but find_attractors
+    // (default options, confirm_weakly_attracting ON) mislabels it as a
+    // SPURIOUS PERIOD-9 cycle of the identical point repeated nine times,
+    // rather than period-1 -- hypothesis (c) from the audit (period-1
+    // detection), root-caused to confirm_weakly_attracting's own final-
+    // trial acceptance (analysis.cpp, the "bool accept = true" default
+    // before the current_anchor_step < opts.extended_max_period gate):
+    // at the LAST anchor trial, the k==1 candidate's own extra
+    // confirmation step (chordal(f(zn),zn) < loose_tol) is bypassed
+    // entirely, so if the orbit still hasn't fully settled by then (slow,
+    // and evidently non-real/rotating multiplier), whichever k first
+    // satisfies the plain chordal(zn,anchor) test gets accepted --
+    // observed to be k=9 here, not k=1. This is a genuine, PRE-EXISTING
+    // gap in find_attractors' own closure detection, out of scope to fix
+    // in THIS batch (which reconciles against the algebraic ground truth
+    // instead of patching the numerical search further), but it is
+    // exactly the kind of case complete_attractors exists to catch
+    // regardless of its numerical root cause. See test C below for the
+    // pinned-down case itself, and cdx_diagnose_parameter_basin.cpp's own
+    // updated "STAGE 2 VERIFICATION" section for where this was found.
+    // Test E (infinity) still uses a deliberately-restricted seed list --
+    // this real case doesn't happen to cover infinity, so that part is
+    // demonstrated directly instead.
+    // =============================================================================
+    std::printf("\n\n=== complete_attractors ===\n");
+
+    // ---- A: ground-truth invariant -- every algebraically-attracting fixed --------
+    // point appears in complete_attractors' output, across a battery.
+    std::printf("\nA. ground-truth invariant (fixed-points table vs complete_attractors, "
+               "across a battery):\n");
+    {
+        auto check_battery = [](const char* label, RationalMap& map, Cplx a) {
+            const auto fps = map.fixed_points(a);
+            const auto cycles = complete_attractors(map, a);
+            for (const auto& fp : fps) {
+                if (!(std::abs(fp.multiplier) < 1.0)) continue;   // not attracting
+                bool found = false;
+                for (const auto& c : cycles) {
+                    if (c.points.size() != 1) continue;
+                    const bool fp_inf = !std::isfinite(fp.point.real());
+                    const bool c_inf = !std::isfinite(c.points[0].real());
+                    if (fp_inf != c_inf) continue;
+                    if (fp_inf || close(fp.point, c.points[0], 1e-4)) { found = true; break; }
+                }
+                char msg[256];
+                std::snprintf(msg, sizeof msg,
+                             "%s: fixed point (%.4g%+.4gi) |mult|=%.4g is represented in "
+                             "complete_attractors", label, fp.point.real(), fp.point.imag(),
+                             std::abs(fp.multiplier));
+                check(found, msg);
+            }
+        };
+
+        RationalMap newton3 = RationalMap::newton_cubic();
+        check_battery("newton_cubic", newton3, Cplx{0.0, 0.0});
+
+        RationalMap mcm = RationalMap::mcmullen(3);
+        for (double re = -1.0; re <= 1.0; re += 0.25)
+            for (double im = -1.0; im <= 1.0; im += 0.25)
+                check_battery("mcmullen(3)", mcm, Cplx{re, im});
+
+        RationalMap nova("nova");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+        for (double re = -0.6; re <= -0.28; re += 0.04)
+            for (double im = -0.15; im <= 0.15; im += 0.04)
+                check_battery("nova", nova, Cplx{re, im});
+
+        std::string err;
+        RationalMap custom_map = RationalMap::from_expression(
+            "z^3 + a/(z-1) + a/(z+1)", "a", {}, "custom_multi_pole");
+        for (double re = -1.5; re <= 1.5; re += 0.3)
+            for (double im = -1.5; im <= 1.5; im += 0.3)
+                check_battery("custom(two poles)", custom_map, Cplx{re, im});
+    }
+
+    // ---- B: no double-counting -------------------------------------------------------
+    std::printf("\nB. no double-counting:\n");
+    {
+        // newton_cubic: all 3 roots are ALREADY superattracting fixed points
+        // find_attractors' own critical seeding finds directly (each root IS
+        // one of its own critical points) -- the union must not add a SECOND
+        // copy of any of them.
+        RationalMap newton3 = RationalMap::newton_cubic();
+        const auto before = find_attractors(newton3, Cplx{0.0, 0.0});
+        const auto after = complete_attractors(newton3, Cplx{0.0, 0.0});
+        check(before.size() == 3, "sanity: find_attractors alone already finds all 3 roots");
+        check(after.size() == before.size(),
+              "complete_attractors adds NOTHING on a map find_attractors already covers "
+              "completely -- no inflation on an already-correct map");
+
+        // Explicit duplicate-representation check: force the union to
+        // consider a fixed point find_attractors ALREADY found (via a
+        // full, unrestricted seed list) -- it must still end up
+        // represented exactly once.
+        for (const FixedPoint& fp : newton3.fixed_points(Cplx{0.0, 0.0})) {
+            if (!(std::abs(fp.multiplier) < 1.0)) continue;
+            int n_matches = 0;
+            for (const auto& c : after) {
+                if (c.points.size() != 1) continue;
+                const bool fp_inf = !std::isfinite(fp.point.real());
+                const bool c_inf = !std::isfinite(c.points[0].real());
+                if (fp_inf != c_inf) continue;
+                if (fp_inf || close(fp.point, c.points[0], 1e-4)) ++n_matches;
+            }
+            char msg[256];
+            std::snprintf(msg, sizeof msg,
+                         "fixed point (%.4g%+.4gi) is represented EXACTLY once, not "
+                         "duplicated", fp.point.real(), fp.point.imag());
+            check(n_matches == 1, msg);
+        }
+    }
+
+    // ---- C: the REAL reproduced case -- Nova, a=(-0.345714,-0.100000) --------------
+    // find_attractors (default options) mislabels the algebraically-
+    // attracting fixed point (0.74392,-0.0516) as a spurious period-9
+    // cycle -- see the AUDIT NOTE above for how this was found and root-
+    // caused. complete_attractors recovers it correctly.
+    std::printf("\nC. the REAL reproduced case (Nova, a=(-0.345714,-0.100000)) -- "
+               "find_attractors mislabels a genuine period-1 fixed point as a spurious "
+               "period-9 cycle:\n");
+    {
+        RationalMap nova("nova_repro");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+        const Cplx a{-0.345714, -0.100000};
+        const Cplx target{0.74392, -0.0516219};
+
+        const auto fps = nova.fixed_points(a);
+        const FixedPoint* target_fp = nullptr;
+        for (const auto& fp : fps) {
+            if (close(fp.point, target, 1e-3)) { target_fp = &fp; break; }
+        }
+        check(target_fp != nullptr && std::abs(target_fp->multiplier) < 0.9701 &&
+              std::abs(target_fp->multiplier) > 0.9,
+              "sanity: fixed_points() reports this point attracting with |mult|~0.965 -- "
+              "genuinely attracting, not superattracting, not pathologically close to 1");
+
+        const auto broken_cycles = find_attractors(nova, a);   // default opts -- production
+        bool mislabeled_as_period9 = false;
+        for (const auto& c : broken_cycles) {
+            if (c.points.size() == 9 && close(c.points[0], target, 1e-3)) mislabeled_as_period9 = true;
+        }
+        check(mislabeled_as_period9,
+              "REPRODUCED: find_attractors' own default-options output labels this point's "
+              "orbit as a period-9 cycle of the identical point repeated 9 times, not the "
+              "period-1 fixed point it actually is");
+        bool correctly_period1_in_broken = false;
+        for (const auto& c : broken_cycles) {
+            if (c.points.size() == 1 && close(c.points[0], target, 1e-3)) correctly_period1_in_broken = true;
+        }
+        check(!correctly_period1_in_broken,
+              "...and find_attractors' own output has NO separate, correctly-labeled "
+              "period-1 entry for it either -- this fixed point is genuinely unrepresented "
+              "as what it actually is, not just duplicated");
+
+        const auto fixed_cycles = complete_attractors(nova, a);
+        bool correctly_period1_in_fixed = false;
+        for (const auto& c : fixed_cycles) {
+            if (c.points.size() == 1 && close(c.points[0], target, 1e-3)) correctly_period1_in_fixed = true;
+        }
+        check(correctly_period1_in_fixed,
+              "FIX: complete_attractors' output includes this point as its own correct "
+              "period-1 cycle -- recovered from fixed_points() regardless of find_"
+              "attractors' own period-9 misdetection");
+
+        // Impact: a pixel AT this point resolves to a real basin with the
+        // complete set; with the broken set it either stays unresolved or
+        // (since the spurious period-9 "cycle" IS technically present,
+        // just mislabeled) can only ever match via that wrong period,
+        // never as the clean, correct basin the point actually belongs to.
+        RenderSettings rset{50, 2.0, 1e-6, 1};
+        Viewport v{target, 0.01, 3};
+        Renderer r_broken(Map::custom(nova, a), v, rset);
+        Renderer r_fixed(Map::custom(nova, a), v, rset);
+        const Image labels_broken = r_broken.render_basin(broken_cycles);
+        const Image labels_fixed = r_fixed.render_basin(fixed_cycles);
+        const int center = v.resolution / 2;
+        std::printf("  BEFORE (find_attractors): %zu cycles total, pixel-at-point label=%.0f\n",
+                   broken_cycles.size(), labels_broken.at(center, center));
+        std::printf("  AFTER  (complete_attractors): %zu cycles total, pixel-at-point label=%.0f\n",
+                   fixed_cycles.size(), labels_fixed.at(center, center));
+        check(labels_fixed.at(center, center) != 0.0,
+              "basin-mode region impact: the pixel at this fixed point resolves to a real "
+              "attractor id with the complete set");
+    }
+
+    // ---- E: infinity, via a deliberately-restricted seed list -----------------------
+    // (the real Nova case above doesn't happen to cover infinity, so this
+    // demonstrates the union mechanism directly, the same way as before).
+    std::printf("\nE. infinity as the attracting fixed point (simulated via an "
+               "EMPTY seed list) -- impact on basin classification and Parameter_basin's "
+               "count, plus an infinity case:\n");
+    {
+        // z^2 + a at a=-0.5: two finite fixed points, z=-0.366... genuinely
+        // (not superattracting, not near-parabolic) attracting (|mult|~0.73),
+        // z=1.366... repelling. An EMPTY seed list stands in for "critical
+        // seeding found/used nothing" -- the most extreme, unambiguous case
+        // of hypothesis (a) (incomplete critical-point enumeration) from the
+        // audit, and it exercises the EXACT SAME complete_attractors_from_
+        // seeds entry point render_parameter_basin calls in production.
+        RationalMap quad("quad_demo");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+        const Cplx a{-0.5, 0.0};
+
+        const auto fps = quad.fixed_points(a);
+        const FixedPoint* attracting_fp = nullptr;
+        for (const auto& fp : fps) {
+            if (std::abs(fp.multiplier) < 0.9) { attracting_fp = &fp; break; }
+        }
+        check(attracting_fp != nullptr,
+              "sanity: z^2-0.5 has a genuinely (not weakly) attracting finite fixed point");
+
+        int unresolved_before = -1, unresolved_after = -1;
+        const auto cycles_before =
+            find_attractors_from_seeds({}, quad, a, {}, &unresolved_before);
+        const auto cycles_after =
+            complete_attractors_from_seeds({}, quad, a, {}, &unresolved_after);
+        check(cycles_before.empty(),
+              "BEFORE: an empty seed list means find_attractors_from_seeds finds nothing "
+              "at all -- the simulated miss");
+        // z^2+a is a bare polynomial (no poles), so infinity is trivially
+        // superattracting there TOO (diff=2, multiplier=0) -- the union
+        // correctly recovers BOTH it and the finite attracting fixed point,
+        // not just one, since both satisfy the same |multiplier|<1 test.
+        bool has_finite = false, has_infinity = false;
+        for (const auto& c : cycles_after) {
+            if (c.points.size() != 1) continue;
+            if (!std::isfinite(c.points[0].real())) has_infinity = true;
+            else if (close(c.points[0], attracting_fp->point)) has_finite = true;
+        }
+        check(cycles_after.size() == 2 && has_finite && has_infinity,
+              "AFTER: complete_attractors_from_seeds recovers BOTH the finite attracting "
+              "fixed point AND infinity (also trivially superattracting for this bare "
+              "polynomial) from fixed_points() alone, even with zero critical seeds");
+        check(unresolved_before == 0 && unresolved_after == 0,
+              "unresolved_count is unaffected by the union either way (0 seeds attempted, "
+              "0 seeds unresolved -- the union recovers MISSING attractors, it does not "
+              "reinterpret a genuinely failed seed as resolved)");
+
+        // Impact on basin classification: a pixel AT the attracting fixed
+        // point itself must resolve immediately (n=0) to a real cycle id
+        // with the complete set, vs staying unresolved (label 0) forever
+        // with the incomplete one.
+        RenderSettings rset{50, 2.0, 1e-6, 1};
+        Viewport v{attracting_fp->point, 0.01, 3};   // tiny viewport centred ON the fixed point
+        Renderer r_before(Map::custom(quad, a), v, rset);
+        Renderer r_after(Map::custom(quad, a), v, rset);
+        const Image labels_before = r_before.render_basin(cycles_before);
+        const Image labels_after = r_after.render_basin(cycles_after);
+        const int center = v.resolution / 2;
+        check(labels_before.at(center, center) == 0.0,
+              "BEFORE (incomplete cycles): the pixel AT the attracting fixed point is "
+              "unresolved -- render_basin has no attractor to classify it against");
+        check(labels_after.at(center, center) != 0.0,
+              "AFTER (complete cycles): the SAME pixel now correctly resolves to the "
+              "recovered attractor's basin -- this is the basin-mode region the fix claims");
+
+        // Impact on Parameter_basin's count, at this exact parameter pixel:
+        // before=0 distinct attracting cycles (nothing seeded), after=2
+        // (the finite fixed point AND infinity, both recovered) -- the
+        // count-region impact this synthetic construction demonstrates.
+        // (A REAL render_parameter_basin pixel for z^2+a has only ONE
+        // finite critical orbit to seed from, so it would show count=1
+        // either way -- escaping to infinity XOR converging to the finite
+        // point, never counting both from a single orbit; this empty-seed
+        // simulation exposes BOTH simultaneously because fixed_points()
+        // reports every algebraically attracting point regardless of any
+        // orbit's actual fate, which is exactly the point of a pure
+        // completeness union.)
+        check(static_cast<int>(cycles_before.size()) == 0 &&
+              static_cast<int>(cycles_after.size()) == 2,
+              "Parameter_basin count-region impact at this parameter: 0 -> 2 distinct "
+              "attracting cycles (BEFORE undercounts by exactly the recovered fixed point)");
+
+        // ---- E: infinity as the attracting fixed point -----------------------------
+        // P(z)=2z^2-2z+a, Q(z)=z-1 -- degree(P)-degree(Q)=1, so infinity is
+        // FIXED (not itself critical, since diff<2) with multiplier
+        // Q_lead/P_lead = 1/2, clearly attracting and not near 1.
+        std::string err;
+        RationalMap inf_map = RationalMap::from_expression(
+            "(2*z^2 - 2*z + a) / (z - 1)", "a", {}, "inf_attracting");
+        const Cplx a_inf{0.3, 0.0};
+        const auto inf_fps = inf_map.fixed_points(a_inf);
+        const FixedPoint* inf_fp = nullptr;
+        for (const auto& fp : inf_fps) {
+            if (!std::isfinite(fp.point.real()) && std::abs(fp.multiplier) < 0.9) {
+                inf_fp = &fp;
+                break;
+            }
+        }
+        check(inf_fp != nullptr,
+              "sanity: this map's fixed_points() reports infinity as clearly attracting "
+              "(|mult| ~ 0.5), not near 1");
+
+        const auto inf_cycles_before = find_attractors_from_seeds({}, inf_map, a_inf);
+        const auto inf_cycles_after = complete_attractors_from_seeds({}, inf_map, a_inf);
+        check(inf_cycles_before.empty(),
+              "BEFORE: with nothing seeded, infinity's own attraction is never checked at "
+              "all -- the simulated miss applies to infinity exactly as to any finite point");
+        check(inf_cycles_after.size() == 1 && !std::isfinite(inf_cycles_after[0].points[0].real()),
+              "AFTER: complete_attractors_from_seeds counts infinity as its own period-1 "
+              "{Inf} cycle, recovered from fixed_points() alone");
+    }
+
+    // ---- D: no regression -- an already-complete map renders identically ------------
+    std::printf("\nD. no regression: an already-complete map's basin render is unchanged:\n");
+    {
+        RationalMap newton3 = RationalMap::newton_cubic();
+        const Cplx a{0.0, 0.0};
+        const auto old_cycles = find_attractors(newton3, a);
+        const auto new_cycles = complete_attractors(newton3, a);
+        check(old_cycles.size() == new_cycles.size(),
+              "newton_cubic (no missed attractors) has the SAME cycle count before/after");
+
+        RenderSettings rset{50, 2.0, 1e-6, 1};
+        Viewport v{{0.0, 0.0}, 2.0, 41};
+        Renderer r_old(Map::custom(newton3, a), v, rset);
+        Renderer r_new(Map::custom(newton3, a), v, rset);
+        const Image labels_old = r_old.render_basin(old_cycles);
+        const Image labels_new = r_new.render_basin(new_cycles);
+        bool identical = labels_old.data.size() == labels_new.data.size();
+        for (std::size_t i = 0; identical && i < labels_old.data.size(); ++i) {
+            if (labels_old.data[i] != labels_new.data[i]) identical = false;
+        }
+        check(identical,
+              "render_basin's output is BYTE-IDENTICAL between find_attractors' own cycles "
+              "and complete_attractors' cycles, for a map with no missed attractors -- the "
+              "union changes nothing when there is nothing to add");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

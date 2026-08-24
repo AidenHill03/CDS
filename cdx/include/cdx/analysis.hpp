@@ -4,6 +4,12 @@
 //
 // Components, each building on the previous:
 //   1. find_attractors     -- discovers attracting cycles via critical orbits
+//   1b. complete_attractors -- find_attractors UNION algebraically-attracting
+//                              fixed points (RationalMap::fixed_points), the
+//                              set every real consumer (fact sheet, basin,
+//                              Parameter_basin) should use -- see its own
+//                              doc comment for why find_attractors alone is
+//                              not a complete-by-construction guarantee
 //   2. wada_diagnostic      -- Wada-boundary signatures on a basin image
 //   3. hausdorff_distance   -- Julia-set-vs-target distance, both metrics
 //   4. dynamical_facts      -- bundles the above with RationalMap's own
@@ -180,6 +186,66 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
                                               const FindAttractorsOptions& opts = {},
                                               int* unresolved_count = nullptr);
+
+// -----------------------------------------------------------------------------
+// 1b. complete_attractors -- find_attractors' own critical-seeded cycles,
+// UNIONED with every algebraically-attracting fixed point RationalMap::
+// fixed_points(a) reports (|multiplier| < 1, including infinity), each
+// added as its own period-1 Cycle when no critical-seeded cycle already
+// represents it (a period-1 cycle at the same point, chordally, within
+// opts.tol * 1e3 -- the same "looser dedupe" tolerance find_attractors
+// itself already uses between cycles it discovers).
+//
+// WHY THIS EXISTS, on top of find_attractors already existing: by Fatou's
+// theorem every attracting cycle attracts at least one critical point, so
+// find_attractors' critical-seeded search is complete IN THE LIMIT of
+// exact arithmetic and unbounded iteration -- but it is still a finite-
+// budget NUMERICAL SEARCH (opts.burn_in/max_period/tol, and see
+// find_attractors_from_seeds' own doc comment for the weakly-attracting
+// case this already had to special-case once), not a proof. A period-1
+// fixed point, by contrast, is available from RationalMap::fixed_points
+// EXACTLY and CHEAPLY -- a single polynomial root-find, no orbit iteration
+// at all -- with its multiplier computed analytically via deriv(), not
+// estimated from a numerically-detected closure. There is no reason a
+// consumer that wants "every attracting cycle" should ever fail to
+// include a period-1 one this cheaper, exact source already knows about,
+// regardless of whether the numerical search alone would have found it.
+//
+// This is a PURE ADDITION over find_attractors' own output: every cycle
+// find_attractors returns is kept unchanged (including any period-1 one
+// it already found on its own, whose point and derived multiplier are
+// left exactly as discovered, not replaced), and the only thing ever
+// APPENDED is a fixed point find_attractors did not already represent.
+// Cannot double-count (the dedup check above) and cannot regress a map
+// that was already complete (nothing new passes the "already represented"
+// check, so cycles come back byte-for-byte identical).
+//
+// Every REAL consumer of "the attractor set" (dynamical_facts' own
+// attracting_cycles, session.py's basin-mode cycle source, Renderer::
+// render_parameter_basin's per-pixel count) should call this instead of
+// find_attractors directly. find_attractors itself is UNCHANGED and still
+// exists in its own right: several existing tests (test_analysis.cpp) and
+// cdx_diagnose_parameter_basin specifically exercise the PURE
+// critical-seeded algorithm's own properties (unresolved-count behaviour,
+// weak-attraction confirmation, before/after performance) and must keep
+// doing so unperturbed by this reconciliation layer.
+std::vector<Cycle> complete_attractors(const RationalMap& map, Cplx a,
+                                       const FindAttractorsOptions& opts = {});
+
+// Same reconciliation, seeded from a caller-supplied critical-point list --
+// the complete_attractors analogue of find_attractors_from_seeds, for a
+// caller (render_parameter_basin) that already has its own seed list in
+// hand and would otherwise pay for distinct_critical_points(a) twice. See
+// find_attractors_from_seeds' own doc comment for what `unresolved_count`
+// means (unchanged: it still counts only seeds the CRITICAL-SEEDED pass
+// itself couldn't resolve, not corrected by the fixed-point union -- a
+// seed that failed numerically is still an honest miss to report, even
+// though the fixed point it might have been looking for is separately
+// now guaranteed present in the returned cycle list).
+std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                                  const RationalMap& map, Cplx a,
+                                                  const FindAttractorsOptions& opts = {},
+                                                  int* unresolved_count = nullptr);
 
 // -----------------------------------------------------------------------------
 // Polynomial escape-radius certification.

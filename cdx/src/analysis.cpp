@@ -498,6 +498,65 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
     return cycles;
 }
 
+// =============================================================================
+// 1b. complete_attractors
+// =============================================================================
+namespace {
+
+// TRUE if `cycles` already contains a period-1 cycle at (chordally) `point`
+// -- the SAME "looser dedupe" tolerance (opts.tol * 1e3) find_attractors_
+// from_seeds itself already uses when adding a newly-discovered cycle (see
+// its own add_cycle calls above), so a fixed point this union is about to
+// append is held to the identical "same point" standard the critical-
+// seeded search already applies to itself.
+bool already_represented(const std::vector<Cycle>& cycles, Cplx point, double tol) {
+    const bool point_inf = !is_finite_cplx(point);
+    for (const auto& c : cycles) {
+        if (c.points.size() != 1) continue;
+        const bool c_inf = !is_finite_cplx(c.points[0]);
+        if (point_inf != c_inf) continue;
+        if (point_inf || chordal(point, c.points[0]) < tol) return true;
+    }
+    return false;
+}
+
+// Appends every algebraically-attracting fixed point not already
+// represented, as its own period-1 Cycle -- the shared body both
+// complete_attractors and complete_attractors_from_seeds call after
+// getting their own critical-seeded `cycles` however they got it (fresh
+// discovery vs a caller-supplied seed list makes no difference here; this
+// step never touches seeds, only the RESULT).
+void union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const RationalMap& map, Cplx a,
+                                      double dedupe_tol) {
+    int next_id = 1;
+    for (const auto& c : cycles) next_id = std::max(next_id, c.id + 1);
+
+    for (const FixedPoint& fp : map.fixed_points(a)) {
+        if (!(std::abs(fp.multiplier) < 1.0)) continue;   // not attracting
+        if (already_represented(cycles, fp.point, dedupe_tol)) continue;
+        Cycle c;
+        c.points = {fp.point};
+        c.id = next_id++;
+        cycles.push_back(std::move(c));
+    }
+}
+
+}  // namespace
+
+std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                                  const RationalMap& map, Cplx a,
+                                                  const FindAttractorsOptions& opts,
+                                                  int* unresolved_count) {
+    std::vector<Cycle> cycles = find_attractors_from_seeds(seeds, map, a, opts, unresolved_count);
+    union_in_attracting_fixed_points(cycles, map, a, opts.tol * 1e3);
+    return cycles;
+}
+
+std::vector<Cycle> complete_attractors(const RationalMap& map, Cplx a,
+                                       const FindAttractorsOptions& opts) {
+    return complete_attractors_from_seeds(map.distinct_critical_points(a), map, a, opts);
+}
+
 bool polynomial_escape_certified(const RationalMap& map) {
     // Representation-agnostic (Stage 2 of the P/Q milestone): works
     // identically whether `map` is term-based or P/Q-backed, since it goes
@@ -702,17 +761,20 @@ DynamicalFacts dynamical_facts(const RationalMap& map, Cplx a, const FindAttract
     facts.pole_orders = map.pole_orders(a);
     facts.fixed_points = map.fixed_points(a);
 
-    for (const auto& cyc : find_attractors(map, a, opts)) {
+    for (const auto& cyc : complete_attractors(map, a, opts)) {
         DynamicalFacts::AttractingCycle ac;
         ac.points = cyc.points;
         ac.period = static_cast<int>(cyc.points.size());
 
-        // find_attractors only ever returns an infinity-containing cycle as
-        // the sole point of a period-1 {Inf} cycle (an orbit passing
+        // Every infinity-containing cycle complete_attractors can return is
+        // still the sole point of a period-1 {Inf} cycle -- either
+        // find_attractors' own critical-seeded {Inf} (an orbit passing
         // through infinity MID-cycle is detected and skipped there, not
-        // returned) -- so the only Inf case to handle is this one, and its
-        // multiplier is already computed correctly by fixed_points() via
-        // the w=1/z chart. Reuse it instead of re-deriving it.
+        // returned) or complete_attractors' own union of an algebraically-
+        // attracting infinity fixed point -- so the only Inf case to
+        // handle is this one, and its multiplier is already computed
+        // correctly by fixed_points() via the w=1/z chart either way.
+        // Reuse it instead of re-deriving it.
         if (ac.points.size() == 1 && !is_finite_cplx(ac.points[0])) {
             for (const auto& fp : facts.fixed_points) {
                 if (!is_finite_cplx(fp.point)) { ac.multiplier = fp.multiplier; break; }

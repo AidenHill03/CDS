@@ -459,10 +459,23 @@ int main() {
     // ---- STAGE 2 VERIFICATION: multiplier-confirmed detection, before vs after ----
     // Re-renders the SAME Nova viewport through the REAL, current
     // render_parameter_basin ("after", the fix as shipped) and, separately,
-    // through find_attractors_from_seeds called directly with
+    // through complete_attractors_from_seeds called directly with
     // confirm_weakly_attracting explicitly off ("before", the pre-fix
     // strict-only baseline) -- both via the real production API, not this
     // file's own reimplementation.
+    //
+    // UPDATED for the cosmetic-batch attractor-completeness fix
+    // (complete_attractors, cdx/src/analysis.cpp): render_parameter_basin
+    // now calls complete_attractors_from_seeds, not find_attractors_from_
+    // seeds directly -- its counts include algebraically-attracting fixed
+    // points RationalMap::fixed_points recovers on top of whatever the
+    // critical-seeded search itself found. Both "before" and "after" below
+    // therefore go through complete_attractors_from_seeds too (varying
+    // ONLY confirm_weakly_attracting), so this section isolates confirm_
+    // weakly_attracting's OWN contribution exactly as it always did,
+    // rather than conflating it with the separate (and, on this exact
+    // family, non-trivial -- see the note below) contribution of the
+    // fixed-point union.
     std::printf("\n---- STAGE 2 VERIFICATION: before vs after on Nova, %dx%d ----\n", v.resolution,
                v.resolution);
     {
@@ -475,8 +488,8 @@ int main() {
         for (int row = 0; row < v.resolution; ++row) {
             for (int col = 0; col < v.resolution; ++col) {
                 int unresolved_here = 0;
-                const auto cyc = find_attractors_from_seeds(crit_pts, nova, v.coord(col, row),
-                                                            before_opts, &unresolved_here);
+                const auto cyc = complete_attractors_from_seeds(crit_pts, nova, v.coord(col, row),
+                                                                before_opts, &unresolved_here);
                 counts_before[static_cast<std::size_t>(row * v.resolution + col)] =
                     static_cast<double>(cyc.size());
                 if (unresolved_here > 0) ++n_unresolved_before;
@@ -495,12 +508,12 @@ int main() {
         int n_unresolved_after = 0;
         for (double u : unresolved_after_img.data) if (u > 0.0) ++n_unresolved_after;
 
-        std::printf("  BEFORE (confirm_weakly_attracting=false): %.1f ms, %d/%d unresolved "
-                   "pixels (%.1f%%)\n", before_ms, n_unresolved_before,
+        std::printf("  BEFORE (confirm_weakly_attracting=false, union still applied): %.1f ms, "
+                   "%d/%d unresolved pixels (%.1f%%)\n", before_ms, n_unresolved_before,
                    v.resolution * v.resolution,
                    100.0 * n_unresolved_before / static_cast<double>(v.resolution * v.resolution));
-        std::printf("  AFTER  (confirm_weakly_attracting=true,  default): %.1f ms, %d/%d "
-                   "unresolved pixels (%.1f%%)\n", after_ms, n_unresolved_after,
+        std::printf("  AFTER  (confirm_weakly_attracting=true,  default, union applied): "
+                   "%.1f ms, %d/%d unresolved pixels (%.1f%%)\n", after_ms, n_unresolved_after,
                    v.resolution * v.resolution,
                    100.0 * n_unresolved_after / static_cast<double>(v.resolution * v.resolution));
         std::printf("  unresolved pixels reduced by %.1f%%\n",
@@ -510,13 +523,19 @@ int main() {
                        : 0.0);
 
         check(n_unresolved_after < n_unresolved_before,
-              "AFTER has strictly FEWER unresolved pixels than BEFORE -- the fix resolves "
-              "pixels the strict-only baseline missed, on this real family");
+              "AFTER has strictly FEWER unresolved pixels than BEFORE -- confirm_weakly_"
+              "attracting resolves pixels the strict-only baseline missed, on this real "
+              "family (union held constant on both sides)");
 
         // NO FALSE COUNTS: everywhere BEFORE already resolved (found a
-        // count), AFTER must report the EXACT SAME count -- the fix must
-        // only ever ADD confirmations the strict path missed, never change
-        // one it already had right.
+        // count), AFTER must report the EXACT SAME count -- confirm_
+        // weakly_attracting must only ever ADD confirmations the strict
+        // path missed, never change one it already had right. The union's
+        // own contribution is held constant on both sides (complete_
+        // attractors_from_seeds on both), so a divergence here would
+        // isolate a confirm_weakly_attracting regression specifically,
+        // not the union's (expected, and separately verified elsewhere --
+        // see the note below) effect.
         bool counts_unchanged_where_resolved = true;
         int n_checked = 0;
         for (int row = 0; row < v.resolution; ++row) {
@@ -529,7 +548,7 @@ int main() {
                 // Recomputed directly for clarity rather than threading a
                 // third parallel array through the loop above.
                 int unresolved_here = 0;
-                const auto cyc_before = find_attractors_from_seeds(
+                const auto cyc_before = complete_attractors_from_seeds(
                     crit_pts, nova, v.coord(col, row), before_opts, &unresolved_here);
                 if (unresolved_here > 0) continue;   // wasn't fully resolved before -- not this check's concern
                 ++n_checked;
@@ -541,8 +560,22 @@ int main() {
         std::printf("  pixels fully resolved BEFORE, count re-checked AFTER: %d\n", n_checked);
         check(counts_unchanged_where_resolved,
               "NO FALSE COUNTS: every pixel already fully resolved before the fix gets the "
-              "EXACT SAME count after it -- the fix only adds missed confirmations, never "
-              "changes an already-correct one");
+              "EXACT SAME count after it -- confirm_weakly_attracting only adds missed "
+              "confirmations, never changes an already-correct one (union held constant)");
+
+        // NOTE (attractor-completeness fix): on this exact family/viewport,
+        // complete_attractors_from_seeds' own union is NOT a no-op -- it
+        // recovers a genuinely attracting fixed point (multiplier ~0.965,
+        // NOT superattracting, NOT near enough to 1 that confirm_weakly_
+        // attracting's own extended search is what's needed) that plain
+        // find_attractors_from_seeds mislabels as a spurious PERIOD-9
+        // cycle of the identical point repeated, rather than period-1 --
+        // a real, reproduced instance of hypothesis (c) from that fix's
+        // own audit (period-1 detection), found via THIS file's own
+        // before/after comparison once it started disagreeing with plain
+        // find_attractors_from_seeds. See cdx/test/test_analysis.cpp's
+        // own "complete_attractors" section for the pinned-down regression
+        // case (Nova, a=(-0.345714,-0.100000)).
     }
 
     std::printf("%s (%d failure%s)\n",

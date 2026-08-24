@@ -214,12 +214,17 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
       - "parameter_basin" always returns a STACKED 3D array, shape (2,
         height, width): index 0 is the NUMBER OF DISTINCT ATTRACTING
         CYCLES at that parameter (infinity counts as one when a critical
-        orbit's limit), index 1 is how many of that pixel's critical
-        orbits did NOT resolve within budget (Siegel/Herman/parabolic --
-        tracked separately, never folded into index 0). Escape-radius-
-        free. See cdx.Renderer.render_parameter_basin's own doc comment
-        for the method (critical-orbit convergence + chordal clustering,
-        reusing find_attractors_from_seeds -- no per-pixel find_attractors
+        orbit's limit, and so does any algebraically-attracting fixed
+        point complete_attractors' own union recovers -- see its doc
+        comment -- even one no critical orbit happened to settle on),
+        index 1 is how many of that pixel's critical orbits did NOT
+        resolve within budget (Siegel/Herman/parabolic -- tracked
+        separately, never folded into index 0, and never corrected by the
+        union either: a seed that failed numerically is still an honest
+        miss to report). Escape-radius-free. See cdx.Renderer.render_
+        parameter_basin's own doc comment for the method (critical-orbit
+        convergence + chordal clustering, reusing complete_attractors_
+        from_seeds -- no per-pixel find_attractors/complete_attractors
         that would redundantly re-root-find the same critical points).
     """
     if mode not in RENDER_MODES:
@@ -258,11 +263,16 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     elif mode == "parameter":
         array = renderer.render_parameter(cancel)
     elif mode == "basin":
-        # find_attractors is a real cost for a root-finding-heavy custom
-        # map, but only on a cache MISS now -- a repeat request at the same
-        # key (map, param, viewport, settings) skips it entirely, same as
-        # skipping render_basin itself.
-        cycles = cdx.find_attractors(rational_map, param)
+        # complete_attractors (NOT find_attractors) -- see its own C++ doc
+        # comment: the plain critical-seeded search is not a completeness
+        # guarantee, so basin classification unions in every algebraically-
+        # attracting fixed point RationalMap.fixed_points already knows
+        # exactly, the same set the fact sheet's attracting_cycles and
+        # Parameter_basin's per-pixel count now agree on too. A real cost
+        # for a root-finding-heavy custom map, but only on a cache MISS
+        # now -- a repeat request at the same key (map, param, viewport,
+        # settings) skips it entirely, same as skipping render_basin itself.
+        cycles = cdx.complete_attractors(rational_map, param)
         labels, iterations = renderer.render_basin(cycles, cancel)
         array = np.stack([labels, iterations])
     elif mode == "greens":
@@ -286,10 +296,11 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         values, exact = renderer.render_parameter_greens(cancel, pot)
         array = values if cdx.polynomial_escape_certified(rational_map) else np.stack([values, exact])
     elif mode == "parameter_basin":
-        # No find_attractors here either: render_parameter_basin does its
-        # OWN per-pixel discovery internally (distinct_critical_points at
-        # THAT pixel's own parameter, then find_attractors_from_seeds) --
-        # unlike "basin" above, there is no single fixed `a` to discover
+        # No find_attractors/complete_attractors call HERE either:
+        # render_parameter_basin does its OWN per-pixel discovery
+        # internally (distinct_critical_points at THAT pixel's own
+        # parameter, then complete_attractors_from_seeds) -- unlike
+        # "basin" above, there is no single fixed `a` to discover
         # attractors for ONCE up front, since every pixel IS a different
         # `a`. Always stacked: (counts, unresolved) -- see cdx.Renderer.
         # render_parameter_basin's own doc comment.
