@@ -182,10 +182,23 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 // numerical pitfalls -- chordal saturation near infinity, and a
 // slowly-converging multi-point cycle's non-monotonic residual -- that a
 // naive early-exit falls into).
+// `unresolved_endpoints`, if given, gets one Cplx appended per seed that
+// contributes to `unresolved_count` -- the LAST live orbit point that seed
+// reached before being counted unresolved (the finite point right before
+// an infinity excursion, or the final point of however far the settle/
+// closure/weak-confirm search got before giving up, or the closed-but-not-
+// attracting candidate's own point when multiplier verification is what
+// rejected it). Exists so complete_attractors_from_seeds (below) can check
+// whether an "unresolved" orbit was actually heading toward an attractor
+// the algebraic union recovers -- see its own doc comment. Ignored (never
+// even collected) when nullptr, same as `unresolved_count` itself; the two
+// are always the same length when both are given, one entry per
+// increment, in the same order.
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
                                               const FindAttractorsOptions& opts = {},
-                                              int* unresolved_count = nullptr);
+                                              int* unresolved_count = nullptr,
+                                              std::vector<Cplx>* unresolved_endpoints = nullptr);
 
 // -----------------------------------------------------------------------------
 // 1b. complete_attractors -- find_attractors' own critical-seeded cycles,
@@ -235,17 +248,41 @@ std::vector<Cycle> complete_attractors(const RationalMap& map, Cplx a,
 // Same reconciliation, seeded from a caller-supplied critical-point list --
 // the complete_attractors analogue of find_attractors_from_seeds, for a
 // caller (render_parameter_basin) that already has its own seed list in
-// hand and would otherwise pay for distinct_critical_points(a) twice. See
-// find_attractors_from_seeds' own doc comment for what `unresolved_count`
-// means (unchanged: it still counts only seeds the CRITICAL-SEEDED pass
-// itself couldn't resolve, not corrected by the fixed-point union -- a
-// seed that failed numerically is still an honest miss to report, even
-// though the fixed point it might have been looking for is separately
-// now guaranteed present in the returned cycle list).
+// hand and would otherwise pay for distinct_critical_points(a) twice.
+//
+// `unresolved_count` MEANS "critical orbits explained by NO attractor in
+// the COMPLETE set" -- not just the critical-seeded pass's own count.
+// find_attractors_from_seeds' raw tally (an orbit the strict/weak-confirm
+// search itself failed to close, or closed onto something not attracting)
+// can OVER-report once the fixed-point union adds a cycle that same orbit
+// was actually heading toward all along -- e.g. an orbit whose closure
+// detection genuinely failed (see find_attractors_from_seeds' own doc
+// comment on its finite budget/tolerance), but whose LAST live point
+// (find_attractors_from_seeds' own `unresolved_endpoints`) sits right on
+// top of a fixed point the union recovers. Such an orbit is not a residual
+// miss -- it found exactly where it was going, just not via a numerically
+// clean closure -- so after the union runs, every unresolved endpoint is
+// swept against the COMPLETE cycle set (critical-seeded and injected
+// alike) at the same opts.tol * 1e3 chordal tolerance the injection dedup
+// itself uses; a match decrements unresolved_count (the attractor is
+// already present in the returned cycles -- nothing is added a second
+// time). What remains after this sweep is a genuine residual: a critical
+// orbit no complete attractor explains at all (Siegel/Herman/parabolic, or
+// a candidate that closed but was not actually attracting).
+//
+// `certain_count`, if given, is set to how many of the returned cycles
+// were ADDED by the algebraic union (i.e. are exact fixed points RationalMap
+// ::fixed_points reports, not numerically-discovered closures) -- distinct
+// from the find_attractors_from_seeds-discovered ones, which remain subject
+// to that search's own finite budget/tolerance. A caller that wants to
+// weigh a CERTAIN attractor differently from unresolved noise (e.g.
+// Renderer::render_parameter_basin's own coloring policy -- see its doc
+// comment) reads this rather than re-deriving which cycles are which.
 std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                                   const RationalMap& map, Cplx a,
                                                   const FindAttractorsOptions& opts = {},
-                                                  int* unresolved_count = nullptr);
+                                                  int* unresolved_count = nullptr,
+                                                  int* certain_count = nullptr);
 
 // -----------------------------------------------------------------------------
 // Polynomial escape-radius certification.

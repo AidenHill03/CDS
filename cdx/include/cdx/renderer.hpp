@@ -343,19 +343,37 @@ public:
     // enough to find them all; no per-pixel find_attractors call that
     // would redundantly re-root-find the SAME critical points a second
     // time -- see find_attractors_from_seeds' own doc comment), then run
-    // find_attractors_from_seeds against THAT seed list (the SAME burn-in
-    // + chordal-closure-detection + attracting-multiplier-verification +
-    // chordal dedup machinery find_attractors already uses everywhere
-    // else in this codebase -- nothing bespoke here). The result's own
-    // .size() is the distinct-attracting-cycle count; `unresolved`, if
-    // given, is replaced with an Image the same size as the result
-    // holding how many of that pixel's critical orbits did NOT resolve to
-    // a confirmed attracting cycle within budget (find_attractors_from_
-    // seeds' own `unresolved_count` out-param) -- tracked SEPARATELY, so
-    // a caller can tell "0 attracting cycles, nothing else interesting
-    // either" apart from "0 attracting cycles because everything here is
-    // still unresolved" rather than the two being silently conflated into
-    // the same 0.
+    // complete_attractors_from_seeds against THAT seed list (the SAME
+    // burn-in + chordal-closure-detection + attracting-multiplier-
+    // verification + chordal dedup machinery find_attractors already uses
+    // everywhere else in this codebase, UNIONED with every algebraically-
+    // attracting fixed point RationalMap::fixed_points already knows
+    // exactly -- see complete_attractors' own doc comment for why plain
+    // find_attractors alone is not a completeness guarantee). The
+    // result's own .size() is the distinct-attracting-cycle count;
+    // `unresolved`, if given, is replaced with an Image the same size as
+    // the result holding how many of that pixel's critical orbits are
+    // explained by NO attractor in the complete set (complete_attractors_
+    // from_seeds' own `unresolved_count` out-param, ALREADY reconciled
+    // against the union -- an orbit that failed to close numerically but
+    // actually landed on an injected fixed point is not counted here) --
+    // tracked SEPARATELY from the count, so a caller can tell "0
+    // attracting cycles, nothing else interesting either" apart from "0
+    // attracting cycles because everything here is still unresolved"
+    // rather than the two being silently conflated into the same 0.
+    //
+    // `certain`, if given, is replaced with an Image the same size as the
+    // result holding how many of that pixel's cycles are CERTAIN --
+    // algebraically injected fixed points (complete_attractors_from_seeds'
+    // own `certain_count` out-param), not numerically-discovered closures
+    // still subject to find_attractors' own finite budget/tolerance. Lets
+    // a caller (the Python coloring layer -- see app/color.py's
+    // color_parameter_basin) weigh a certain attractor differently from
+    // ordinary unresolved noise, e.g. still showing a pixel's count color
+    // even when unresolved > count, PROVIDED at least one of that count is
+    // certain (a genuinely unrelated Siegel/Herman/parabolic residual
+    // elsewhere in the SAME pixel shouldn't retroactively make an exact,
+    // algebraically-known attractor look unconfirmed).
     //
     // KNOWN RESIDUAL, honestly: this counts ATTRACTING cycles specifically
     // (multiplier strictly < 1, find_attractors' own existing criterion).
@@ -373,10 +391,10 @@ public:
     // actually reached by the app itself, which always renders through
     // Map::custom -- see app/session.py's render_map) has no RationalMap
     // for find_attractors_from_seeds to call eval()/deriv() on; returns
-    // an all-zero degenerate image with `unresolved` all-zero too in that
-    // case, rather than guessing.
+    // an all-zero degenerate image with `unresolved`/`certain` all-zero
+    // too in that case, rather than guessing.
     Image render_parameter_basin(const std::atomic<bool>* cancel = nullptr,
-                                 Image* unresolved = nullptr) const;
+                                 Image* unresolved = nullptr, Image* certain = nullptr) const;
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.

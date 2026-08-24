@@ -314,7 +314,8 @@ def color_basin(labels: np.ndarray, iterations: np.ndarray | None = None,
     return rgb
 
 
-def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = None) -> np.ndarray:
+def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = None,
+                          certain: np.ndarray | None = None) -> np.ndarray:
     """Categorical coloring for Parameter_basin: hue = the COUNT itself
     (golden-angle spacing, the SAME _golden_hue/_hue_to_rgb_255 primitive
     color_basin already uses for basin ids -- N distinct, well-separated
@@ -331,12 +332,38 @@ def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = No
     A pixel is UNRESOLVED-DOMINANT -- flat PARAMETER_BASIN_UNRESOLVED_RGB,
     never a count color -- when count itself is 0 (nothing was ever
     confirmed, so there is no real category to show) OR when `unresolved`
-    (given) exceeds `counts` at that pixel (more of this parameter's
-    critical orbits failed to resolve than succeeded, so the confirmed
-    count is more noise than signal). A pixel with count >= 1 and SOME,
-    but not a majority, of its orbits unresolved still gets its real
-    count's color -- a confirmed attractor is shown as confirmed
-    regardless of what else, separately, didn't resolve.
+    (given) exceeds `counts` at that pixel AND none of that count is
+    CERTAIN (more of this parameter's critical orbits failed to resolve
+    than succeeded, so the confirmed count would ordinarily be more noise
+    than signal -- see the POLICY paragraph below for the one exception).
+    A pixel with count >= 1 and SOME, but not a majority, of its orbits
+    unresolved still gets its real count's color -- a confirmed attractor
+    is shown as confirmed regardless of what else, separately, didn't
+    resolve.
+
+    POLICY (cosmetic-batch follow-on: reconciling Parameter_basin's
+    unresolved count against injected fixed-point attractors). `unresolved`
+    is already RECONCILED against cdx.complete_attractors' own algebraic
+    union before it ever reaches here (see cdx.complete_attractors_from_
+    seeds' own doc comment): an orbit that failed to close numerically but
+    actually landed on an injected fixed point no longer counts as
+    unresolved at all. What can still make unresolved > counts AFTER that
+    reconciliation is a genuinely UNRELATED residual (Siegel/Herman/
+    parabolic, or a candidate that closed but wasn't actually attracting)
+    coexisting in the SAME pixel as a real, CONFIRMED attractor. `certain`,
+    if given, is how many of `counts` are CERTAIN -- algebraically injected
+    fixed points, exact by construction, not numerically-discovered
+    closures still subject to a finite search budget/tolerance (see
+    cdx.Renderer.render_parameter_basin's own doc comment). CHOSEN POLICY:
+    an exact, certain attractor should not be out-voted by unrelated
+    unresolved noise elsewhere in the same pixel -- a pixel with count >= 1
+    and at least one CERTAIN entry always shows its count color, even when
+    unresolved > counts overall. A pixel with unresolved orbits but NO
+    certain attractor (the ordinary case: everything found came from
+    numerical discovery, not algebraic injection) keeps the original,
+    stricter "more noise than signal" rule unchanged. count == 0 is always
+    flat-unresolved regardless of `certain` (certain can never exceed
+    counts, so this case never actually has a certain entry to weigh).
 
     Shading WITHIN a count region by slowest convergence rate (finer
     structure inside one color band) is an intentionally deferred,
@@ -347,8 +374,10 @@ def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = No
     """
     counts = np.asarray(counts)
     unresolved_arr = np.zeros_like(counts) if unresolved is None else np.asarray(unresolved)
+    certain_arr = np.zeros_like(counts) if certain is None else np.asarray(certain)
 
-    dominant_unresolved = (counts == 0) | (unresolved_arr > counts)
+    noisy = (unresolved_arr > counts) & (certain_arr == 0)   # see POLICY above
+    dominant_unresolved = (counts == 0) | noisy
     resolved = ~dominant_unresolved
 
     base = np.zeros(counts.shape + (3,), dtype=float)

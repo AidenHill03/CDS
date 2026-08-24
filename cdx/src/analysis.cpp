@@ -241,9 +241,11 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                               const RationalMap& map, Cplx a,
                                               const FindAttractorsOptions& opts,
-                                              int* unresolved_count) {
+                                              int* unresolved_count,
+                                              std::vector<Cplx>* unresolved_endpoints) {
     std::vector<Cycle> cycles;
     if (unresolved_count) *unresolved_count = 0;
+    if (unresolved_endpoints) unresolved_endpoints->clear();
 
     for (Cplx seed : seeds) {
         // A seed at infinity can't be evaluated through eval() directly (that
@@ -450,6 +452,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                 }
                 if (!infinity_attracting) {
                     if (unresolved_count) ++*unresolved_count;   // spurious excursion, not a real attractor
+                    if (unresolved_endpoints) unresolved_endpoints->push_back(orbit.back());
                     continue;
                 }
             }
@@ -473,6 +476,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                 continue;
             }
             if (unresolved_count) ++*unresolved_count;   // no cycle detected, or punted
+            if (unresolved_endpoints) unresolved_endpoints->push_back(orbit.back());
             continue;
         }
 
@@ -487,6 +491,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                 for (Cplx zc : cyc) multiplier *= map.deriv(zc, a);
                 if (!(std::abs(multiplier) < 1.0)) {
                     if (unresolved_count) ++*unresolved_count;   // not attracting after all
+                    if (unresolved_endpoints) unresolved_endpoints->push_back(cyc.back());
                     continue;
                 }
             }
@@ -525,12 +530,15 @@ bool already_represented(const std::vector<Cycle>& cycles, Cplx point, double to
 // complete_attractors and complete_attractors_from_seeds call after
 // getting their own critical-seeded `cycles` however they got it (fresh
 // discovery vs a caller-supplied seed list makes no difference here; this
-// step never touches seeds, only the RESULT).
-void union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const RationalMap& map, Cplx a,
-                                      double dedupe_tol) {
+// step never touches seeds, only the RESULT). Returns how many were
+// actually appended (excludes ones already_represented rejected) -- what
+// complete_attractors_from_seeds' own `certain_count` reports.
+int union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const RationalMap& map, Cplx a,
+                                     double dedupe_tol) {
     int next_id = 1;
     for (const auto& c : cycles) next_id = std::max(next_id, c.id + 1);
 
+    int n_added = 0;
     for (const FixedPoint& fp : map.fixed_points(a)) {
         if (!(std::abs(fp.multiplier) < 1.0)) continue;   // not attracting
         if (already_represented(cycles, fp.point, dedupe_tol)) continue;
@@ -538,7 +546,29 @@ void union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const Rational
         c.points = {fp.point};
         c.id = next_id++;
         cycles.push_back(std::move(c));
+        ++n_added;
     }
+    return n_added;
+}
+
+// TRUE if `endpoint` is (chordally) one of the points of ANY cycle in
+// `cycles` -- critical-seeded or injected alike, unlike already_represented
+// above (which only ever checks period-1 cycles, for injection's own
+// narrower "is THIS fixed point already here" question). Used by
+// complete_attractors_from_seeds to sweep unresolved endpoints: an orbit
+// that failed to close numerically but actually landed on/near a point the
+// COMPLETE set already contains -- whatever that cycle's period -- found
+// exactly where it was going, so it is not a genuine residual miss.
+bool endpoint_matches_attractor(const std::vector<Cycle>& cycles, Cplx endpoint, double tol) {
+    const bool endpoint_inf = !is_finite_cplx(endpoint);
+    for (const auto& c : cycles) {
+        for (Cplx p : c.points) {
+            const bool p_inf = !is_finite_cplx(p);
+            if (endpoint_inf != p_inf) continue;
+            if (endpoint_inf || chordal(endpoint, p) < tol) return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -546,9 +576,29 @@ void union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const Rational
 std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                                   const RationalMap& map, Cplx a,
                                                   const FindAttractorsOptions& opts,
-                                                  int* unresolved_count) {
-    std::vector<Cycle> cycles = find_attractors_from_seeds(seeds, map, a, opts, unresolved_count);
-    union_in_attracting_fixed_points(cycles, map, a, opts.tol * 1e3);
+                                                  int* unresolved_count,
+                                                  int* certain_count) {
+    std::vector<Cplx> unresolved_endpoints;
+    std::vector<Cycle> cycles = find_attractors_from_seeds(
+        seeds, map, a, opts, unresolved_count,
+        unresolved_count ? &unresolved_endpoints : nullptr);
+
+    const double dedupe_tol = opts.tol * 1e3;
+    const int n_injected = union_in_attracting_fixed_points(cycles, map, a, dedupe_tol);
+    if (certain_count) *certain_count = n_injected;
+
+    // Reconcile: an "unresolved" orbit whose own last live point actually
+    // sits on an attractor the COMPLETE set now contains (critical-seeded
+    // or just-injected) was never a genuine miss -- it found where it was
+    // going, just not via a numerically clean closure. See this function's
+    // own doc comment for why unresolved_count must mean this, not just
+    // the critical-seeded pass's raw tally.
+    if (unresolved_count) {
+        for (Cplx endpoint : unresolved_endpoints) {
+            if (endpoint_matches_attractor(cycles, endpoint, dedupe_tol)) --*unresolved_count;
+        }
+    }
+
     return cycles;
 }
 

@@ -1711,6 +1711,127 @@ int main() {
               "union changes nothing when there is nothing to add");
     }
 
+    // =============================================================================
+    // Parameter_basin unresolved-count reconciliation (cosmetic-batch follow-on:
+    // "reconcile the Parameter_basin unresolved count with the injected
+    // attractors, so color_parameter_basin stops painting confirmed-attractor
+    // regions as unresolved"). unresolved_count must mean "critical orbits
+    // explained by NO attractor in the COMPLETE set", not just the critical-
+    // seeded pass's own raw tally -- see complete_attractors_from_seeds' own
+    // doc comment.
+    // =============================================================================
+    std::printf("\n\n=== Parameter_basin unresolved-count reconciliation ===\n");
+
+    // ---- reconciliation: an unresolved orbit heading toward an injected fixed point ---
+    std::printf("\nreconciliation: an unresolved critical orbit heading toward an injected "
+               "fixed point is re-attributed as resolved:\n");
+    {
+        RationalMap quad("quad_recon");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+        const Cplx a{-0.5, 0.0};
+
+        // Artificially tiny closure budget (max_period=0, weak-confirm off) --
+        // NOT find_attractors' own default settings -- forces the strict pass
+        // to genuinely fail to detect closure even though burn_in=45 is more
+        // than enough for this orbit to have numerically converged extremely
+        // close to the true fixed point (|mult|=0.732, so ~0.732^45 residual)
+        // by the time it gives up. This isolates the RECONCILIATION mechanism
+        // itself, independent of confirm_weakly_attracting's own (separate,
+        // already-tested) extended search.
+        FindAttractorsOptions opts;
+        opts.burn_in = 45;
+        opts.max_period = 0;
+        opts.confirm_weakly_attracting = false;
+
+        int unresolved_before = -1;
+        const auto before = find_attractors_from_seeds({Cplx(0.0, 0.0)}, quad, a, opts,
+                                                        &unresolved_before);
+        check(before.empty() && unresolved_before == 1,
+              "sanity: with this artificially tiny budget, find_attractors_from_seeds alone "
+              "genuinely fails to close -- 0 cycles, 1 unresolved seed");
+
+        int unresolved_after = -1, certain_after = -1;
+        const auto after = complete_attractors_from_seeds({Cplx(0.0, 0.0)}, quad, a, opts,
+                                                           &unresolved_after, &certain_after);
+        check(after.size() == 2, "AFTER: the union still injects both algebraically-"
+              "attracting fixed points (z=-0.366... and infinity) regardless of the tiny "
+              "budget");
+        check(certain_after == 2, "...both are CERTAIN (injected, not numerically discovered)");
+        check(unresolved_after == 0,
+              "FIX: unresolved_count drops from 1 to 0 -- the seed's own orbit was actually "
+              "heading toward the injected fixed point (its final live point sits within "
+              "the reconciliation tolerance of it), so it is re-attributed as resolved, not "
+              "left as a phantom residual");
+        check(unresolved_before - unresolved_after == 1,
+              "the drop is exactly the one re-attributed orbit, not more (nothing else to "
+              "reconcile here)");
+
+        // NO REGRESSION: reconciliation touches unresolved_count ONLY -- the
+        // returned cycle set itself is byte-for-byte the same whether or not
+        // a caller even asks for unresolved_count at all.
+        const auto no_unresolved_tracking =
+            complete_attractors_from_seeds({Cplx(0.0, 0.0)}, quad, a, opts);
+        check(no_unresolved_tracking.size() == after.size(),
+              "NO REGRESSION: the cycle count is identical whether or not unresolved_count "
+              "is tracked -- reconciliation only moves the resolved/unresolved boundary, it "
+              "never adds or removes an attractor");
+    }
+
+    // ---- genuine unresolved: a parabolic fixed point is NEVER reconciled away ---------
+    std::printf("\ngenuine unresolved: a parabolic (non-attracting) fixed point stays "
+               "unresolved, not swept away by the reconciliation:\n");
+    {
+        RationalMap quad("quad_parabolic");
+        quad.add_poly({1.0, 0.0}, 2, 0, "z^2");
+        quad.add_poly({1.0, 0.0}, 0, 1, "a");
+        const Cplx a{0.25, 0.0};   // cusp of the main cardioid: z=0.5, multiplier EXACTLY 1
+
+        const auto fps = quad.fixed_points(a);
+        const FixedPoint* parabolic_fp = nullptr;
+        for (const auto& fp : fps) {
+            if (close(fp.point, Cplx{0.5, 0.0}, 1e-6)) { parabolic_fp = &fp; break; }
+        }
+        check(parabolic_fp != nullptr && std::abs(parabolic_fp->multiplier - 1.0) < 1e-6,
+              "sanity: z=0.5 is fixed with multiplier 1 (parabolic, to numerical-root-find "
+              "precision) -- genuinely NOT "
+              "attracting (|mult| < 1 fails), so the union must never inject it");
+
+        // find_attractors' own DEFAULT budget -- no artificial restriction
+        // needed here; a parabolic orbit's algebraic (not geometric)
+        // convergence rate genuinely never closes within it.
+        const FindAttractorsOptions opts;
+        int unresolved_before = -1;
+        const auto before = find_attractors_from_seeds({Cplx(0.0, 0.0)}, quad, a, opts,
+                                                        &unresolved_before);
+        check(unresolved_before == 1,
+              "sanity: the critical orbit toward the parabolic point genuinely does not "
+              "close within find_attractors' own default budget");
+
+        int unresolved_after = -1, certain_after = -1;
+        const auto after = complete_attractors_from_seeds({Cplx(0.0, 0.0)}, quad, a, opts,
+                                                           &unresolved_after, &certain_after);
+        check(after.size() == 1 && certain_after == 1,
+              "infinity IS injected here too (trivially superattracting for this bare "
+              "polynomial) -- but that attractor is unrelated to the still-unresolved "
+              "parabolic orbit");
+        bool parabolic_injected = false;
+        for (const auto& c : after) {
+            if (c.points.size() == 1 && close(c.points[0], Cplx{0.5, 0.0}, 1e-4)) {
+                parabolic_injected = true;
+            }
+        }
+        check(!parabolic_injected,
+              "the parabolic fixed point is NEVER injected -- union_in_attracting_fixed_"
+              "points' own |multiplier| < 1.0 gate correctly excludes it");
+        check(unresolved_after == unresolved_before,
+              "GENUINE UNRESOLVED, unaffected: unresolved_count is UNCHANGED by the "
+              "reconciliation -- this orbit's endpoint matches no complete attractor (the "
+              "parabolic point was never injected, and the orbit wasn't heading toward "
+              "infinity either), so it correctly remains a residual, not silently swept "
+              "away");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

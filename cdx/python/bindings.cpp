@@ -551,29 +551,38 @@ PYBIND11_MODULE(cdx, m) {
         .def("render_parameter_basin",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 Image unresolved;
-                 py::array_t<double> counts_arr, unresolved_arr;
+                 Image unresolved, certain;
+                 py::array_t<double> counts_arr, unresolved_arr, certain_arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter_basin(cp, &unresolved);
+                     Image img = r.render_parameter_basin(cp, &unresolved, &certain);
                      py::gil_scoped_acquire acquire;
                      counts_arr = image_to_numpy(std::move(img));
                      unresolved_arr = image_to_numpy(std::move(unresolved));
+                     certain_arr = image_to_numpy(std::move(certain));
                  }
-                 return py::make_tuple(counts_arr, unresolved_arr);
+                 return py::make_tuple(counts_arr, unresolved_arr, certain_arr);
              },
              py::arg("cancel") = nullptr,
              "Parameter_basin: each pixel is a parameter value; returns (counts, "
-             "unresolved). counts is the NUMBER OF DISTINCT ATTRACTING CYCLES the "
-             "map has at that parameter (infinity counts as one when it's the "
-             "limit of a critical orbit); unresolved is how many of that pixel's "
-             "critical orbits did NOT resolve to a confirmed attracting cycle "
-             "within budget (Siegel/Herman/parabolic land here, tracked "
-             "separately -- never silently folded into counts). Escape-radius-"
-             "free. Requires a Custom-wrapped map (see Renderer::render_"
-             "parameter_basin's own doc comment) -- degrades to an honest "
-             "all-zero (counts, unresolved) pair otherwise, rather than "
-             "guessing.")
+             "unresolved, certain). counts is the NUMBER OF DISTINCT ATTRACTING "
+             "CYCLES the map has at that parameter (infinity counts as one when "
+             "it's the limit of a critical orbit, or an algebraically-injected "
+             "fixed point -- see cdx.complete_attractors); unresolved is how many "
+             "of that pixel's critical orbits are explained by NO attractor in "
+             "the complete set (Siegel/Herman/parabolic land here, tracked "
+             "separately -- never silently folded into counts, and already "
+             "reconciled against injected fixed points: an orbit that failed to "
+             "close numerically but actually landed on one is not counted here); "
+             "certain is how many of that pixel's counted cycles are CERTAIN -- "
+             "algebraically injected fixed points, not numerically-discovered "
+             "closures still subject to a finite search budget/tolerance (see "
+             "app.color.color_parameter_basin's own use of this for its display "
+             "policy: a certain attractor is shown as confirmed even when "
+             "unresolved > count overall). Escape-radius-free. Requires a "
+             "Custom-wrapped map (see Renderer::render_parameter_basin's own doc "
+             "comment) -- degrades to an honest all-zero (counts, unresolved, "
+             "certain) triple otherwise, rather than guessing.")
 
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,

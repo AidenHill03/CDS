@@ -236,6 +236,42 @@ def main() -> None:
     check(np.all(all_unresolved_pb == 0), "an all-zero count array is entirely the flat "
           "unresolved color, no crash")
 
+    # ---- `certain` POLICY (cosmetic-batch follow-on: reconciling Parameter_basin's -----
+    # unresolved count against injected fixed-point attractors): a CERTAIN
+    # (algebraically injected) attractor is shown as confirmed even when
+    # unresolved > count overall, since a genuinely unrelated residual
+    # elsewhere in the same pixel shouldn't retroactively make an exact
+    # attractor look unconfirmed.
+    print("\ncolor_parameter_basin: `certain` policy:")
+    certain_overrides = color_parameter_basin(np.array([2, 2]), np.array([1, 3]),
+                                               np.array([0, 1]))
+    check(tuple(certain_overrides[0]) != PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count=2, unresolved=1 (minority), certain=0: unaffected, still shows the "
+          "count color -- same as the plain `dominant` case above")
+    check(tuple(certain_overrides[1]) != PARAMETER_BASIN_UNRESOLVED_RGB,
+          "POLICY: count=2, unresolved=3 (unresolved EXCEEDS count) BUT certain=1 -- "
+          "the count color is shown anyway, not suppressed, because at least one of "
+          "that count is a certain, algebraically injected attractor")
+    check(tuple(certain_overrides[1]) == tuple(dominant[0]),
+          "the certain-overridden pixel gets EXACTLY count=2's own color -- the same "
+          "hue any other count=2 pixel gets, not a special/different one")
+
+    no_certain_still_gates = color_parameter_basin(np.array([2]), np.array([3]), np.array([0]))
+    check(tuple(no_certain_still_gates[0]) == PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count=2, unresolved=3, certain=0 (the ORDINARY case -- nothing was "
+          "algebraically injected here) keeps the original, stricter rule: still "
+          "flat-unresolved, the policy does not apply without a certain attractor")
+
+    zero_count_stays_flat = color_parameter_basin(np.array([0]), np.array([5]), np.array([0]))
+    check(tuple(zero_count_stays_flat[0]) == PARAMETER_BASIN_UNRESOLVED_RGB,
+          "count=0 stays flat-unresolved regardless of `certain` -- there is no real "
+          "category to show no matter what else is passed")
+
+    certain_omitted = color_parameter_basin(np.array([2, 2]), np.array([1, 3]))
+    check(tuple(certain_omitted[1]) == PARAMETER_BASIN_UNRESOLVED_RGB,
+          "omitting `certain` entirely behaves the same as passing an all-zero array -- "
+          "the ORIGINAL stricter gate, unchanged for any caller not yet passing it")
+
     # Rational Julia (Stage 2) has NO bespoke colorer at this layer any more
     # -- it colors through color_escape_time directly (see app/sandbox.py's
     # array_to_qimage, "GOVERNING PRINCIPLE"), so there is nothing new to

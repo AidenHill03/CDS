@@ -750,10 +750,12 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
 // where those other two consumers' union recovers an extra, algebraically-
 // attracting fixed point.
 // -----------------------------------------------------------------------------
-Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved) const {
+Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved,
+                                       Image* certain) const {
     const int res = view_.resolution;
     Image img(res, res);
     if (unresolved) *unresolved = Image(res, res);
+    if (certain) *certain = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     if (!custom) return img;   // see header doc comment -- no RationalMap to discover cycles against
@@ -789,11 +791,13 @@ Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* u
                 cp_fixed ? fixed_crit_pts : custom->distinct_critical_points(p);
 
             int unresolved_n = 0;
-            const std::vector<Cycle> cycles =
-                complete_attractors_from_seeds(crit_pts, *custom, p, opts, &unresolved_n);
+            int certain_n = 0;
+            const std::vector<Cycle> cycles = complete_attractors_from_seeds(
+                crit_pts, *custom, p, opts, &unresolved_n, &certain_n);
 
             img.at(col, row) = static_cast<double>(cycles.size());
             if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);
+            if (certain) certain->at(col, row) = static_cast<double>(certain_n);
         }
     }, cancel);
     return img;

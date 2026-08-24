@@ -78,9 +78,10 @@ def main() -> None:
           "parameter_greens render also matches viewport resolution")
 
     pbasin_array = s.render(vp, "parameter_basin")
-    check(pbasin_array.shape == (2, 41, 41),
-          "parameter_basin render is ALWAYS STACKED: (2, height, width) -- counts, "
-          "then unresolved -- there is no certified-polynomial plain-2D fast path here")
+    check(pbasin_array.shape == (3, 41, 41),
+          "parameter_basin render is ALWAYS STACKED: (3, height, width) -- counts, "
+          "unresolved, then certain -- there is no certified-polynomial plain-2D fast "
+          "path here")
 
     # ---- Stage 2: rational Julia is STACKED, escape_radius-invariant ------------
     print("\nrender mode dispatch: rational Julia (Stage 2 sphere-aware classification):")
@@ -140,20 +141,25 @@ def main() -> None:
     s_pb.render_settings = cdx.RenderSettings(100, 2.0, 1e-6, 1)
 
     tiny_vp_inside = cdx.Viewport(complex(0, 0), 0.001, 3)
-    counts_inside, unresolved_inside = s_pb.render(tiny_vp_inside, "parameter_basin")
+    counts_inside, unresolved_inside, certain_inside = s_pb.render(tiny_vp_inside, "parameter_basin")
     check(counts_inside[1, 1] == 2.0 and unresolved_inside[1, 1] == 0.0,
           "c=0: count=2 (origin's own fixed point + infinity), unresolved=0")
+    check(certain_inside[1, 1] == 0.0,
+          "c=0: neither attractor is CERTAIN (algebraically injected) here -- both z=0 "
+          "and infinity are themselves critical points, found directly by the ordinary "
+          "critical-seeded search, never needing the fixed-point union at all")
 
     tiny_vp_far = cdx.Viewport(complex(5, 5), 0.001, 3)
-    counts_far, unresolved_far = s_pb.render(tiny_vp_far, "parameter_basin")
+    counts_far, unresolved_far, certain_far = s_pb.render(tiny_vp_far, "parameter_basin")
     check(counts_far[1, 1] == 1.0 and unresolved_far[1, 1] == 0.0,
           "c=5+5i: count=1 (both seeds dedupe onto infinity), unresolved=0")
+    check(certain_far[1, 1] == 0.0, "c=5+5i: still not certain -- also found by critical seeding")
 
     # A real render spanning the cusp shows count genuinely CHANGING across
     # the plane -- this is what makes color_parameter_basin's sharp
     # color edges meaningful at all, not a uniform/degenerate image.
     wide_vp = cdx.Viewport(complex(-0.5, 0), 1.5, 61)
-    counts_wide, _unresolved_wide = s_pb.render(wide_vp, "parameter_basin")
+    counts_wide, _unresolved_wide, _certain_wide = s_pb.render(wide_vp, "parameter_basin")
     unique_counts = set(counts_wide.flatten().tolist())
     check(len(unique_counts & {1.0, 2.0}) == 2,
           "a real render shows BOTH count=1 and count=2 pixels -- a genuine "

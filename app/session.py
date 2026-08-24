@@ -211,21 +211,32 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         attractor-crossing iteration, so unlike the old accumulate/
         degree^max_iter form there is no overflow case and nothing to
         warn about.
-      - "parameter_basin" always returns a STACKED 3D array, shape (2,
+      - "parameter_basin" always returns a STACKED 3D array, shape (3,
         height, width): index 0 is the NUMBER OF DISTINCT ATTRACTING
         CYCLES at that parameter (infinity counts as one when a critical
         orbit's limit, and so does any algebraically-attracting fixed
         point complete_attractors' own union recovers -- see its doc
         comment -- even one no critical orbit happened to settle on),
-        index 1 is how many of that pixel's critical orbits did NOT
-        resolve within budget (Siegel/Herman/parabolic -- tracked
-        separately, never folded into index 0, and never corrected by the
-        union either: a seed that failed numerically is still an honest
-        miss to report). Escape-radius-free. See cdx.Renderer.render_
-        parameter_basin's own doc comment for the method (critical-orbit
-        convergence + chordal clustering, reusing complete_attractors_
-        from_seeds -- no per-pixel find_attractors/complete_attractors
-        that would redundantly re-root-find the same critical points).
+        index 1 is how many of that pixel's critical orbits are explained
+        by NO attractor in the COMPLETE set (Siegel/Herman/parabolic --
+        tracked separately, never folded into index 0, and RECONCILED
+        against the union: an orbit that failed to close numerically but
+        actually landed on an injected fixed point is not counted here --
+        see cdx.complete_attractors_from_seeds' own doc comment for why
+        this reconciliation is what makes index 1 honest rather than the
+        critical-seeded pass's raw, pre-union tally), index 2 is how many
+        of index 0's cycles are CERTAIN -- algebraically injected fixed
+        points, not numerically-discovered closures still subject to a
+        finite search budget/tolerance (app.color.color_parameter_basin's
+        own coloring policy reads this: a certain attractor is shown as
+        confirmed even when index 1 > index 0 overall, since a genuinely
+        unrelated residual elsewhere in the same pixel shouldn't make an
+        exact, algebraically-known attractor look unconfirmed). Escape-
+        radius-free. See cdx.Renderer.render_parameter_basin's own doc
+        comment for the method (critical-orbit convergence + chordal
+        clustering, reusing complete_attractors_from_seeds -- no per-pixel
+        find_attractors/complete_attractors that would redundantly
+        re-root-find the same critical points).
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -302,10 +313,10 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         # parameter, then complete_attractors_from_seeds) -- unlike
         # "basin" above, there is no single fixed `a` to discover
         # attractors for ONCE up front, since every pixel IS a different
-        # `a`. Always stacked: (counts, unresolved) -- see cdx.Renderer.
-        # render_parameter_basin's own doc comment.
-        counts, unresolved = renderer.render_parameter_basin(cancel)
-        array = np.stack([counts, unresolved])
+        # `a`. Always stacked: (counts, unresolved, certain) -- see
+        # cdx.Renderer.render_parameter_basin's own doc comment.
+        counts, unresolved, certain = renderer.render_parameter_basin(cancel)
+        array = np.stack([counts, unresolved, certain])
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 
