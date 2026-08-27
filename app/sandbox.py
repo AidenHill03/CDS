@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
 import cdx
 from app.about_dialog import AboutDialog
 from app.color import (color_basin, color_escape_time, color_parameter_basin,
-                        color_scalar_field)
+                        color_parameter_period, color_scalar_field)
 from app.complex_field import ComplexField
 from app.equation_panel import EquationPanel
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
@@ -804,6 +804,11 @@ def array_to_qimage(payload, mode: str, settings: Settings,
     (counts, unresolved, certain), never a plain 2D array (there is no
     certified-polynomial fast path here that would make it one).
 
+    "parameter_period" is the SAME kind of exception, for the SAME reason:
+    its payload is a PERIOD (also a category, not a gradient -- see
+    color_parameter_period's own docstring), so it gets its own colorer
+    too. ALWAYS stacked (periods, undetermined, is_infinity).
+
     Coloring is a pure DISPLAY-time transform, deliberately not baked into
     what RenderCache stores (raw float arrays) -- changing the palette must
     never be a cache key or trigger a re-render, only a re-paint.
@@ -836,6 +841,16 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         unresolved = np.flipud(payload[1])
         certain = np.flipud(payload[2])
         rgb = color_parameter_basin(counts, unresolved, certain)
+        return _rgb_to_qimage(rgb)
+    if mode == "parameter_period":
+        # Always stacked (periods, undetermined, is_infinity) -- see
+        # render_map's own docstring; categorical coloring
+        # (color_parameter_period), the period-coloring counterpart of
+        # "parameter_basin" just above.
+        periods = np.flipud(payload[0])
+        undetermined = np.flipud(payload[1])
+        is_infinity = np.flipud(payload[2])
+        rgb = color_parameter_period(periods, undetermined, is_infinity)
         return _rgb_to_qimage(rgb)
     # A RATIONAL "julia" payload is stacked (values, labels) -- color ONLY
     # the values layer, through the exact SAME color_escape_time call a
@@ -1252,12 +1267,12 @@ class ImageView(QWidget):
 
         mode = self._buffer_mode
         payload = self._buffer_payload
-        # "basin" and "parameter_basin" are ALWAYS stacked; "julia" and
-        # "greens"/"parameter_greens" are stacked only for a RATIONAL map's
-        # render (Stage 2/Stage 3 -- see render_map/array_to_qimage's own
-        # docstrings, distinguished the SAME way there: ndim, not a second
-        # flag threaded through).
-        stacked = (mode in ("basin", "parameter_basin") or
+        # "basin", "parameter_basin", and "parameter_period" are ALWAYS
+        # stacked; "julia" and "greens"/"parameter_greens" are stacked only
+        # for a RATIONAL map's render (Stage 2/Stage 3 -- see render_map/
+        # array_to_qimage's own docstrings, distinguished the SAME way
+        # there: ndim, not a second flag threaded through).
+        stacked = (mode in ("basin", "parameter_basin", "parameter_period") or
                   (mode in ("julia", "greens", "parameter_greens") and payload.ndim == 3))
         if stacked:
             height, width = payload[0].shape
@@ -1293,6 +1308,15 @@ class ImageView(QWidget):
             unresolved = payload[1][raw_row, col]
             base = f"{int(count)} attracting cycle{'s' if count != 1 else ''}"
             return base if unresolved == 0.0 else f"{base}, {int(unresolved)} unresolved"
+        if mode == "parameter_period":
+            period = payload[0][raw_row, col]
+            undetermined = payload[1][raw_row, col]
+            is_infinity = payload[2][raw_row, col]
+            if undetermined != 0.0:
+                return "undetermined"
+            if is_infinity != 0.0:
+                return "converges to infinity"
+            return f"period = {int(period)}"
         return None
 
     def _buffer_source_rect(self) -> QRectF | None:

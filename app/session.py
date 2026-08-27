@@ -29,7 +29,8 @@ from app.render_cache import RenderCache, make_key
 from app.settings import Settings
 from app.version import VERSION
 
-RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens", "parameter_basin")
+RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens", "parameter_basin",
+                "parameter_period")
 
 # Which modes render the PARAMETER plane (pixel = a value of the map's
 # own free parameter `a`, orbit seeded at that parameter's critical
@@ -39,11 +40,14 @@ RENDER_MODES = ("julia", "parameter", "basin", "greens", "parameter_greens", "pa
 # critical-point overlay and cursor readout are dynamical-plane-only
 # concepts (see P5c's own spec: critical points belong to the dynamical
 # plane, not the parameter plane). "parameter_basin" (number of
-# attracting cycles per parameter) participates in this SAME set, and so
-# gets the marker/arrow-nudging/click-sets-`a` machinery every other
-# parameter-plane mode already has "for free" -- see app/sandbox.py's own
-# gates, all keyed off membership here rather than a per-mode name list.
-PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens", "parameter_basin"})
+# attracting cycles per parameter) and "parameter_period" (period of the
+# attracting cycle a tracked critical orbit converges to) both participate
+# in this SAME set, and so get the marker/arrow-nudging/click-sets-`a`
+# machinery every other parameter-plane mode already has "for free" -- see
+# app/sandbox.py's own gates, all keyed off membership here rather than a
+# per-mode name list.
+PARAMETER_PLANE_MODES = frozenset({"parameter", "parameter_greens", "parameter_basin",
+                                   "parameter_period"})
 
 # The six built-in families are read-only: save_to_library/rename_in_library/
 # delete_from_library/set_library_notes below all refuse to touch a name in
@@ -237,6 +241,27 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         clustering, reusing complete_attractors_from_seeds -- no per-pixel
         find_attractors/complete_attractors that would redundantly
         re-root-find the same critical points).
+      - "parameter_period" always returns a STACKED 3D array, shape (3,
+        height, width): index 0 is the PERIOD (measured in the raw
+        z-plane, never a symmetry quotient -- see cdx.per_seed_outcomes'
+        own doc comment) of the attracting cycle a TRACKED critical orbit
+        converges to at that parameter; index 1 is 1.0 where no tracked
+        seed resolved within budget (a genuine residual -- Siegel/Herman/
+        parabolic -- never a fabricated period, 0.0 elsewhere); index 2 is
+        1.0 where the resolved cycle is the point at infinity (kept OUT of
+        index 0's own value and its golden-hue color family -- see
+        app.color.color_parameter_period), 0.0 elsewhere. At most one of
+        indices 1/2 is ever 1.0 for the same pixel. `n`, the family's own
+        structural parameter (the power in relaxed-Newton-of-z^n-1), is
+        NOT a caller-supplied argument here -- it is recovered as
+        round(rational_map.degree(param)), which equals n exactly for
+        this family (see cdx.CriticalPointFamily.RelaxedNewtonPower's own
+        doc comment) regardless of what `param`/`a` happens to be bound
+        to. CURRENTLY SUPPORTS EXACTLY ONE seed family (relaxed Newton of
+        z^n-1) -- calling this mode on an unrelated map produces seeds
+        that do not correspond to its actual critical points, and the
+        result, while not a crash, is not meaningful (see cdx.Renderer.
+        render_parameter_period's own doc comment). Escape-radius-free.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -317,6 +342,21 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         # cdx.Renderer.render_parameter_basin's own doc comment.
         counts, unresolved, certain = renderer.render_parameter_basin(cancel)
         array = np.stack([counts, unresolved, certain])
+    elif mode == "parameter_period":
+        # `n` is a FAMILY-structural choice (the power in relaxed-Newton-
+        # of-z^n-1), not the map's own single active dynamical parameter
+        # -- recovered from the map's own degree rather than threaded
+        # through as a separate piece of session state, since for this
+        # family map.degree(a) equals n exactly (numerator degree n,
+        # denominator degree n-1, after clearing denominators -- see
+        # cdx.CriticalPointFamily.RelaxedNewtonPower's own doc comment)
+        # for any `a` short of the single degenerate a=n point. Only ONE
+        # seed_family exists today; see this function's own docstring for
+        # why this mode is currently scoped to that one family's shape.
+        n = int(round(rational_map.degree(param)))
+        periods, undetermined, is_infinity = renderer.render_parameter_period(
+            cdx.CriticalPointFamily.RelaxedNewtonPower, n, cancel)
+        array = np.stack([periods, undetermined, is_infinity])
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 

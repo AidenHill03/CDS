@@ -1832,6 +1832,140 @@ int main() {
               "away");
     }
 
+    // =============================================================================
+    // Period coloring: per_seed_outcomes and Renderer::render_parameter_period
+    // (side-by-side comparison with Parameter_basin's count coloring, matching
+    // the Lindsey-Koch-Sharland bicritical-maps literature's own convention).
+    // Family under test: relaxed Newton of p(z) = z^n - 1, N_a(z) = z -
+    // a(z^n-1)/(n z^{n-1}) = ((n-a)z^n + a) / (n z^{n-1}), n = 6.
+    // =============================================================================
+    std::printf("\n\n=== period coloring (per_seed_outcomes, render_parameter_period) ===\n");
+
+    auto relaxed_newton_power = [](int n) {
+        std::string src = "((" + std::to_string(n) + "-a)*z^" + std::to_string(n) + " + a) / (" +
+                          std::to_string(n) + "*z^" + std::to_string(n - 1) + ")";
+        return RationalMap::from_expression(src, "a", {}, "relaxed_newton");
+    };
+    auto free_critical_points = [](int n, Cplx a) {
+        // z_c(a) = (a(n-1)/(n-a))^(1/n) * omega^j, j=0..n-1 -- see
+        // CriticalPointFamily::RelaxedNewtonPower's own C++ doc comment.
+        const Cplx omega(std::cos(2 * M_PI / n), std::sin(2 * M_PI / n));
+        const Cplx ratio = a * static_cast<double>(n - 1) / (static_cast<double>(n) - a);
+        const Cplx base = std::pow(ratio, 1.0 / static_cast<double>(n));
+        std::vector<Cplx> seeds;
+        seeds.reserve(static_cast<std::size_t>(n));
+        Cplx w(1.0, 0.0);
+        for (int j = 0; j < n; ++j) { seeds.push_back(base * w); w *= omega; }
+        return seeds;
+    };
+    auto gcd_fn = [](long x, long y) { while (y) { long t = y; y = x % y; x = t; } return x; };
+
+    const int n = 6;
+    RationalMap nova_n = relaxed_newton_power(n);
+
+    // ---- per_seed_outcomes: a seed's own outcome, not the union's --------------------
+    std::printf("\nper_seed_outcomes: reports what THIS seed converged to, not the "
+               "deduplicated attractor set:\n");
+    {
+        const Cplx a{1.3, 0.2};   // inside |a-1|<1
+        const auto z0_outcome = per_seed_outcomes({Cplx(0.0, 0.0)}, nova_n, a, {});
+        check(z0_outcome.size() == 1 && !z0_outcome[0].resolved,
+              "z=0 seeded ALONE at a=1.3+0.2i is genuinely undetermined -- it does NOT "
+              "inherit the 6 roots-of-unity fixed points the way complete_attractors_"
+              "from_seeds' own algebraic union would (measured directly: seeding that "
+              "function with z=0 alone still returns all 6, via the union, none of them "
+              "what z=0's own orbit actually did)");
+
+        const auto free_outcomes = per_seed_outcomes(free_critical_points(n, a), nova_n, a, {});
+        check(free_outcomes.size() == 6 &&
+              std::all_of(free_outcomes.begin(), free_outcomes.end(),
+                         [](const SeedOutcome& o) { return o.resolved && o.period == 1 &&
+                                                            !o.is_infinity; }),
+              "all 6 free critical points independently resolve to period 1 inside "
+              "|a-1|<1 -- each seed's OWN outcome, not a shared/injected one");
+    }
+
+    // ---- VALIDATION A: disc |a-1| < 1 is uniformly period 1 --------------------------
+    std::printf("\nVALIDATION A: |a-1| < 1 is uniformly period 1:\n");
+    {
+        Viewport v{{1.0, 0.0}, 0.6, 15};
+        Renderer r(Map::custom(nova_n, Cplx(0, 0)), v, RenderSettings{200, 2.0, 1e-6, 1});
+        Image undetermined, is_inf;
+        Image periods = r.render_parameter_period(CriticalPointFamily::RelaxedNewtonPower, n,
+                                                   nullptr, &undetermined, &is_inf);
+        int n_checked = 0, n_period1 = 0;
+        for (int row = 0; row < v.resolution; ++row) {
+            for (int col = 0; col < v.resolution; ++col) {
+                const Cplx a = v.coord(col, row);
+                if (std::abs(a - Cplx(1.0, 0.0)) >= 0.98) continue;   // strictly inside, with margin
+                ++n_checked;
+                if (periods.at(col, row) == 1.0 && undetermined.at(col, row) == 0.0 &&
+                    is_inf.at(col, row) == 0.0) {
+                    ++n_period1;
+                }
+            }
+        }
+        check(n_checked > 0, "sanity: the grid actually samples points strictly inside |a-1|<1");
+        check(n_period1 == n_checked,
+              "every sampled point strictly inside |a-1| < 1 is period 1, none "
+              "undetermined or infinity");
+    }
+
+    // ---- VALIDATION B: superattracting centers a_k = n - (n-1)*omega_k --------------
+    std::printf("\nVALIDATION B: superattracting centers a_k = n - (n-1)*omega_k, "
+               "period = n/gcd(k,n):\n");
+    for (int k = 0; k < n; ++k) {
+        const Cplx omega_k(std::cos(2 * M_PI * k / n), std::sin(2 * M_PI * k / n));
+        const Cplx a_k = static_cast<double>(n) - static_cast<double>(n - 1) * omega_k;
+        const long expected_period = n / gcd_fn(k == 0 ? n : k, n);   // k=0 -> period 1
+
+        Viewport v{a_k, 0.001, 3};
+        Renderer r(Map::custom(nova_n, Cplx(0, 0)), v, RenderSettings{200, 2.0, 1e-6, 1});
+        Image undetermined, is_inf;
+        Image periods = r.render_parameter_period(CriticalPointFamily::RelaxedNewtonPower, n,
+                                                   nullptr, &undetermined, &is_inf);
+        const int center = v.resolution / 2;
+        char msg[192];
+        std::snprintf(msg, sizeof msg,
+                     "k=%d: a_k=(%.6f,%.6f) reports period %.0f (expected %ld), "
+                     "undetermined=%.0f, is_inf=%.0f", k, a_k.real(), a_k.imag(),
+                     periods.at(center, center), expected_period, undetermined.at(center, center),
+                     is_inf.at(center, center));
+        check(periods.at(center, center) == static_cast<double>(expected_period) &&
+              undetermined.at(center, center) == 0.0 && is_inf.at(center, center) == 0.0, msg);
+    }
+
+    // ---- VALIDATION C: exterior |a-n| > n is the infinity class ----------------------
+    std::printf("\nVALIDATION C: |a-n| > n is the infinity class:\n");
+    {
+        Viewport v{{3.0 * n, 0.0}, 0.001, 3};
+        Renderer r(Map::custom(nova_n, Cplx(0, 0)), v, RenderSettings{200, 2.0, 1e-6, 1});
+        Image undetermined, is_inf;
+        Image periods = r.render_parameter_period(CriticalPointFamily::RelaxedNewtonPower, n,
+                                                   nullptr, &undetermined, &is_inf);
+        const int center = v.resolution / 2;
+        check(is_inf.at(center, center) == 1.0 && undetermined.at(center, center) == 0.0,
+              "a well outside |a-n|=n reports the infinity class, not undetermined");
+    }
+
+    // ---- NO REGRESSION: a map with no RationalMap behind it degrades honestly -------
+    std::printf("\nno RationalMap behind the map: degrades to all-undetermined, never a "
+               "fabricated period:\n");
+    {
+        Renderer r(Map(Family::Quadratic, Cplx(0, 0)), Viewport{{0, 0}, 1.0, 5},
+                  RenderSettings{100, 2.0, 1e-6, 1});
+        Image undetermined;
+        Image periods = r.render_parameter_period(CriticalPointFamily::RelaxedNewtonPower, n,
+                                                   nullptr, &undetermined);
+        bool all_undetermined = true, all_zero_period = true;
+        for (double v : undetermined.data) if (v != 1.0) all_undetermined = false;
+        for (double v : periods.data) if (v != 0.0) all_zero_period = false;
+        check(all_undetermined && all_zero_period,
+              "a built-in Family with no RationalMap behind it (never actually reached by "
+              "the app, which always renders through Map::custom) is honestly all-"
+              "undetermined, not a guess");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

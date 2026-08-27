@@ -140,6 +140,12 @@ PYBIND11_MODULE(cdx, m) {
         .value("Pragmatic", GreensPotential::Pragmatic)
         .value("Conformal", GreensPotential::Conformal);
 
+    // ---- CriticalPointFamily (Renderer.render_parameter_period) --------------
+    py::enum_<CriticalPointFamily>(m, "CriticalPointFamily")
+        .value("RelaxedNewtonPower", CriticalPointFamily::RelaxedNewtonPower,
+              "Relaxed Newton of z^n-1 -- see the C++ enum's own doc comment for "
+              "the closed-form critical points this generates per pixel.");
+
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
         .def(py::init<>())
@@ -584,6 +590,46 @@ PYBIND11_MODULE(cdx, m) {
              "comment) -- degrades to an honest all-zero (counts, unresolved, "
              "certain) triple otherwise, rather than guessing.")
 
+        .def("render_parameter_period",
+             [](const Renderer& r, CriticalPointFamily seed_family, int n,
+                std::shared_ptr<CancelToken> cancel) {
+                 const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
+                 Image undetermined, is_infinity;
+                 py::array_t<double> periods_arr, undetermined_arr, is_infinity_arr;
+                 {
+                     py::gil_scoped_release release;
+                     Image img = r.render_parameter_period(seed_family, n, cp, &undetermined,
+                                                           &is_infinity);
+                     py::gil_scoped_acquire acquire;
+                     periods_arr = image_to_numpy(std::move(img));
+                     undetermined_arr = image_to_numpy(std::move(undetermined));
+                     is_infinity_arr = image_to_numpy(std::move(is_infinity));
+                 }
+                 return py::make_tuple(periods_arr, undetermined_arr, is_infinity_arr);
+             },
+             py::arg("seed_family"), py::arg("n"), py::arg("cancel") = nullptr,
+             "Parameter_period: each pixel is a parameter value; returns (periods, "
+             "undetermined, is_infinity). periods is the PERIOD (measured in the "
+             "raw z-plane -- see per_seed_outcomes, never a symmetry quotient) of "
+             "the attracting cycle a TRACKED critical orbit converges to, where "
+             "`seed_family` (a CriticalPointFamily) supplies that orbit's closed-"
+             "form location per pixel -- deliberately NOT RationalMap.distinct_"
+             "critical_points(a) the way Parameter_basin uses, since that includes "
+             "critical points structurally unrelated to the tracked orbit (see "
+             "Renderer.render_parameter_period's own C++ doc comment for a measured "
+             "example). `n` is the family's own structural parameter (e.g. the "
+             "power in relaxed-Newton-of-z^n-1; for that family it equals map."
+             "degree(a) exactly, if the caller only has the map itself). "
+             "undetermined is 1.0 where no tracked seed resolved within budget "
+             "(a genuine residual -- Siegel/Herman/parabolic -- never a fabricated "
+             "period); is_infinity is 1.0 where the resolved cycle is the point at "
+             "infinity, kept OUT of `periods`' own value and its golden-hue color "
+             "family. At most one of the two is ever 1.0 for the same pixel. "
+             "Escape-radius-free. Requires a Custom-wrapped map -- degrades to an "
+             "honest all-undetermined image otherwise. CURRENTLY SUPPORTS EXACTLY "
+             "ONE seed_family (RelaxedNewtonPower) -- see CriticalPointFamily's "
+             "own doc comment before calling this on any other map shape.")
+
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,
                 std::shared_ptr<CancelToken> cancel) {
@@ -698,6 +744,26 @@ PYBIND11_MODULE(cdx, m) {
           "for why find_attractors alone is not a completeness guarantee. "
           "This is what the fact sheet, basin classification, and "
           "Parameter_basin all actually use for 'the attractor set'.");
+
+    py::class_<SeedOutcome>(m, "SeedOutcome")
+        .def_readonly("period",      &SeedOutcome::period)
+        .def_readonly("is_infinity", &SeedOutcome::is_infinity)
+        .def_readonly("resolved",    &SeedOutcome::resolved);
+
+    m.def("per_seed_outcomes", &per_seed_outcomes, py::arg("seeds"), py::arg("map"), py::arg("a"),
+          py::arg("opts") = FindAttractorsOptions{},
+          "What did EACH seed's own orbit converge to, one SeedOutcome per "
+          "seed, in order -- NOT the deduplicated attractor SET find_"
+          "attractors/complete_attractors return (see the C++ doc comment "
+          "for a measured example of why those are the wrong tool for this "
+          "question: the algebraic union can attribute a fixed point to a "
+          "seed that never actually reaches it, and a map can have several "
+          "SIMULTANEOUSLY attracting cycles from different critical points). "
+          "resolved=False means a genuine residual (Siegel/Herman/parabolic) "
+          "-- period/is_infinity are meaningless (left at 0/False) in that "
+          "case, never a fabricated period. period is measured in the raw "
+          "z-plane, never a symmetry quotient. This is what Renderer."
+          "render_parameter_period uses per pixel.");
 
     m.def("polynomial_escape_certified", &polynomial_escape_certified, py::arg("map"),
           "True iff `map` has no poles anywhere (structurally -- independent of the "

@@ -285,6 +285,62 @@ std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds
                                                   int* certain_count = nullptr);
 
 // -----------------------------------------------------------------------------
+// 1c. per_seed_outcomes -- WHAT DID *THIS SPECIFIC* SEED CONVERGE TO, not the
+// deduplicated attractor SET find_attractors/complete_attractors return.
+//
+// WHY THIS EXISTS, distinct from complete_attractors_from_seeds: that
+// function answers "what is the complete set of attractors this parameter
+// has" -- correct for basin-count coloring, where every attractor counts
+// once no matter which (or how many) seeds found it. A PERIOD-coloring
+// consumer asks a different question: "what does THIS PARTICULAR critical
+// orbit (or family of symmetric-equivalent ones) converge to" -- and the
+// complete, deduplicated cycle SET is not enough to answer it. Two
+// concrete failure modes if a caller tried to read complete_attractors_
+// from_seeds' own output for this instead:
+//   (a) the algebraic union adds every algebraically-attracting fixed
+//       point regardless of which seed (if any) actually reaches it --
+//       verified directly (relaxed-Newton-of-z^n-1, one seed at the
+//       origin only): seeding with just one UNRELATED critical point
+//       still returns every one of the n roots-of-unity fixed points,
+//       all via the union, none of them what that seed's own orbit did.
+//   (b) a map can have several SIMULTANEOUSLY attracting cycles from
+//       DIFFERENT critical points (the whole point of studying bicritical
+//       families) -- "the complete set" conflates them; a period-coloring
+//       consumer needs to know which cycle EACH tracked critical point's
+//       own orbit reached, not the union of all of them.
+//
+// Returns one SeedOutcome per seed, in the SAME order as `seeds`, each
+// computed as if that seed were the only one given to find_attractors_
+// from_seeds (seeds are independent in that function -- see its own
+// per-seed loop -- so this is not an approximation, just a different way
+// of reading the identical computation) PLUS the same algebraic
+// reconciliation complete_attractors_from_seeds applies (an unresolved
+// seed whose own endpoint lands on an algebraically-attracting fixed
+// point is reported resolved, period 1, at the same opts.tol * 1e3
+// chordal tolerance) -- so a seed that is genuinely heading to an exact
+// fixed point is not falsely reported "undetermined" just because its own
+// numerical closure detection missed it.
+//
+// `period` is measured in the RAW z-plane this seed's orbit actually
+// lives in -- literally cyc.points.size() for whichever cycle was found,
+// nothing quotiented out. `is_infinity` is set when that cycle is the
+// point at infinity (still period 1, but reported separately -- see
+// Renderer::render_parameter_period's own doc comment for why a caller
+// usually wants to color that differently from an ordinary finite period-
+// 1 cycle). `resolved` is false ("undetermined") exactly when this seed's
+// orbit is a genuine residual no complete attractor explains -- never a
+// fabricated period; `period`/`is_infinity` are both left at their
+// zero-value defaults in that case.
+struct SeedOutcome {
+    int  period      = 0;       // 0 iff !resolved -- never a real period otherwise
+    bool is_infinity = false;
+    bool resolved    = false;
+};
+
+std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const RationalMap& map,
+                                           Cplx a, const FindAttractorsOptions& opts = {});
+
+// -----------------------------------------------------------------------------
 // Polynomial escape-radius certification.
 //
 // TRUE iff `map` has NO poles anywhere in its STRUCTURE (no enabled

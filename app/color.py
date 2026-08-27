@@ -141,6 +141,18 @@ UNRESOLVED_BASIN_RGB: tuple[int, int, int] = (0, 0, 0)
 # attractor), but visually the same "black = nothing here" language this
 # app already speaks everywhere else.
 PARAMETER_BASIN_UNRESOLVED_RGB: tuple[int, int, int] = (0, 0, 0)
+# color_parameter_period's own "undetermined" pixels (no tracked seed
+# resolved within budget) reuse the SAME flat-black convention -- it is
+# the identical question PARAMETER_BASIN_UNRESOLVED_RGB already answers
+# ("nothing confirmed here"), just for a different pixel value.
+PARAMETER_PERIOD_UNDETERMINED_RGB: tuple[int, int, int] = (0, 0, 0)
+# Deliberately NOT black and NOT a golden-hue period color -- "converges
+# to infinity" is a dynamically DIFFERENT kind of behaviour from "converges
+# to an ordinary period-1 cycle in the plane" (see cdx::Renderer::
+# render_parameter_period's own doc comment), not a variant of either
+# "no data" (black) or one more category on the period hue wheel. White is
+# visually as far from both as this palette gets.
+PARAMETER_PERIOD_INFINITY_RGB: tuple[int, int, int] = (255, 255, 255)
 
 SCALING_MODES: tuple[str, ...] = ("log1p", "histogram")
 
@@ -387,6 +399,53 @@ def color_parameter_basin(counts: np.ndarray, unresolved: np.ndarray | None = No
 
     rgb = base.round().clip(0, 255).astype(np.uint8)
     rgb[dominant_unresolved] = PARAMETER_BASIN_UNRESOLVED_RGB
+    return rgb
+
+
+def color_parameter_period(periods: np.ndarray, undetermined: np.ndarray | None = None,
+                           is_infinity: np.ndarray | None = None) -> np.ndarray:
+    """Categorical coloring for Parameter_period: hue = the PERIOD itself,
+    via the SAME golden-angle _golden_hue/_hue_to_rgb_255 primitive
+    color_parameter_basin already uses for its own count coloring -- a
+    period is a category exactly the same way a count is (period 2 and
+    period 3 should read as two DIFFERENT things, not two shades of one
+    gradient), so the identical reasoning applies; see color_parameter_
+    basin's own docstring for the fuller argument against a gradient here.
+
+    Three DISJOINT outcomes per pixel, reusing cdx.Renderer.
+    render_parameter_period's own three-way split rather than re-deriving
+    it: an ordinary FINITE period (golden-hue, one color per period value),
+    UNDETERMINED (`undetermined` set -- no tracked critical orbit resolved
+    within budget, a genuine residual never a fabricated period; flat
+    PARAMETER_PERIOD_UNDETERMINED_RGB, the SAME black "nothing confirmed
+    here" convention color_parameter_basin's own unresolved-dominant
+    pixels use), and INFINITY (`is_infinity` set -- the tracked orbit
+    converges to the point at infinity; flat PARAMETER_PERIOD_INFINITY_RGB,
+    deliberately its OWN color, not folded into period 1's hue or into the
+    undetermined black -- see that constant's own doc comment for why
+    "converges to infinity" is a dynamically different kind of behaviour,
+    not a variant of either). Precedence when a caller passes inconsistent
+    arrays (should not happen given the engine's own invariant that at
+    most one of the two is ever set for the same pixel, but not assumed):
+    UNDETERMINED wins over INFINITY, which wins over an ordinary period
+    color -- when in doubt, admit uncertainty rather than assert a class.
+    """
+    periods = np.asarray(periods)
+    undetermined_arr = (np.zeros(periods.shape, dtype=bool) if undetermined is None
+                        else np.asarray(undetermined).astype(bool))
+    infinity_arr = (np.zeros(periods.shape, dtype=bool) if is_infinity is None
+                    else np.asarray(is_infinity).astype(bool))
+
+    resolved_finite = ~undetermined_arr & ~infinity_arr
+    base = np.zeros(periods.shape + (3,), dtype=float)
+    if np.any(resolved_finite):
+        for period_value in np.unique(periods[resolved_finite]).astype(np.int64):
+            base[(periods == period_value) & resolved_finite] = \
+                _hue_to_rgb_255(_golden_hue(int(period_value)))
+
+    rgb = base.round().clip(0, 255).astype(np.uint8)
+    rgb[infinity_arr] = PARAMETER_PERIOD_INFINITY_RGB
+    rgb[undetermined_arr] = PARAMETER_PERIOD_UNDETERMINED_RGB   # wins over infinity -- see docstring
     return rgb
 
 

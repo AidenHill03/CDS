@@ -15,9 +15,10 @@ from __future__ import annotations
 import numpy as np
 
 from app.color import (NEVER_ESCAPED_RGB, PALETTE_NAMES, PALETTES,
-                        PARAMETER_BASIN_UNRESOLVED_RGB, UNRESOLVED_BASIN_RGB, color_basin,
-                        color_escape_time, color_parameter_basin, color_scalar_field,
-                        scale_histogram_eq, scale_log1p, scale_scalar_field)
+                        PARAMETER_BASIN_UNRESOLVED_RGB, PARAMETER_PERIOD_INFINITY_RGB,
+                        PARAMETER_PERIOD_UNDETERMINED_RGB, UNRESOLVED_BASIN_RGB, color_basin,
+                        color_escape_time, color_parameter_basin, color_parameter_period,
+                        color_scalar_field, scale_histogram_eq, scale_log1p, scale_scalar_field)
 
 failures = 0
 
@@ -271,6 +272,51 @@ def main() -> None:
     check(tuple(certain_omitted[1]) == PARAMETER_BASIN_UNRESOLVED_RGB,
           "omitting `certain` entirely behaves the same as passing an all-zero array -- "
           "the ORIGINAL stricter gate, unchanged for any caller not yet passing it")
+
+    # ---- color_parameter_period: categorical by period, three disjoint outcomes ----
+    print("\ncolor_parameter_period:")
+    periods = np.array([1, 1, 2, 3, 0, 0])
+    undetermined = np.array([0, 0, 0, 0, 1, 0], dtype=bool)
+    is_infinity = np.array([0, 0, 0, 0, 0, 1], dtype=bool)
+    ppimg = color_parameter_period(periods, undetermined, is_infinity)
+
+    check(tuple(ppimg[0]) == tuple(ppimg[1]),
+          "the SAME period gets the SAME color, deterministically")
+    check(tuple(ppimg[0]) != tuple(ppimg[2]) and tuple(ppimg[2]) != tuple(ppimg[3]) and
+         tuple(ppimg[0]) != tuple(ppimg[3]),
+          "three DIFFERENT periods (1, 2, 3) get three visually distinct colors")
+    check(tuple(ppimg[4]) == PARAMETER_PERIOD_UNDETERMINED_RGB,
+          "undetermined=True gets the flat undetermined color regardless of its own "
+          "period value (0, meaningless here)")
+    check(tuple(ppimg[5]) == PARAMETER_PERIOD_INFINITY_RGB,
+          "is_infinity=True gets its OWN flat color, distinct from undetermined AND from "
+          "any period hue")
+    check(PARAMETER_PERIOD_INFINITY_RGB != PARAMETER_PERIOD_UNDETERMINED_RGB,
+          "sanity: the infinity and undetermined sentinels are not accidentally the same "
+          "color -- the whole point is telling them apart")
+    check(tuple(ppimg[0]) != PARAMETER_PERIOD_UNDETERMINED_RGB and
+         tuple(ppimg[0]) != PARAMETER_PERIOD_INFINITY_RGB,
+          "an ordinary period=1 pixel's color is neither sentinel -- infinity is kept OUT "
+          "of period 1's own hue, not folded into it")
+
+    # Precedence when both flags are (inconsistently) set: undetermined wins.
+    both_set = color_parameter_period(np.array([5]), np.array([1], dtype=bool),
+                                      np.array([1], dtype=bool))
+    check(tuple(both_set[0]) == PARAMETER_PERIOD_UNDETERMINED_RGB,
+          "if a caller ever passes BOTH undetermined and is_infinity set for the same "
+          "pixel (should not happen given the engine's own invariant, not assumed here), "
+          "undetermined wins -- admit uncertainty rather than assert a class")
+
+    no_flags = color_parameter_period(np.array([1, 2]))
+    check(tuple(no_flags[0]) == tuple(color_parameter_period(
+              np.array([1, 2]), np.array([0, 0], dtype=bool), np.array([0, 0], dtype=bool))[0]),
+          "omitting undetermined/is_infinity entirely behaves the same as passing "
+          "all-False arrays")
+
+    all_undetermined_pp = color_parameter_period(np.zeros(4, dtype=int),
+                                                 np.ones(4, dtype=bool))
+    check(np.all(all_undetermined_pp == np.array(PARAMETER_PERIOD_UNDETERMINED_RGB)),
+          "an all-undetermined array is entirely the flat undetermined color, no crash")
 
     # Rational Julia (Stage 2) has NO bespoke colorer at this layer any more
     # -- it colors through color_escape_time directly (see app/sandbox.py's

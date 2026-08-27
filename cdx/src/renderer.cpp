@@ -804,6 +804,96 @@ Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* u
 }
 
 // -----------------------------------------------------------------------------
+// Per-pixel tracked-seed generation for render_parameter_period, one case per
+// CriticalPointFamily enumerator -- see that enum's own doc comment for why
+// this is a small, explicit dispatch rather than a plugin mechanism. Returns
+// an EMPTY vector at a degenerate parameter (e.g. RelaxedNewtonPower's own
+// formula divides by (n-a), which vanishes at a=n exactly) rather than
+// guessing -- render_parameter_period's own caller then correctly reports
+// that single pixel as undetermined, the same honest treatment every other
+// non-convergent case gets.
+namespace {
+
+std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) {
+    switch (seed_family) {
+        case CriticalPointFamily::RelaxedNewtonPower: {
+            // z_c(a) = (a(n-1)/(n-a))^(1/n) * omega^j, j=0..n-1 -- see
+            // CriticalPointFamily::RelaxedNewtonPower's own doc comment.
+            const Cplx denom = Cplx(static_cast<double>(n), 0.0) - a;
+            if (std::abs(denom) < 1e-12) return {};
+            const Cplx ratio = a * static_cast<double>(n - 1) / denom;
+            const double two_pi = 2.0 * std::acos(-1.0);
+            const Cplx base = std::pow(ratio, 1.0 / static_cast<double>(n));
+            const Cplx omega = std::polar(1.0, two_pi / static_cast<double>(n));
+            std::vector<Cplx> seeds;
+            seeds.reserve(static_cast<std::size_t>(n));
+            Cplx w(1.0, 0.0);
+            for (int j = 0; j < n; ++j) {
+                seeds.push_back(base * w);
+                w *= omega;
+            }
+            return seeds;
+        }
+    }
+    return {};   // unreachable for a valid enumerator; never guess a seed list
+}
+
+}  // namespace
+
+Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
+                                        const std::atomic<bool>* cancel, Image* undetermined,
+                                        Image* is_infinity) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (undetermined) *undetermined = Image(res, res);
+    if (is_infinity) *is_infinity = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    // An all-undetermined degenerate image (never guessed) matches
+    // render_parameter_basin's own treatment of the same missing-
+    // RationalMap case -- see its own doc comment.
+    if (!custom) {
+        if (undetermined) {
+            for (double& v : undetermined->data) v = 1.0;
+        }
+        return img;
+    }
+
+    const FindAttractorsOptions opts;
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
+            const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
+
+            int period = 0;
+            bool inf_flag = false;
+            bool resolved_any = false;
+            if (!seeds.empty()) {
+                // First tracked seed (in `seeds`' own generation order) that
+                // resolves wins -- see render_parameter_period's own doc
+                // comment for why this is a tie-break for RelaxedNewtonPower
+                // specifically (its n seeds are equivariant-guaranteed to
+                // agree), not a general disagreement policy.
+                for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
+                    if (outcome.resolved) {
+                        period = outcome.period;
+                        inf_flag = outcome.is_infinity;
+                        resolved_any = true;
+                        break;
+                    }
+                }
+            }
+
+            img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
+            if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
+            if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// -----------------------------------------------------------------------------
 // Parameter-plane Green's function (family escape-rate function, G_M(c) for
 // the quadratic family) -- see the header comment for why this is a
 // DIFFERENT function on a DIFFERENT space from render_greens, not a

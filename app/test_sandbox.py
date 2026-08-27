@@ -863,6 +863,20 @@ def main() -> None:
           "parameter_basin mode's cursor readout reports the attracting-cycle count, not "
           "escape/basin/potential formatting")
 
+    readout_pane.set_render_mode("parameter_period")
+    pperiod_array = render_map(readout_session.map, readout_session.param, readout_pane.viewport,
+                               readout_session.render_settings, "parameter_period")
+    readout_view.set_image(pperiod_array, readout_pane.viewport)
+    pperiod_text = readout_view.cursor_readout_text(QPoint(200, 200))
+    check(pperiod_text is not None and
+         ("period = " in pperiod_text or pperiod_text in ("undetermined", "converges to infinity")),
+          "parameter_period mode's cursor readout reports one of its own three formats "
+          "(period/undetermined/infinity), not escape/basin/potential formatting -- using "
+          "the mandelbrot family here (this mode CURRENTLY only supports relaxed-Newton "
+          "seeds, a documented scope limitation -- see cdx.Renderer.render_parameter_"
+          "period's own doc comment), so this checks the FORMAT stays well-formed and "
+          "does not crash, not that the value is mathematically meaningful for this map")
+
     # Stage 2: a RATIONAL map's "julia" render is stacked too -- the cursor
     # readout must sample it the SAME way basin's own stacked array is
     # sampled, not crash trying to unpack a 3D array's .shape into (h, w).
@@ -1580,6 +1594,13 @@ def main() -> None:
          "with the new stacked counts+unresolved array flowing all the way through the "
          "categorical (non-palette) colorer")
 
+    window.image_view._pixmap = None
+    window.mode_combo.setCurrentText("parameter_period")
+    ok = wait_for(lambda: window.image_view._pixmap is not None, timeout_ms=10000)
+    check(ok, "switching to parameter_period mode renders and displays successfully "
+         "end-to-end, with the stacked periods+undetermined+is_infinity array flowing "
+         "through color_parameter_period")
+
     # A max_iter that would have overflowed the OLD accumulate/degree^
     # max_iter formula (degree^2000 is astronomically outside double
     # range) must still render successfully with no warning -- confirming
@@ -2192,6 +2213,10 @@ def main() -> None:
     check(window.image_view.no_effect_parameter_message() is not None,
           "parameter_basin gets the SAME no-effect guard as plain parameter -- driven by "
           "PARAMETER_PLANE_MODES membership, not a hardcoded per-mode name list")
+    window.mode_combo.setCurrentText("parameter_period")
+    check(window.image_view.no_effect_parameter_message() is not None,
+          "parameter_period gets the SAME no-effect guard too -- same PARAMETER_PLANE_MODES "
+          "membership")
     window.mode_combo.setCurrentText("parameter")
 
     rid_before_guard = window.pane.request_id

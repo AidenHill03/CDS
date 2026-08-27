@@ -206,6 +206,36 @@ enum class GreensPotential {
 };
 
 // -----------------------------------------------------------------------------
+// Which closed-form recipe render_parameter_period (below) uses to compute
+// the PER-PIXEL "tracked" critical points to seed period detection from --
+// see that method's own doc comment for why this can't just be RationalMap::
+// distinct_critical_points(a) (that returns every critical point the map
+// has, including ones structurally unrelated to the specific orbit a
+// literature figure tracks, e.g. z=0 for the relaxed-Newton family below --
+// see per_seed_outcomes' own doc comment for a measured example of that
+// going wrong). One enumerator per family with a known closed form,
+// mirroring how Family itself dispatches built-in shapes -- NOT a plugin
+// registry (see modules/README.md's own rule against one until at least
+// three concrete needs exist); add a case here, and its own branch in
+// render_parameter_period, when a second family's own closed form is
+// needed (e.g. a KLS bicritical map's two critical points).
+// -----------------------------------------------------------------------------
+enum class CriticalPointFamily {
+    // Relaxed Newton of p(z) = z^n - 1: N_a(z) = z - a(z^n-1)/(n z^{n-1}) =
+    // ((n-a)z^n + a) / (n z^{n-1}). The n FREE critical points (excluding
+    // the structural one at z=0, which always maps directly to infinity
+    // and is tracked separately, if at all -- see render_parameter_period)
+    // are z_c(a) = (a(n-1)/(n-a))^(1/n) * omega^j, j=0..n-1, omega =
+    // e^(2*pi*i/n). `n` is passed to render_parameter_period explicitly
+    // (it is a FAMILY-structural choice, not the map's own single active
+    // dynamical parameter `a`, and the map's own degree(a) equals n for
+    // this family -- see render_parameter_period's own doc comment for
+    // how a caller that only has a RationalMap, not the n it was built
+    // with, can still recover it).
+    RelaxedNewtonPower,
+};
+
+// -----------------------------------------------------------------------------
 // Render result. Row-major, row 0 at the bottom (matching Viewport::coord), so
 // callers that want image-style top-down order should flip.
 // -----------------------------------------------------------------------------
@@ -395,6 +425,87 @@ public:
     // too in that case, rather than guessing.
     Image render_parameter_basin(const std::atomic<bool>* cancel = nullptr,
                                  Image* unresolved = nullptr, Image* certain = nullptr) const;
+
+    // Parameter_period: each pixel is a parameter value a; the pixel value
+    // is the PERIOD of the attracting cycle a TRACKED critical orbit
+    // converges to -- reproducing the period-colored parameter-plane
+    // figures in the Lindsey-Koch-Sharland bicritical-maps literature,
+    // for side-by-side comparison with Parameter_basin's own count
+    // coloring. Escape-radius-free, same as Parameter_basin.
+    //
+    // WHY THIS IS A SEPARATE METHOD FROM render_parameter_basin, not a
+    // second output of it: the two ask genuinely different questions.
+    // Parameter_basin seeds from EVERY critical point the map has
+    // (RationalMap::distinct_critical_points(a)) and reports how many
+    // DISTINCT attractors that whole set reaches -- correct for counting,
+    // wrong for period, because (per_seed_outcomes' own doc comment,
+    // confirmed by direct measurement) the complete/deduplicated
+    // attractor set can contain algebraically-injected fixed points no
+    // TRACKED seed's own orbit ever reaches, and can (for a bicritical
+    // family) contain several SIMULTANEOUSLY attracting cycles from
+    // critical points that are not the one a literature figure means by
+    // "the free critical orbit". This method therefore takes an EXPLICIT
+    // `seed_family` recipe (see CriticalPointFamily's own doc comment)
+    // computing exactly the critical points a period-coloring consumer
+    // means to track, per pixel (they are generally PARAMETER-DEPENDENT,
+    // e.g. this family's own z_c(a) formula -- there is no `cp_fixed`
+    // once-per-render optimization here the way Parameter_basin has for a
+    // parameter-INDEPENDENT critical point set).
+    //
+    // METHOD, per pixel: compute the tracked seeds via `seed_family`'s own
+    // closed form at that pixel's `a`, then per_seed_outcomes against
+    // them (the SAME burn-in + closure-detection + attracting-multiplier-
+    // verification + algebraic reconciliation machinery every other
+    // discovery path in this codebase uses -- nothing bespoke here
+    // either). PERIOD MEASURED IN THE RAW Z-PLANE: per_seed_outcomes'
+    // own period is literally a discovered Cycle's points.size(), the
+    // SAME quantity find_attractors/complete_attractors already report --
+    // never computed in a symmetry quotient (e.g. w = z^n for this
+    // family), which would collapse a genuine z-plane period-P star cycle
+    // into a fixed point and silently mislabel every color.
+    //
+    // POLICY when the tracked seeds disagree (checked in the order
+    // `seed_family` generates them): the FIRST one that resolves wins --
+    // by the family's own equivariance (z -> omega*z symmetry) every one
+    // of RelaxedNewtonPower's own n seeds is guaranteed to agree in
+    // exact arithmetic, so this is a tie-break for numerical stragglers,
+    // not a real policy choice for THAT family; a future, genuinely
+    // asymmetric family (a bicritical one, whose two critical points CAN
+    // converge to two actually-different cycles) would need this
+    // documented explicitly wherever it is used -- this method does not
+    // attempt to detect or flag such a disagreement itself (no "mixed"
+    // class yet; not needed by any family this method currently supports).
+    //
+    // The pixel value is the period (>= 1) when a tracked seed resolves to
+    // a FINITE cycle; 0 (paired with `undetermined` set) when NONE of the
+    // tracked seeds resolve within budget -- a genuine residual (Siegel/
+    // Herman/parabolic), never a fabricated period; also 0 (paired with
+    // `is_infinity` set instead) when the resolved cycle is the point at
+    // infinity -- kept OUT of the ordinary period value and its own golden-
+    // hue color family entirely, since "converges to infinity" is a
+    // dynamically different kind of behaviour from "converges to an
+    // ordinary period-1 cycle in the plane", not merely a variant of it.
+    //
+    // `undetermined`, if given, is replaced with an Image the same size as
+    // the result: 1.0 where no tracked seed resolved (see above), 0.0
+    // elsewhere. `is_infinity`, if given, is replaced with an Image the
+    // same size: 1.0 where the resolved cycle is the point at infinity,
+    // 0.0 elsewhere. At most one of the two is ever 1.0 for the same pixel.
+    //
+    // Requires a Custom-wrapped map (map_.custom_map() non-null), same as
+    // Parameter_basin -- degrades to an honest all-undetermined image
+    // otherwise, rather than guessing. CURRENTLY SUPPORTS EXACTLY ONE
+    // seed_family (RelaxedNewtonPower) -- calling this on a map that is
+    // not structurally that family produces seeds that do not correspond
+    // to its actual critical points, and the result is meaningless (not a
+    // crash: those seeds' own orbits are followed under the map's real
+    // dynamics regardless, they simply are not the family's own critical
+    // points) -- this is a scope limitation to document at every call
+    // site, not a case this method itself detects or guards against.
+    Image render_parameter_period(CriticalPointFamily seed_family, int n,
+                                  const std::atomic<bool>* cancel = nullptr,
+                                  Image* undetermined = nullptr,
+                                  Image* is_infinity = nullptr) const;
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.

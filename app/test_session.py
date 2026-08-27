@@ -177,6 +177,54 @@ def main() -> None:
           "arrow-nudging/no-effect-guard machinery every other one already has, "
           "purely through set membership")
 
+    # ---- Parameter_period: period of the tracked critical orbit's attractor --------
+    print("\nrender mode dispatch: Parameter_period (period coloring, KLS comparison):")
+    check("parameter_period" in PARAMETER_PLANE_MODES,
+          "parameter_period is a genuine PARAMETER-plane mode too, same free machinery")
+
+    # Relaxed Newton of z^n-1, n=6: N_a(z) = ((n-a)z^n + a) / (n z^{n-1}).
+    # map.degree(a) == n exactly for this family (numerator degree n,
+    # denominator degree n-1) -- render_map's own "parameter_period" branch
+    # relies on this to recover n without a separate piece of session state.
+    n = 6
+    src = f"(({n}-a)*z^{n} + a) / ({n}*z^{n - 1})"
+    relaxed_newton = cdx.RationalMap.from_expression(src, "a", {}, "relaxed_newton")
+
+    s_pp = Session()
+    s_pp.map = relaxed_newton
+    s_pp.render_settings = cdx.RenderSettings(200, 2.0, 1e-6, 1)
+    check(round(relaxed_newton.degree(0j)) == n,
+          "sanity: map.degree(a) == n for this family -- what render_map's own "
+          "parameter_period dispatch relies on")
+
+    # Superattracting center a_1 = n - (n-1)*omega_1 -- expected period n=6
+    # (gcd(1,6)=1) -- the SAME validated anchor cdx/test/test_analysis.cpp
+    # checks at the engine level, exercised here through the FULL app
+    # dispatch (Session.render, not the bare cdx.Renderer call).
+    omega_1 = complex(math.cos(2 * math.pi / n), math.sin(2 * math.pi / n))
+    a_1 = n - (n - 1) * omega_1
+    tiny_vp = cdx.Viewport(a_1, 0.001, 3)
+    periods, undetermined, is_infinity = s_pp.render(tiny_vp, "parameter_period")
+    check(periods[1, 1] == 6.0 and undetermined[1, 1] == 0.0 and is_infinity[1, 1] == 0.0,
+          "a_1 = n-(n-1)*omega_1 reports period 6 through the full Session.render "
+          "dispatch, matching the engine-level validation anchor exactly")
+
+    # Exterior |a-n| > n -- the infinity class, not undetermined.
+    exterior_vp = cdx.Viewport(complex(3 * n, 0.0), 0.001, 3)
+    periods_ext, undetermined_ext, is_infinity_ext = s_pp.render(exterior_vp, "parameter_period")
+    check(is_infinity_ext[1, 1] == 1.0 and undetermined_ext[1, 1] == 0.0,
+          "well outside |a-n|=n reports the infinity class")
+
+    # A real render spanning several superattracting centers shows period
+    # genuinely CHANGING across the plane -- the period-coloring analogue of
+    # Parameter_basin's own "not a uniform plane" check above.
+    wide_pp_vp = cdx.Viewport(complex(n, 0.0), n + 1.0, 61)
+    periods_wide, undetermined_wide, _is_inf_wide = s_pp.render(wide_pp_vp, "parameter_period")
+    resolved_periods = set(periods_wide[undetermined_wide == 0.0].flatten().tolist())
+    check(len(resolved_periods - {0.0}) >= 2,
+          "a real render shows more than one DISTINCT period value -- a genuine "
+          "classification, not a flat plane")
+
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
     s.map = cdx.RationalMap.mandelbrot()

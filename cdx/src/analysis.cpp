@@ -607,6 +607,63 @@ std::vector<Cycle> complete_attractors(const RationalMap& map, Cplx a,
     return complete_attractors_from_seeds(map.distinct_critical_points(a), map, a, opts);
 }
 
+// =============================================================================
+// 1c. per_seed_outcomes
+// =============================================================================
+std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const RationalMap& map,
+                                           Cplx a, const FindAttractorsOptions& opts) {
+    // Fetched once, reused for every seed's own reconciliation check below --
+    // the SAME algebraic ground truth complete_attractors_from_seeds' own
+    // union reads, just not injected into a shared cycle list here (there is
+    // no shared list; every seed's outcome is independent by construction).
+    const std::vector<FixedPoint> fixed_points = map.fixed_points(a);
+    const double dedupe_tol = opts.tol * 1e3;
+
+    std::vector<SeedOutcome> out;
+    out.reserve(seeds.size());
+    for (Cplx seed : seeds) {
+        int unresolved_n = 0;
+        std::vector<Cplx> endpoints;
+        // Seeds are independent in find_attractors_from_seeds (see its own
+        // per-seed loop) -- a single-seed call reproduces EXACTLY the same
+        // settle/closure/multiplier computation this seed would have gotten
+        // inside a larger batch, just without a shared `cycles` list for
+        // add_cycle to dedupe against (irrelevant here: there is only ever
+        // at most one cycle per single-seed call).
+        const std::vector<Cycle> cycles =
+            find_attractors_from_seeds({seed}, map, a, opts, &unresolved_n, &endpoints);
+
+        SeedOutcome outcome;
+        if (unresolved_n == 0 && !cycles.empty()) {
+            outcome.resolved = true;
+            outcome.is_infinity = !is_finite_cplx(cycles.front().points.front());
+            outcome.period = static_cast<int>(cycles.front().points.size());
+        } else if (!endpoints.empty()) {
+            // Reconcile against the algebraic ground truth (same tolerance
+            // complete_attractors_from_seeds' own union uses): this seed's
+            // orbit may have genuinely been heading to an exact fixed point
+            // that its own numerical closure detection simply missed -- see
+            // this function's own doc comment. An algebraically-attracting
+            // fixed point is, by construction, always period 1.
+            const Cplx endpoint = endpoints.front();
+            const bool endpoint_inf = !is_finite_cplx(endpoint);
+            for (const FixedPoint& fp : fixed_points) {
+                if (!(std::abs(fp.multiplier) < 1.0)) continue;
+                const bool fp_inf = !is_finite_cplx(fp.point);
+                if (endpoint_inf != fp_inf) continue;
+                if (fp_inf || chordal(endpoint, fp.point) < dedupe_tol) {
+                    outcome.resolved = true;
+                    outcome.period = 1;
+                    outcome.is_infinity = fp_inf;
+                    break;
+                }
+            }
+        }
+        out.push_back(outcome);
+    }
+    return out;
+}
+
 bool polynomial_escape_certified(const RationalMap& map) {
     // Representation-agnostic (Stage 2 of the P/Q milestone): works
     // identically whether `map` is term-based or P/Q-backed, since it goes
