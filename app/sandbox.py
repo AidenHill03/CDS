@@ -925,7 +925,8 @@ class RenderTask:
     def __init__(self, request_id: int, rational_map: cdx.RationalMap, param: complex,
                 viewport: cdx.Viewport, settings: cdx.RenderSettings, mode: str,
                 cancel: cdx.CancelToken, cache: RenderCache | None = None,
-                potential: str = "pragmatic"):
+                potential: str = "pragmatic",
+                strategy: str = "slowest", critical_index: int = 0):
         self.request_id = request_id
         self.rational_map = rational_map
         self.param = param
@@ -941,6 +942,13 @@ class RenderTask:
         # which stay pure display-time and never reach render_map at all
         # (see array_to_qimage's own docstring).
         self.potential = potential
+        # Stage 1: which ParameterStrategy "parameter" mode's rational path
+        # combines free critical orbits with -- see app.session.render_map's
+        # own `strategy`/`critical_index` doc comment. Same reasoning as
+        # `potential` above: threaded through explicitly rather than read
+        # off `settings`, since it changes computed values.
+        self.strategy = strategy
+        self.critical_index = critical_index
         self.signals = RenderSignals()
 
     def run(self) -> None:
@@ -965,7 +973,7 @@ class RenderTask:
             preview_buffer_viewport = _overscanned(preview_viewport, PREVIEW_OVERSCAN_FACTOR)
             preview_array = render_map(self.rational_map, self.param, preview_buffer_viewport,
                                        self.settings, self.mode, self.cancel, self.cache,
-                                       self.potential)
+                                       self.potential, self.strategy, self.critical_index)
             if self.cancel.is_cancelled:
                 return
             self.signals.partial_ready.emit(self.request_id, preview_array, preview_buffer_viewport)
@@ -973,7 +981,7 @@ class RenderTask:
             full_buffer_viewport = _overscanned(self.viewport, FULL_OVERSCAN_FACTOR)
             full_array = render_map(self.rational_map, self.param, full_buffer_viewport,
                                     self.settings, self.mode, self.cancel, self.cache,
-                                    self.potential)
+                                    self.potential, self.strategy, self.critical_index)
             if self.cancel.is_cancelled:
                 return
             self.signals.full_ready.emit(self.request_id, full_array, full_buffer_viewport)
@@ -1903,7 +1911,9 @@ def compose_export_image(rational_map: cdx.RationalMap, param: complex, viewport
     """
     export_viewport = cdx.Viewport(viewport.center, viewport.scale, resolution)
     array = render_map(rational_map, param, export_viewport, render_settings, render_mode,
-                       potential=color_settings.greens_potential)
+                       potential=color_settings.greens_potential,
+                       strategy=color_settings.parameter_strategy,
+                       critical_index=color_settings.parameter_critical_index)
     image = array_to_qimage(array, render_mode, color_settings, render_settings.max_iter)
     painter = QPainter(image)
     paint_overlays(painter, export_viewport, resolution, resolution, render_mode,
@@ -3274,7 +3284,9 @@ class SandboxWindow(QMainWindow):
         task = RenderTask(request_id, self.session.map, self.session.param,
                           viewport_snapshot, settings_snapshot, pane.render_mode,
                           cdx.CancelToken(), self.session.cache,
-                          self.session.settings.greens_potential)
+                          self.session.settings.greens_potential,
+                          self.session.settings.parameter_strategy,
+                          self.session.settings.parameter_critical_index)
         # Bound methods, not lambdas: PySide resolves `self` (this window,
         # a QObject on the GUI thread) as the receiver and correctly
         # queues delivery across threads -- see RenderSignals' docstring.

@@ -101,6 +101,15 @@ DEFAULT_GREENS_CONTOUR = False
 GREENS_POTENTIAL_CHOICES = ("pragmatic", "conformal")
 DEFAULT_GREENS_POTENTIAL = "pragmatic"
 
+# Stage 1 (sphere-aware multi-critical Parameter): how render_parameter's own
+# rational path combines multiple free critical orbits' smooth chordal rates
+# into one pixel value (see cdx::ParameterStrategy's own doc comment) --
+# ignored entirely for a certified polynomial, which has only one finite
+# critical point to begin with. A plain string, like greens_potential above,
+# translated to the cdx enum in app.session at the actual render_map call.
+PARAMETER_STRATEGY_CHOICES = ("slowest", "fastest", "per_critical")
+DEFAULT_PARAMETER_STRATEGY = "slowest"
+
 # Stage 4: arrow-key parameter-marker nudging (app.sandbox.ImageView.
 # keyPressEvent). Step is in SCREEN pixels, converted to a complex delta
 # through the active parameter pane's own viewport at move time (see
@@ -194,6 +203,17 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "greens_potential": FieldSpec(str, 0, 0, DEFAULT_GREENS_POTENTIAL,
                                   "Green's function potential (rational maps only)",
                                   choices=GREENS_POTENTIAL_CHOICES),
+    "parameter_strategy": FieldSpec(str, 0, 0, DEFAULT_PARAMETER_STRATEGY,
+                                    "Parameter plane strategy (rational maps only)",
+                                    choices=PARAMETER_STRATEGY_CHOICES),
+    # Only meaningful under parameter_strategy="per_critical"; clamped into
+    # range per pixel by cdx::Renderer::render_parameter itself (see its own
+    # doc comment), so an out-of-range value here is harmless, not invalid --
+    # ceiling is arbitrary headroom past any Custom map's realistic critical
+    # point count.
+    "parameter_critical_index": FieldSpec(int, 0, 63, 0,
+                                          "Parameter plane tracked critical point index "
+                                          "(per_critical strategy only)"),
     # Upper bound is arbitrary headroom (a marker crossing the whole visible
     # window in one step is already useless); lower bound excludes 0 --
     # a zero-pixel step would never move the marker at all, not just move
@@ -224,6 +244,8 @@ class Settings:
     greens_period_bands: float = DEFAULT_GREENS_PERIOD_BANDS
     greens_contour: bool = DEFAULT_GREENS_CONTOUR
     greens_potential: str = DEFAULT_GREENS_POTENTIAL
+    parameter_strategy: str = DEFAULT_PARAMETER_STRATEGY
+    parameter_critical_index: int = 0
     param_marker_step: float = DEFAULT_PARAM_MARKER_STEP
     param_marker_rate: float = DEFAULT_PARAM_MARKER_RATE
 

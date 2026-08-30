@@ -31,7 +31,8 @@ CacheKey = tuple
 def make_key(map_serialized: str, param: complex, mode: str,
             viewport_center: complex, viewport_scale: float, viewport_resolution: int,
             max_iter: int, escape_radius: float, tol: float,
-            potential: str | None = None) -> CacheKey:
+            potential: str | None = None,
+            parameter_strategy: tuple[str, int] | None = None) -> CacheKey:
     """Builds a cache key from exactly the inputs that affect a render's
     pixels. Callers pass viewport fields (not a cdx.Viewport) and
     map.serialize() (not a RationalMap) so this stays a hashable tuple of
@@ -41,9 +42,17 @@ def make_key(map_serialized: str, param: complex, mode: str,
     `potential` argument here for "greens"/"parameter_greens" (None for
     every other mode, where it plays no role) -- two renders differing
     only in `potential` must NOT collide on the same cache entry.
+
+    `parameter_strategy` (Stage 1): app.session.render_map passes its own
+    (strategy, critical_index) here for "parameter" (None for every other
+    mode) -- two renders of the SAME rational map differing only in
+    ParameterStrategy must not collide either. A certified polynomial
+    ignores strategy/critical_index entirely, but the key still varies with
+    them for that case too; harmless (just a distinct, redundant cache
+    entry for the identical result), not worth special-casing.
     """
     return (map_serialized, param, mode, viewport_center, viewport_scale,
-            viewport_resolution, max_iter, escape_radius, tol, potential)
+            viewport_resolution, max_iter, escape_radius, tol, potential, parameter_strategy)
 
 
 @dataclass

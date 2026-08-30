@@ -476,6 +476,29 @@ OrbitFate classify_rational_orbit(double zr, double zi, Step&& step,
     return fate;   // unresolved: default-constructed (resolved=false)
 }
 
+// A finite critical-point seed that IS a pole of `map` (a pole of order >= 2
+// is itself a sphere-critical point -- see RationalMap::critical_points)
+// can't be STEPPED meaningfully starting exactly at the pole: the very
+// first step lands on CompiledMap::step's own escape sentinel (see its
+// comment), and the step after THAT overflows to NaN -- classify_rational_
+// orbit then reports "unresolved" for an orbit that may well have been
+// genuinely, cleanly attracted to infinity, exactly the same failure mode
+// find_attractors_from_seeds' own identically-named nudge (analysis.cpp)
+// exists to avoid for its map.eval()-based iteration. Mirrors that nudge
+// exactly (same tolerance, same offset) so a Custom map's critical point
+// that happens to sit on its own pole -- a structurally common case for
+// Newton-like families, not a freak edge hit -- classifies the same way
+// discovery already does, rather than poisoning every pixel that seeds
+// from it (see render_parameter_rational's own comment for a measured
+// case: Nova's z=0 critical point is also its own order-2 pole).
+Cplx nudge_seed_off_pole(Cplx z, const RationalMap& map, Cplx a) {
+    if (!std::isfinite(z.real()) || !std::isfinite(z.imag())) return z;
+    for (const Cplx& p : map.pole_locations(a)) {
+        if (std::abs(z - p) < 1e-9) return z + Cplx(1e-4, 3.7e-5);
+    }
+    return z;
+}
+
 // -----------------------------------------------------------------------------
 // Stage 3's Conformal potential, log|phi(z)| for the Boettcher (super-
 // attracting) or Koenigs (geometrically attracting) coordinate at the
@@ -669,7 +692,13 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // brief Stage 4 detour into a multi-critical, escape-radius-free rational
 // path here was retired in favour of Parameter_basin as its own dedicated
 // mode.
-Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
+// Pre-Stage-1 form, UNCHANGED -- extracted verbatim so render_parameter's own
+// dispatch reads the same "certified -> this; rational -> the sphere-aware
+// path below" shape every other mode already has. escape_radius-based;
+// correct here because a CERTIFIED polynomial's infinity is ALWAYS
+// superattracting, so a fixed |z| > escape_radius test is a provably
+// forward-invariant trap (same reasoning as render_julia_polynomial's own).
+Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
     const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -730,6 +759,141 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel) const {
         }
     }, cancel);
     return img;
+}
+
+// -----------------------------------------------------------------------------
+// Sphere-aware, multi-critical, escape-radius-free rational path -- see
+// render_parameter's own header doc comment for the full derivation and the
+// git-history context (the reverted "AllCaptured/FastestCapture/PerCritical"
+// attempt this generalizes correctly).
+//
+// Custom map: every free critical point (RationalMap::distinct_critical_
+// points(a), UNFILTERED) is classified against complete_attractors_from_
+// seeds' own discovery at that SAME seed list -- one extra find_attractors
+// pass per pixel beyond what render_parameter_basin already pays, since the
+// two methods answer different questions (a count vs a per-critical smooth
+// rate) and neither can be derived from the other's own return shape alone.
+//
+// Non-Custom built-in rational family (McMullen2/McMullen3/Newton3 -- the
+// only Family values that ever reach this method, since Quadratic/Cubic/
+// Quintic are escape_certified and dispatch to render_parameter_polynomial
+// instead): there is no RationalMap for complete_attractors_from_seeds to
+// call eval()/deriv()/fixed_points() on, so ONE is synthesized once per
+// render (RationalMap::mcmullen/newton_cubic -- the exact same closed-form
+// shape Map::step_with already hard-codes, just also available as a
+// RationalMap for discovery's sake) purely as that discovery target. The
+// TRACKED seed stays Map::critical_point's single representative (per
+// ParameterStrategy's own doc comment: every finite critical point of one
+// of these three specific families shares escape/capture behaviour by
+// symmetry, so nothing is lost by not also calling the synthesized map's
+// own distinct_critical_points here).
+Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critical_index,
+                                          const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
+    const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
+    const std::vector<Cplx> fixed_crit_pts =
+        cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+
+    std::optional<RationalMap> synthesized;
+    const RationalMap* discovery_map = custom;
+    if (!custom) {
+        switch (map_.family()) {
+            case Family::McMullen2: synthesized = RationalMap::mcmullen(2); break;
+            case Family::McMullen3: synthesized = RationalMap::mcmullen(3); break;
+            case Family::Newton3:   synthesized = RationalMap::newton_cubic(); break;
+            default: break;   // unreachable: those three are escape_certified
+        }
+        discovery_map = synthesized ? &*synthesized : nullptr;
+    }
+    if (!discovery_map) return img;   // unreachable in practice; honest empty fallback
+
+    // Same "correctness knob, not a speed knob" reasoning as render_
+    // parameter_basin's own identical choice -- see that method's comment.
+    const FindAttractorsOptions opts;
+
+    parallel_columns([&](int col) {
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit_pts;
+            if (custom) crit_pts = cp_fixed ? fixed_crit_pts : custom->distinct_critical_points(p);
+            else        crit_pts.push_back(map_.critical_point_at(p));
+
+            const std::vector<Cycle> cycles =
+                complete_attractors_from_seeds(crit_pts, *discovery_map, p, opts);
+
+            std::vector<double> ar, ai;
+            std::vector<int>    aid;
+            for (const Cycle& cyc : cycles) {
+                for (const Cplx& pt : cyc.points) {
+                    ar.push_back(pt.real());
+                    ai.push_back(pt.imag());
+                    aid.push_back(cyc.id);
+                }
+            }
+
+            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            auto step = [&](double& zr, double& zi) {
+                if (recognized) Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
+                else if (custom) compiled.step(zr, zi);
+                else map_.step_with_param(p, zr, zi);
+            };
+
+            std::vector<OrbitFate> fates;
+            fates.reserve(crit_pts.size());
+            for (const Cplx& c0 : crit_pts) {
+                const Cplx seed = nudge_seed_off_pole(c0, *discovery_map, p);
+                fates.push_back(classify_rational_orbit(seed.real(), seed.imag(), step, ar, ai, aid,
+                                                         settings_.tol, settings_.max_iter));
+            }
+
+            double out = 0.0;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {
+                    bool all_resolved = !fates.empty();
+                    double worst = 0.0;
+                    for (const OrbitFate& f : fates) {
+                        if (!f.resolved) { all_resolved = false; break; }
+                        worst = std::max(worst, f.nu);
+                    }
+                    out = all_resolved ? worst : 0.0;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {
+                    double best = kHuge;
+                    bool any_resolved = false;
+                    for (const OrbitFate& f : fates) {
+                        if (f.resolved) { any_resolved = true; best = std::min(best, f.nu); }
+                    }
+                    out = any_resolved ? best : 0.0;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    if (!fates.empty()) {
+                        const int idx =
+                            std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
+                        out = fates[idx].resolved ? fates[idx].nu : 0.0;
+                    }
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+        }
+    }, cancel);
+    return img;
+}
+
+// Public dispatcher -- same Map::escape_certified() split every other mode
+// already uses; see render_parameter's own header doc comment for what each
+// path means.
+Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrategy strategy,
+                                 int critical_index) const {
+    if (map_.escape_certified()) return render_parameter_polynomial(cancel);
+    return render_parameter_rational(strategy, critical_index, cancel);
 }
 
 // -----------------------------------------------------------------------------

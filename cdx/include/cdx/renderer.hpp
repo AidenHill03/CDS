@@ -236,6 +236,62 @@ enum class CriticalPointFamily {
 };
 
 // -----------------------------------------------------------------------------
+// How render_parameter's own rational path (below) combines MULTIPLE free
+// critical orbits' smooth chordal rates into the one value a pixel gets --
+// see render_parameter's own doc comment for the full derivation. This
+// enum's own name and case shapes deliberately echo an EARLIER, reverted
+// attempt at exactly this idea (git history: "AllCaptured/FastestCapture/
+// PerCritical"), which was retired because it only ever asked "does the
+// critical orbit escape to infinity" -- see render_parameter's own doc
+// comment for why THIS version (sphere-aware, any attractor, not just
+// infinity) fixes the gap that made the earlier one useless on a Nova-like
+// family. Meaningless for a CERTIFIED polynomial (which has, at most, ONE
+// finite critical point that ever distinguishes parameter pixels -- see
+// render_parameter's own comment for why -- so there is nothing for a
+// strategy to combine) and for a non-Custom built-in RATIONAL family
+// (McMullen2/McMullen3/Newton3), which keeps using its existing single-
+// representative critical point (see Map::critical_point's own doc
+// comment) for the same reason Map::critical_point already gave: every
+// finite critical point of that SPECIFIC family shares escape/capture
+// behaviour by symmetry, so all three strategies degenerate to the
+// identical single-orbit result there. Only a genuinely multi-critical
+// Custom rational map (RationalMap::distinct_critical_points returning
+// more than one point) is where these three actually differ.
+//
+// A DELIBERATE TUNING KNOB, not a settled design choice -- exposed as an
+// app.settings.Settings field (parameter_strategy) specifically so it can
+// be compared in-app; Slowest is the current default, not a claim that it
+// is the "right" one.
+// -----------------------------------------------------------------------------
+enum class ParameterStrategy {
+    // 0 iff AT LEAST ONE free critical orbit never settles onto any
+    // complete attractor within max_iter (a genuine "still open/
+    // undetermined here" signal, the sphere-aware analog of "in the
+    // filled/connectedness set" -- matching every other mode's own "0 =
+    // filled/unresolved" convention); otherwise the SLOWEST-to-settle
+    // orbit's own smooth value -- i.e. whichever one took the longest to
+    // resolve. DEFAULT: large near the connectedness-locus boundary
+    // (where at least one critical orbit is still slowly deciding which
+    // attractor it belongs to), small deep in a region every critical
+    // orbit resolves into quickly -- the multi-critical "Mandelbrot glow"
+    // analog.
+    Slowest,
+    // The pixel is driven by whichever free critical orbit resolves
+    // FASTEST (0 only if NONE of them resolve at all) -- "how quickly
+    // does structure emerge here," rather than "is everything nice here."
+    Fastest,
+    // Track exactly ONE distinct critical point's own orbit (selected by
+    // render_parameter's own `critical_index`, into the SAME distinct_
+    // critical_points(a) ordering for every pixel -- clamped into range
+    // per pixel, since how many free critical points there are can itself
+    // vary with `a`), ignoring the rest entirely -- gives one
+    // independent, classical-Mandelbrot-style render per critical point,
+    // for a caller that wants to let the user flip between them rather
+    // than see them pre-combined.
+    PerCritical,
+};
+
+// -----------------------------------------------------------------------------
 // Render result. Row-major, row 0 at the bottom (matching Viewport::coord), so
 // callers that want image-style top-down order should flip.
 // -----------------------------------------------------------------------------
@@ -330,34 +386,68 @@ public:
     Image render_julia(const std::atomic<bool>* cancel = nullptr,
                        const std::vector<Cycle>& cycles = {}, Image* labels = nullptr) const;
 
-    // Parameter plane: each pixel is a parameter value, the orbit starts at
-    // that map's critical point. Reproduces the Mandelbrot/multibrot sets and
-    // the McMullenbrot. The bound parameter is ignored.
+    // Parameter plane: each pixel is a parameter value. The bound parameter
+    // is ignored. Reproduces the Mandelbrot/multibrot sets and the
+    // McMullenbrot. TWO PATHS, same certification dispatch as render_julia/
+    // render_greens (Map::escape_certified):
     //
-    // escape_radius-based escape-TIME, for every family alike, certified
-    // polynomial or rational -- a brief Stage 4 detour made the RATIONAL
-    // path multi-critical and escape-radius-free (classifying every
-    // critical orbit's escape to infinity instead); that answered a
-    // question -- "does the critical orbit escape to infinity" -- that
-    // isn't useful for a family whose interesting parameter structure is
-    // FINITE attracting cycles (it just ran every pixel to max_iter and
-    // returned a uniform plane), so it was retired. See Parameter_basin
-    // (render_parameter_basin) for the actual multi-critical, escape-
-    // radius-free question this mode's rational maps need answered --
-    // "how many attracting cycles does this parameter have" -- as its own
-    // dedicated mode rather than folding it back in here.
+    //   CERTIFIED POLYNOMIAL: UNCHANGED from before this milestone --
+    //   escape_radius-based escape-TIME, orbit starts at the map's own
+    //   SINGLE finite critical point (every finite critical point of a
+    //   z^d+a-shaped family coincides at 0; infinity is trivially,
+    //   uninformatively superattracting there, deliberately excluded --
+    //   see Map::critical_point's own doc comment). `strategy`/
+    //   `critical_index` are ignored entirely -- there is nothing for a
+    //   strategy to combine with only one orbit. NOTE: this mode is a
+    //   VISUALIZATION, not a set-membership computation -- unlike the
+    //   Julia SET or Green's function, which are invariants of the map
+    //   and so must never depend on escape_radius (see their own doc
+    //   comments and CLAUDE.md), the escape-TIME shading here is
+    //   explicitly an artifact of where the cutoff is drawn, the same way
+    //   classical Mandelbrot-set escape-time renders always have been.
+    //   escape_radius is a legitimate tuning knob for the POLYNOMIAL path
+    //   specifically; the milestone's own escape-radius-invariance
+    //   acceptance test applies to Julia/Green's, deliberately not here.
     //
-    // NOTE: this mode is a VISUALIZATION, not a set-membership computation
-    // -- unlike the Julia SET (render_julia) or Green's function
-    // (render_greens/render_parameter_greens), which are invariants of the
-    // MAP and so must never depend on escape_radius (see their own doc
-    // comments and CLAUDE.md), the escape-TIME shading here is explicitly
-    // an artifact of where the cutoff is drawn, the same way classical
-    // Mandelbrot-set escape-time renders always have been. escape_radius
-    // is a legitimate tuning knob for THIS mode specifically; the
-    // milestone's own escape-radius-invariance acceptance test applies to
-    // Julia/Green's, deliberately not to plain Parameter.
-    Image render_parameter(const std::atomic<bool>* cancel = nullptr) const;
+    //   RATIONAL: escape-radius-free and MULTI-critical -- retires the
+    //   PRIOR monocritical |z|>escape_radius test this path used to share
+    //   with the polynomial one. HISTORY, not assumed but confirmed by
+    //   reading it: an EARLIER multi-critical rational attempt here (the
+    //   "AllCaptured/FastestCapture/PerCritical" ParameterStrategy this
+    //   enum's own name and cases deliberately echo) was tried and
+    //   reverted, because it only ever asked "does the critical orbit
+    //   escape to infinity" -- useless for a family (Nova-like ones)
+    //   whose interesting parameter structure is FINITE attracting
+    //   cycles, which just ran every pixel to max_iter and returned a
+    //   uniform plane. THIS path fixes exactly that gap: every free
+    //   critical point at that pixel's parameter (RationalMap::
+    //   distinct_critical_points, UNFILTERED -- deliberately including
+    //   any pole-related one, unlike render_parameter_period's own
+    //   family-specific "free" subset, since a pole-related critical
+    //   orbit failing to settle is exactly as informative here as any
+    //   other) has its own orbit classified against the FULL sphere-
+    //   aware attractor set at that parameter (complete_attractors_
+    //   from_seeds -- fixed point, cycle, OR infinity, not just infinity
+    //   alone -- see that function's own doc comment), via the SAME
+    //   classify_rational_orbit smooth-chordal-rate machinery render_
+    //   julia_rational/render_greens_rational/render_parameter_greens_
+    //   rational already use (nothing bespoke here either). `strategy`
+    //   (ParameterStrategy, see its own doc comment) combines the
+    //   resulting per-critical-point smooth values into the one value
+    //   this pixel gets; `critical_index` only matters for
+    //   ParameterStrategy::PerCritical. Every strategy's own "0" case is
+    //   exactly "nothing usable to report" (no tracked critical point at
+    //   all, or -- for Slowest -- at least one that never settles at
+    //   all), matching every other mode's own "0 = filled/unresolved"
+    //   convention -- see ParameterStrategy's own doc comment for exactly
+    //   what counts as 0 under each strategy. COLORS through the SAME
+    //   color_escape_time palette/scaling pipeline the polynomial path's
+    //   own output already goes through -- no bespoke scheme, no shape
+    //   change to what this method returns (a plain Image, same as
+    //   before) -- app/session.py's own dispatch needs no changes either.
+    Image render_parameter(const std::atomic<bool>* cancel = nullptr,
+                           ParameterStrategy strategy = ParameterStrategy::Slowest,
+                           int critical_index = 0) const;
 
     // Parameter_basin: each pixel is a parameter value a; the pixel value
     // is the NUMBER OF DISTINCT ATTRACTING CYCLES the map has at that a
@@ -641,6 +731,12 @@ private:
     Image render_julia_polynomial(const std::atomic<bool>* cancel) const;
     Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
                                 const std::atomic<bool>* cancel) const;
+
+    // render_parameter's own two paths, same split rationale as render_
+    // julia's -- see render_parameter's own doc comment for what each is.
+    Image render_parameter_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_parameter_rational(ParameterStrategy strategy, int critical_index,
+                                    const std::atomic<bool>* cancel) const;
 
     // render_greens' own two paths, same split rationale as render_julia's.
     Image render_greens_polynomial(const std::atomic<bool>* cancel) const;

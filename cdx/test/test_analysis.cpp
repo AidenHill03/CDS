@@ -974,18 +974,21 @@ int main() {
               "where escape_radius is a real tuning knob, not an invariant of the map");
     }
 
-    // ---- Parameter (escape-time, restored): a rational family renders quickly again --
-    std::printf("\nParameter (escape-time, restored): a rational family is fast again "
-               "(early exit on escape), not uniform:\n");
+    // ---- Parameter (Stage 1): a rational family is sphere-aware, multi-critical, escape_radius-free --
+    std::printf("\nParameter (Stage 1): a rational family shows real detail via the complete "
+               "attractor backbone, with NO escape_radius dependence:\n");
     {
         // McMullen2 (z^2 + a/z^2): a built-in RATIONAL family (has a pole,
         // not certified) -- exactly the case whose Parameter render went
-        // uniform under the retired Stage 4 escape-to-infinity path (every
-        // pixel ran to max_iter, since McMullen2's own critical orbits
-        // don't need to reach INFINITY specifically to be "interesting" --
-        // they can settle into finite attracting cycles that the retired
-        // path had no way to report as anything but "unresolved").
-        Renderer mc(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 61},
+        // uniform under the EARLIER, reverted escape-to-infinity-only
+        // attempt (every pixel ran to max_iter, since McMullen2's own
+        // critical orbits don't need to reach INFINITY specifically to be
+        // "interesting" -- they can settle into finite attracting cycles
+        // that path had no way to report as anything but "unresolved").
+        // Stage 1 fixes exactly that gap: classification is against the
+        // FULL complete-attractor set (fixed point, cycle, OR infinity),
+        // not just infinity alone.
+        Renderer mc(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 1.0, 61},
                    RenderSettings{200, 2.0, 1e-6, 1});
         check(mc.map().escape_certified() == false,
               "sanity: McMullen2 is a built-in RATIONAL (non-certified) family");
@@ -994,24 +997,67 @@ int main() {
         bool mc_some_nonzero = false, mc_some_zero = false;
         for (double v : mc_param.data) { if (v > 0.0) mc_some_nonzero = true; else mc_some_zero = true; }
         check(mc_some_nonzero && mc_some_zero,
-              "RESTORED BEHAVIOR: McMullen2's Parameter render has BOTH escaped (nonzero) "
-              "and non-escaped (0) pixels -- a real escape-time classification, not the "
-              "retired path's uniform max_iter plane");
+              "McMullen2's Parameter render has BOTH resolved (nonzero smooth rate) and "
+              "unresolved (0) pixels -- genuine sphere-aware classification, not a uniform "
+              "plane the way the earlier infinity-only attempt produced");
 
-        // escape_radius genuinely matters again for this rational family
-        // too -- a different, real acceptance target from the retired
-        // path's escape-radius INVARIANCE (which correctly no longer
-        // applies here at all, per render_parameter's own doc comment).
-        Renderer mc_r10(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 2.0, 61},
+        bool mc_has_variety = false;
+        double first_nonzero = 0.0;
+        for (double v : mc_param.data) {
+            if (v <= 0.0) continue;
+            if (first_nonzero == 0.0) { first_nonzero = v; continue; }
+            if (v != first_nonzero) { mc_has_variety = true; break; }
+        }
+        check(mc_has_variety,
+              "...and the resolved pixels take on MORE THAN ONE smooth-rate value -- real "
+              "gradient detail, not a flat resolved/unresolved binary");
+
+        // escape_radius plays NO role in the rational path anymore -- see
+        // render_parameter's own header doc comment. Unlike the certified-
+        // polynomial case above (a legitimate visualization knob there),
+        // this is now a genuine invariance property.
+        Renderer mc_r10(Map(Family::McMullen2, Cplx(1.0, 0.0)), Viewport{{0.0, 0.0}, 1.0, 61},
                         RenderSettings{200, 10.0, 1e-6, 1});
-        bool mc_differs = false;
         const Image mc_param_r10 = mc_r10.render_parameter();
+        bool mc_differs = false;
         for (std::size_t i = 0; i < mc_param.data.size(); ++i) {
             if (mc_param.data[i] != mc_param_r10.data[i]) mc_differs = true;
         }
-        check(mc_differs,
-              "...and escape_radius genuinely changes McMullen2's Parameter render too, "
-              "the same VISUALIZATION-knob behavior as the certified-polynomial case above");
+        check(!mc_differs,
+              "RETIRES escape_radius for rational Parameter: escape_radius=2 vs "
+              "escape_radius=10 give the IDENTICAL McMullen2 Parameter render");
+    }
+
+    // ---- Parameter (Stage 1): Nova (a genuinely multi-critical Custom map) --------
+    std::printf("\nParameter (Stage 1): Nova (Custom, multi-critical) shows a smooth "
+               "gradient, not the earlier attempt's flat/categorical plane:\n");
+    {
+        RationalMap nova("nova");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        Renderer r(Map::custom(nova), Viewport{{0.0, 0.0}, 2.0, 61}, RenderSettings{150, 2.0, 1e-6, 1});
+        check(r.map().escape_certified() == false, "sanity: Nova is a rational (non-certified) map");
+
+        const Image nova_param = r.render_parameter();
+        bool some_nonzero = false, some_zero = false;
+        for (double v : nova_param.data) { if (v > 0.0) some_nonzero = true; else some_zero = true; }
+        check(some_nonzero && some_zero,
+              "Nova's Parameter render has both resolved and unresolved pixels");
+
+        std::vector<double> distinct_vals;
+        for (double v : nova_param.data) {
+            if (v <= 0.0) continue;
+            bool seen = false;
+            for (double d : distinct_vals) if (d == v) { seen = true; break; }
+            if (!seen) distinct_vals.push_back(v);
+            if (distinct_vals.size() > 5) break;
+        }
+        check(distinct_vals.size() > 5,
+              "Nova's resolved pixels take on a genuine SPREAD of smooth-rate values "
+              "(not a small handful of categorical levels) -- the multi-critical "
+              "Mandelbrot-glow gradient the earlier infinity-only attempt could not produce");
     }
 
     // ---- Parameter_basin: find_attractors_from_seeds' unresolved_count -------------

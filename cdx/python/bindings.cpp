@@ -146,6 +146,20 @@ PYBIND11_MODULE(cdx, m) {
               "Relaxed Newton of z^n-1 -- see the C++ enum's own doc comment for "
               "the closed-form critical points this generates per pixel.");
 
+    // ---- ParameterStrategy (Renderer.render_parameter's rational path) -------
+    py::enum_<ParameterStrategy>(m, "ParameterStrategy")
+        .value("Slowest", ParameterStrategy::Slowest,
+              "0 if any free critical orbit never settles, else the SLOWEST-to-"
+              "settle orbit's own smooth value -- the multi-critical 'Mandelbrot "
+              "glow' analog. Default; a tuning knob, not a settled design choice.")
+        .value("Fastest", ParameterStrategy::Fastest,
+              "0 only if none of the free critical orbits settle, else the "
+              "FASTEST-to-settle orbit's own smooth value.")
+        .value("PerCritical", ParameterStrategy::PerCritical,
+              "Tracks exactly one distinct critical point's own orbit, selected "
+              "by critical_index into distinct_critical_points(a)'s own ordering "
+              "(clamped into range per pixel), ignoring the rest.");
+
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
         .def(py::init<>())
@@ -535,24 +549,31 @@ PYBIND11_MODULE(cdx, m) {
              "result should be discarded, not displayed.")
 
         .def("render_parameter",
-             [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
+             [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
+                ParameterStrategy strategy, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
                  py::array_t<double> arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter(cp);
+                     Image img = r.render_parameter(cp, strategy, critical_index);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
                  }
                  return arr;
              },
-             py::arg("cancel") = nullptr,
-             "Parameter plane (Mandelbrot / multibrot / McMullenbrot) -- escape-time, "
-             "for every family alike (see Renderer::render_parameter's own doc "
-             "comment for why this mode stays escape_radius-governed rather than "
-             "escape-radius-free/sphere-aware the way Julia/Green's are: it's a "
-             "VISUALIZATION, and escape_radius is a real tuning knob here, not an "
-             "invariant of the map).")
+             py::arg("cancel") = nullptr, py::arg("strategy") = ParameterStrategy::Slowest,
+             py::arg("critical_index") = 0,
+             "Parameter plane (Mandelbrot / multibrot / McMullenbrot / a Custom "
+             "rational family). TWO PATHS (see Renderer::render_parameter's own "
+             "doc comment): a CERTIFIED polynomial keeps the pre-Stage-1 escape-"
+             "time form, escape_radius-governed (a VISUALIZATION knob, not an "
+             "invariant of the map) -- `strategy`/`critical_index` are ignored. A "
+             "RATIONAL map (has poles) is sphere-aware and multi-critical: EVERY "
+             "free critical point is classified against the complete attractor "
+             "set (fixed point, cycle, or infinity), and `strategy` (a "
+             "ParameterStrategy) combines their smooth chordal rates into the "
+             "one value each pixel gets; escape_radius plays no role there at "
+             "all. `critical_index` only matters for ParameterStrategy.PerCritical.")
 
         .def("render_parameter_basin",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {

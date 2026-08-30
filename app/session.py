@@ -140,11 +140,26 @@ def _greens_potential(potential: str) -> cdx.GreensPotential:
             else cdx.GreensPotential.Pragmatic)
 
 
+def _parameter_strategy(strategy: str) -> cdx.ParameterStrategy:
+    """Translates app.settings.Settings.parameter_strategy's plain string
+    (see its own FieldSpec -- "slowest"/"fastest"/"per_critical", same
+    string-typed-setting convention as greens_potential above) into the cdx
+    enum render_parameter's rational path actually takes.
+    """
+    if strategy == "fastest":
+        return cdx.ParameterStrategy.Fastest
+    if strategy == "per_critical":
+        return cdx.ParameterStrategy.PerCritical
+    return cdx.ParameterStrategy.Slowest
+
+
 def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.Viewport,
                settings: cdx.RenderSettings, mode: str,
                cancel: cdx.CancelToken | None = None,
                cache: RenderCache | None = None,
-               potential: str = "pragmatic"):
+               potential: str = "pragmatic",
+               strategy: str = "slowest",
+               critical_index: int = 0):
     """Renders `rational_map` at `param` over `viewport`/`settings`, in the
     given mode. A free function rather than a Session method, and taking
     every value explicitly rather than reading them off a Session, so a
@@ -170,6 +185,15 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     numerically -- see cdx.GreensPotential's own doc comment). Ignored
     entirely for a certified polynomial (the two already coincide there)
     and for every other mode.
+
+    `strategy`/`critical_index` (Stage 1) select how "parameter"'s own
+    rational path combines multiple free critical orbits' smooth chordal
+    rates into one pixel value -- "slowest" (default), "fastest", or
+    "per_critical" (see app.settings.PARAMETER_STRATEGY_CHOICES and
+    cdx.ParameterStrategy's own doc comment); `critical_index` only matters
+    for "per_critical". Ignored entirely for a certified polynomial (which
+    has only one finite critical point to begin with) and for every other
+    mode.
 
     `cache`, if given, is consulted BEFORE rendering anything (a hit skips
     computation entirely, including find_attractors for basin mode) and
@@ -270,7 +294,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     if cache is not None:
         key = make_key(rational_map.serialize(), param, mode, viewport.center, viewport.scale,
                        viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol,
-                       potential if mode in ("greens", "parameter_greens") else None)
+                       potential if mode in ("greens", "parameter_greens") else None,
+                       (strategy, critical_index) if mode == "parameter" else None)
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -297,7 +322,7 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
             values, labels = renderer.render_julia(cancel, cycles)
             array = np.stack([values, labels])
     elif mode == "parameter":
-        array = renderer.render_parameter(cancel)
+        array = renderer.render_parameter(cancel, _parameter_strategy(strategy), critical_index)
     elif mode == "basin":
         # complete_attractors (NOT find_attractors) -- see its own C++ doc
         # comment: the plain critical-seeded search is not a completeness
@@ -433,7 +458,9 @@ class Session:
         """
         return render_map(self.map, self.param, viewport, self.render_settings,
                           render_mode, cancel=cancel, cache=self.cache,
-                          potential=self._settings.greens_potential)
+                          potential=self._settings.greens_potential,
+                          strategy=self._settings.parameter_strategy,
+                          critical_index=self._settings.parameter_critical_index)
 
     # ---- equation editing (Stage 4 of the P/Q milestone) ------------------------
     # The equation panel's own "Apply"/"Add Pole"/"Add Zero" actions, each a
