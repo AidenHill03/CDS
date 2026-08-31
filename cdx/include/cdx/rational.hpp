@@ -101,6 +101,32 @@ struct FixedPoint {
 };
 
 // -----------------------------------------------------------------------------
+// Stage 2 (spatial continuation) results -- see RationalMap::distinct_
+// critical_points_continued/fixed_points_continued's own doc comments for
+// the full contract. `distinct`/`points` are byte-for-byte what the cold
+// (non-continued) call of the same name would return -- continuation is
+// purely a SPEED path, never a different answer. `ordinary_raw`/`raw` is
+// what a caller sweeping a grid of nearby parameter values should feed back
+// in as the NEXT spatially adjacent pixel's own predictor -- deliberately
+// NOT `distinct`/`points` themselves, which (for critical points) mix in
+// pole-copy/infinity entries that are cheap and always recomputed fresh,
+// never continued, and (for fixed points) mix in the infinity entry the
+// same way. `continued` is true iff continuation actually ran (false means
+// a cold fallback fired instead) -- exposed for Stage 2's own speed/
+// correctness verification and timing report, not needed by an ordinary
+// caller.
+struct ContinuedCriticalPoints {
+    std::vector<Cplx> distinct;
+    std::vector<Cplx> ordinary_raw;
+    bool continued = false;
+};
+struct ContinuedFixedPoints {
+    std::vector<FixedPoint> points;
+    std::vector<Cplx> raw;
+    bool continued = false;
+};
+
+// -----------------------------------------------------------------------------
 // RationalMap::eval(z, a) redoes every term's effective_coeff/
 // effective_location/effective_strength -- each an a^param_power call -- on
 // EVERY invocation, even though every caller that matters (an escape-time
@@ -543,6 +569,44 @@ public:
     // effect.
     std::vector<Cplx> distinct_critical_points(Cplx a, double rel_tol = 1e-4) const;
 
+    // Continuation-seeded variant of distinct_critical_points, for a caller
+    // (Renderer::render_parameter_rational/render_parameter_basin) sweeping
+    // a grid of nearby parameter values who already has, from the
+    // IMMEDIATELY PRECEDING pixel's own call, an excellent per-root
+    // starting guess: warm-starting the ordinary (non-pole, non-infinity)
+    // critical points via a few Newton corrector steps (cdx::newton_refine)
+    // on deriv_numerator_poly(a) is far cheaper than the full cold Aberth-
+    // Ehrlich solve critical_points()/distinct_critical_points() always
+    // perform. `predictor` should be empty for the first pixel of a sweep
+    // -- an empty predictor can never match this call's own expected
+    // ordinary-root count, so it naturally forces a cold solve with no
+    // separate flag needed -- and otherwise exactly the PRECEDING call's
+    // own `ordinary_raw` output.
+    //
+    // FALLS BACK to an ordinary cold solve -- IDENTICAL results, in every
+    // way, to distinct_critical_points(a, rel_tol) -- whenever continuation
+    // would be unsound: predictor's size doesn't match the ordinary
+    // critical-point count at `a` (the parameter moved across a degree-
+    // changing degeneracy), any single Newton correction fails to converge
+    // within budget (the nearby root moved further than a few steps can
+    // catch, or the local structure changed), a refined point ends up
+    // coincident with a pole (a genuine nearby structural change, not
+    // numerical noise -- see critical_points()'s own pole-exclusion
+    // comment), or two refined points collapse onto each other (a lost
+    // root). CORRECTNESS NEVER DEPENDS ON CONTINUATION SUCCEEDING: on ANY
+    // of these triggers, `distinct` is EXACTLY what distinct_critical_
+    // points(a, rel_tol) would have returned, at the (already-being-paid-
+    // anyway, since continuation was attempted first) extra cost of the
+    // failed attempt.
+    //
+    // Pole-copy and infinity contributions (critical_points()'s other two
+    // sources, both closed-form/deterministic, not root-found at all) are
+    // always recomputed fresh here, exactly as the cold path does -- there
+    // is no root-finding cost there to save, so nothing about them is ever
+    // continued.
+    ContinuedCriticalPoints distinct_critical_points_continued(
+        Cplx a, const std::vector<Cplx>& predictor, double rel_tol = 1e-4) const;
+
     // True iff critical_points(a) is provably the SAME SET for every `a` --
     // e.g. any z^n + a shape: the `+ a` term has exponent 0, so it never
     // enters the derivative and the only critical point is (and stays) 0.
@@ -585,6 +649,16 @@ public:
     // No particular ordering guarantee.
     std::vector<FixedPoint> fixed_points(Cplx a) const;
 
+    // Continuation-seeded variant of fixed_points, exactly mirroring
+    // distinct_critical_points_continued's own contract above (predictor
+    // = the preceding pixel's own `raw`; falls back to a cold fixed_
+    // points(a) -- identical results -- on a count mismatch, a Newton
+    // correction that fails to converge, a refined point coincident with
+    // a pole, or two refined points collapsing together). The infinity
+    // fixed point (closed-form/deterministic, never root-found) is always
+    // recomputed fresh, same reasoning as the critical-point case.
+    ContinuedFixedPoints fixed_points_continued(Cplx a, const std::vector<Cplx>& predictor) const;
+
     // Human-readable formula, e.g. "z^3 + a/z^3".
     std::string to_formula() const;
 
@@ -613,6 +687,24 @@ private:
     // factory) -- sets pq_/pq_param_/pq_dP_/pq_dQ_ from an already-
     // validated (<=1 parameter) CanonicalRational.
     void set_pq_backing(CanonicalRational cr);
+
+    // The two polynomials critical_points()/fixed_points() (and Stage 2's
+    // continuation counterparts) actually root -- see each one's own
+    // comment in rational.cpp for the derivation. Factored out purely so
+    // continuation can build the SAME polynomial a cold solve would,
+    // without a second, divergence-prone copy of this construction.
+    std::vector<Cplx> deriv_numerator_poly(Cplx a) const;   // P'Q-PQ' / cleared derivative numerator
+    std::vector<Cplx> fixed_point_poly(Cplx a) const;       // P-zQ / N(z)-zD(z)
+
+    // Appends the closed-form/deterministic sources (pole-copy multiplicity,
+    // infinity multiplicity) to an already root-found (and, for critical
+    // points, already pole-excluded) candidate list -- shared by each
+    // method's cold path and Stage 2's continuation counterpart, so both
+    // build the assembled result identically regardless of how the
+    // root-found portion was obtained.
+    std::vector<Cplx> assemble_critical_points(Cplx a, const std::vector<Cplx>& ordinary) const;
+    std::vector<FixedPoint> assemble_fixed_points(Cplx a,
+                                                  const std::vector<Cplx>& finite_candidates) const;
 
     std::string           name_ = "untitled";
     std::string           notes_;

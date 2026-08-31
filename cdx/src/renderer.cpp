@@ -815,16 +815,37 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
     // parameter_basin's own identical choice -- see that method's comment.
     const FindAttractorsOptions opts;
 
+    // Stage 2 (spatial continuation): within one column, rows are already
+    // processed strictly sequentially by a single thread (parallel_columns
+    // parallelizes ACROSS columns, not within one -- see its own comment),
+    // so the previous row's own critical/fixed points are an excellent
+    // warm-start predictor for this row's. Reset to empty at the top of
+    // EVERY column -- an empty predictor can never match a nonzero
+    // expected root count, so row 0 of each column naturally cold-solves
+    // with no separate flag needed (see RationalMap::distinct_critical_
+    // points_continued/fixed_points_continued's own doc comments).
     parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        std::vector<Cplx> prev_fp_raw;
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
 
             std::vector<Cplx> crit_pts;
-            if (custom) crit_pts = cp_fixed ? fixed_crit_pts : custom->distinct_critical_points(p);
-            else        crit_pts.push_back(map_.critical_point_at(p));
+            if (custom && cp_fixed) {
+                crit_pts = fixed_crit_pts;
+            } else if (custom) {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                crit_pts = cc.distinct;
+                prev_ordinary = cc.ordinary_raw;
+            } else {
+                crit_pts.push_back(map_.critical_point_at(p));
+            }
 
-            const std::vector<Cycle> cycles =
-                complete_attractors_from_seeds(crit_pts, *discovery_map, p, opts);
+            std::vector<Cplx> fp_raw_next;
+            const std::vector<Cycle> cycles = complete_attractors_from_seeds(
+                crit_pts, *discovery_map, p, opts, nullptr, nullptr, &prev_fp_raw, &fp_raw_next);
+            prev_fp_raw = std::move(fp_raw_next);
 
             std::vector<double> ar, ai;
             std::vector<int>    aid;
@@ -948,16 +969,30 @@ Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* u
     // discovery, not a rendering-speed knob to retune per mode.
     const FindAttractorsOptions opts;
 
+    // Stage 2 (spatial continuation) -- see render_parameter_rational's own
+    // identical comment for why the per-column reset is correct here.
     parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        std::vector<Cplx> prev_fp_raw;
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
-            const std::vector<Cplx> crit_pts =
-                cp_fixed ? fixed_crit_pts : custom->distinct_critical_points(p);
+
+            std::vector<Cplx> crit_pts;
+            if (cp_fixed) {
+                crit_pts = fixed_crit_pts;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                crit_pts = cc.distinct;
+                prev_ordinary = cc.ordinary_raw;
+            }
 
             int unresolved_n = 0;
             int certain_n = 0;
+            std::vector<Cplx> fp_raw_next;
             const std::vector<Cycle> cycles = complete_attractors_from_seeds(
-                crit_pts, *custom, p, opts, &unresolved_n, &certain_n);
+                crit_pts, *custom, p, opts, &unresolved_n, &certain_n, &prev_fp_raw, &fp_raw_next);
+            prev_fp_raw = std::move(fp_raw_next);
 
             img.at(col, row) = static_cast<double>(cycles.size());
             if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);

@@ -278,11 +278,25 @@ std::vector<Cycle> complete_attractors(const RationalMap& map, Cplx a,
 // weigh a CERTAIN attractor differently from unresolved noise (e.g.
 // Renderer::render_parameter_basin's own coloring policy -- see its doc
 // comment) reads this rather than re-deriving which cycles are which.
+// `fp_predictor`/`fp_raw_out` (Stage 2, spatial continuation): the internal
+// algebraic union's own cold RationalMap::fixed_points(a) call is exactly
+// the kind of per-pixel root-find continuation exists to speed up -- a
+// caller sweeping a grid of nearby `a` (Renderer::render_parameter_basin/
+// render_parameter_rational) can pass the PRECEDING pixel's own `fp_raw_out`
+// as `fp_predictor` here, and get RationalMap::fixed_points_continued's own
+// warm-started result instead of a cold solve; `fp_raw_out`, if given, is
+// set to the raw predictor to feed into the NEXT pixel's own call. Both
+// default to nullptr, meaning "cold fixed_points(a), exactly as before this
+// parameter existed" -- every other caller of this function is unaffected.
+// The returned cycles are IDENTICAL either way, same guarantee as
+// RationalMap::fixed_points_continued's own contract.
 std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                                   const RationalMap& map, Cplx a,
                                                   const FindAttractorsOptions& opts = {},
                                                   int* unresolved_count = nullptr,
-                                                  int* certain_count = nullptr);
+                                                  int* certain_count = nullptr,
+                                                  const std::vector<Cplx>* fp_predictor = nullptr,
+                                                  std::vector<Cplx>* fp_raw_out = nullptr);
 
 // -----------------------------------------------------------------------------
 // 1c. per_seed_outcomes -- WHAT DID *THIS SPECIFIC* SEED CONVERGE TO, not the

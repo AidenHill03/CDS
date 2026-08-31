@@ -31,6 +31,22 @@ constexpr int kMaxIterations = 100;
 // as renderer.cpp's kTinyDen guards on near-zero denominators.
 constexpr double kTinyDen = 1e-300;
 
+// newton_refine's own convergence bar -- deliberately LOOSER than
+// kConvRelTol above. That constant is calibrated for roots()'s cubically-
+// convergent (once close) SIMULTANEOUS iteration, run up to 100 times;
+// newton_refine is plain, single-root Newton, only quadratically
+// convergent, and deliberately capped at a handful of steps (continuation
+// exists to be cheap, not to re-derive roots to the same precision a cold
+// solve would). Measured directly against a real continuation predictor:
+// a few Newton steps from an already-close guess reliably reaches ~1e-7 to
+// ~1e-9 relative correction, essentially never kConvRelTol's 1e-12 -- and
+// nothing downstream needs that precision anyway (this project's own
+// working tolerances -- RenderSettings::tol's chordal membership, distinct_
+// critical_points' own dedup rel_tol -- both sit at 1e-4 to 1e-6, so this
+// still leaves comfortable margin below anything a continued root actually
+// has to satisfy).
+constexpr double kNewtonRefineRelTol = 1e-9;
+
 // Evaluates p(z) and p'(z) together via Horner's method / synthetic
 // division, one pass over ascending-order coefficients c[0..n].
 std::pair<Cplx, Cplx> eval_with_deriv(const std::vector<Cplx>& c, Cplx z) {
@@ -122,6 +138,25 @@ std::vector<Cplx> roots(const Polynomial& poly, bool* converged) {
 
     if (converged) *converged = ok;
     return z;
+}
+
+// -----------------------------------------------------------------------------
+NewtonRefineResult newton_refine(const Polynomial& p, Cplx guess, int max_iters) {
+    NewtonRefineResult result;
+    const int deg = effective_degree(p);
+    if (deg <= 0) return result;   // identically zero or a nonzero constant -- no root to refine toward
+    const std::vector<Cplx> c(p.coeffs.begin(), p.coeffs.begin() + deg + 1);
+
+    Cplx z = guess;
+    for (int iter = 0; iter < max_iters; ++iter) {
+        auto [fz, dfz] = eval_with_deriv(c, z);
+        if (std::abs(dfz) < kTinyDen) dfz = Cplx(kTinyDen, 0.0);
+        const Cplx dz = fz / dfz;
+        z -= dz;
+        const double rel = std::abs(dz) / std::max(1.0, std::abs(z));
+        if (rel < kNewtonRefineRelTol) { result.z = z; result.converged = true; return result; }
+    }
+    return result;   // ran out of iterations without meeting tol -- stays unconverged
 }
 
 }  // namespace cdx

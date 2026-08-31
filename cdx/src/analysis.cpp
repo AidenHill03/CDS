@@ -534,12 +534,23 @@ bool already_represented(const std::vector<Cycle>& cycles, Cplx point, double to
 // actually appended (excludes ones already_represented rejected) -- what
 // complete_attractors_from_seeds' own `certain_count` reports.
 int union_in_attracting_fixed_points(std::vector<Cycle>& cycles, const RationalMap& map, Cplx a,
-                                     double dedupe_tol) {
+                                     double dedupe_tol,
+                                     const std::vector<Cplx>* fp_predictor = nullptr,
+                                     std::vector<Cplx>* fp_raw_out = nullptr) {
     int next_id = 1;
     for (const auto& c : cycles) next_id = std::max(next_id, c.id + 1);
 
+    std::vector<FixedPoint> fps;
+    if (fp_predictor) {
+        const ContinuedFixedPoints cont = map.fixed_points_continued(a, *fp_predictor);
+        fps = cont.points;
+        if (fp_raw_out) *fp_raw_out = cont.raw;
+    } else {
+        fps = map.fixed_points(a);
+    }
+
     int n_added = 0;
-    for (const FixedPoint& fp : map.fixed_points(a)) {
+    for (const FixedPoint& fp : fps) {
         if (!(std::abs(fp.multiplier) < 1.0)) continue;   // not attracting
         if (already_represented(cycles, fp.point, dedupe_tol)) continue;
         Cycle c;
@@ -577,14 +588,17 @@ std::vector<Cycle> complete_attractors_from_seeds(const std::vector<Cplx>& seeds
                                                   const RationalMap& map, Cplx a,
                                                   const FindAttractorsOptions& opts,
                                                   int* unresolved_count,
-                                                  int* certain_count) {
+                                                  int* certain_count,
+                                                  const std::vector<Cplx>* fp_predictor,
+                                                  std::vector<Cplx>* fp_raw_out) {
     std::vector<Cplx> unresolved_endpoints;
     std::vector<Cycle> cycles = find_attractors_from_seeds(
         seeds, map, a, opts, unresolved_count,
         unresolved_count ? &unresolved_endpoints : nullptr);
 
     const double dedupe_tol = opts.tol * 1e3;
-    const int n_injected = union_in_attracting_fixed_points(cycles, map, a, dedupe_tol);
+    const int n_injected =
+        union_in_attracting_fixed_points(cycles, map, a, dedupe_tol, fp_predictor, fp_raw_out);
     if (certain_count) *certain_count = n_injected;
 
     // Reconcile: an "unresolved" orbit whose own last live point actually

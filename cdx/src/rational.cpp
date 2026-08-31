@@ -205,6 +205,63 @@ int vanishing_order(std::vector<Cplx> c, Cplx p) {
 // the same point" thresholds at the same natural scale for this project.
 constexpr double kPoleExclRelTol = 1e-6;
 
+// Shared by critical_points()/fixed_points()'s own cold pole-exclusion
+// filtering AND continuation's success path (Stage 2) -- one place, so a
+// point discovered via cdx::newton_refine is held to EXACTLY the same
+// "does this coincide with a pole" standard as one discovered via cdx::
+// roots(), not a second hand-copied check that could drift out of sync.
+std::vector<Cplx> exclude_pole_coincident(const std::vector<Cplx>& candidates,
+                                          const std::vector<Cplx>& poles) {
+    std::vector<Cplx> out;
+    for (Cplx z : candidates) {
+        bool at_pole = false;
+        for (Cplx p : poles) {
+            const double scale = std::max(1.0, std::abs(p));
+            if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
+        }
+        if (!at_pole) out.push_back(z);
+    }
+    return out;
+}
+
+// Continuation's own "did a root collapse onto another one" guard (Stage
+// 2) -- two refined points landing within rel_tol of each other means a
+// predicted root was actually double-counted or two genuine roots merged
+// between the predictor's own pixel and this one (a real structural event
+// near a bifurcation/discriminant locus), either way something continuation
+// cannot safely report as-is; see distinct_critical_points_continued's own
+// doc comment for why this triggers a full cold fallback rather than a
+// silent dedup the way distinct_critical_points() itself would.
+bool has_collapsed_pair(const std::vector<Cplx>& pts, double rel_tol) {
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        for (std::size_t j = i + 1; j < pts.size(); ++j) {
+            const double scale = std::max(1.0, std::max(std::abs(pts[i]), std::abs(pts[j])));
+            if (std::abs(pts[i] - pts[j]) < rel_tol * scale) return true;
+        }
+    }
+    return false;
+}
+
+// distinct_critical_points()'s own dedup loop, shared with Stage 2's
+// continuation entry point so both build the "distinct" list the exact
+// same way regardless of how the underlying candidates were found.
+std::vector<Cplx> dedup_points(const std::vector<Cplx>& all, double rel_tol) {
+    std::vector<Cplx> out;
+    for (Cplx z : all) {
+        const bool z_inf = std::isinf(z.real()) || std::isinf(z.imag());
+        bool found = false;
+        for (Cplx existing : out) {
+            const bool existing_inf = std::isinf(existing.real()) || std::isinf(existing.imag());
+            if (z_inf != existing_inf) continue;   // one finite, one infinite: distinct
+            if (z_inf) { found = true; break; }     // both infinite: the same point
+            const double scale = std::max(1.0, std::max(std::abs(z), std::abs(existing)));
+            if (std::abs(z - existing) < rel_tol * scale) { found = true; break; }
+        }
+        if (!found) out.push_back(z);
+    }
+    return out;
+}
+
 Cplx ipow(Cplx b, int n) {
     if (n == 0) return Cplx(1.0, 0.0);
     const bool inv = n < 0;
@@ -715,32 +772,55 @@ std::vector<int> RationalMap::pole_orders(Cplx a) const {
     return out;
 }
 
-std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
+// P'Q - PQ' (pq_-backed) or the term-based derivative's cleared numerator
+// -- the ONE polynomial whose roots are the ordinary (non-pole,
+// non-infinity) critical points at `a`. Factored out of critical_points()
+// so Stage 2's distinct_critical_points_continued can build the SAME
+// polynomial a continuation attempt needs to Newton-refine against,
+// without duplicating this construction a second time.
+std::vector<Cplx> RationalMap::deriv_numerator_poly(Cplx a) const {
     if (pq_) {
         const auto params = pq_binding(pq_param_, a);
         const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
         const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
         const std::vector<Cplx> dP = eval_coeffs(pq_dP_, params);
         const std::vector<Cplx> dQ = eval_coeffs(pq_dQ_, params);
-        const std::vector<Cplx> poles = pole_locations(a);
-        std::vector<Cplx> out;
+        return poly_add(poly_mul(dP, Q), poly_negate(poly_mul(P, dQ)));
+    }
 
-        // ---- ordinary critical points: zeros of P'Q - PQ', away from poles --
-        // No "clear denominators" step needed -- P and Q already ARE the
-        // numerator/denominator, not a term list to combine.
-        {
-            const std::vector<Cplx> deriv_num =
-                poly_add(poly_mul(dP, Q), poly_negate(poly_mul(P, dQ)));
-            const std::vector<Cplx> candidates = roots(Polynomial{deriv_num});
-            for (Cplx z : candidates) {
-                bool at_pole = false;
-                for (Cplx p : poles) {
-                    const double scale = std::max(1.0, std::abs(p));
-                    if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
-                }
-                if (!at_pole) out.push_back(z);
-            }
-        }
+    // Transform the term lists into the derivative's: d/dz[c z^e] = c e
+    // z^(e-1); d/dz[s (z-p)^-m] = -m s (z-p)^-(m+1). Same shape deriv() uses.
+    std::vector<Monomial> dpolys;
+    for (const auto& t : poly_) {
+        if (!t.enabled || t.exponent == 0) continue;
+        dpolys.push_back({t.effective_coeff(a) * static_cast<double>(t.exponent),
+                          t.exponent - 1});
+    }
+    std::vector<PoleFactor> dpoles;
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        dpoles.push_back({t.effective_location(a), t.order + 1,
+                          -static_cast<double>(t.order) * t.effective_strength(a)});
+    }
+    const ClearedFraction dfrac = clear_denominators(dpolys, dpoles);
+    return dfrac.numerator;
+}
+
+// Appends the pole-copy and infinity contributions to `ordinary` (the
+// already-found, already-pole-excluded zeros of deriv_numerator_poly(a)) --
+// both closed-form/deterministic, never root-found, so both the cold
+// critical_points() path and Stage 2's continuation path recompute them
+// fresh every call and share this one assembly step rather than each
+// re-deriving pole/infinity multiplicity bookkeeping independently.
+std::vector<Cplx> RationalMap::assemble_critical_points(Cplx a,
+                                                        const std::vector<Cplx>& ordinary) const {
+    std::vector<Cplx> out = ordinary;
+    const std::vector<Cplx> poles = pole_locations(a);
+
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
 
         // ---- each pole of TRUE local order m contributes multiplicity m-1 --
         for (Cplx p : poles) {
@@ -760,40 +840,7 @@ std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
                 for (int k = 1; k < diff; ++k) out.push_back(infinity);
             }
         }
-
         return out;
-    }
-
-    const std::vector<Cplx> poles = pole_locations(a);
-    std::vector<Cplx> out;
-
-    // ---- ordinary critical points: zeros of the derivative, away from any pole ----
-    // Transform the term lists into the derivative's: d/dz[c z^e] = c e
-    // z^(e-1); d/dz[s (z-p)^-m] = -m s (z-p)^-(m+1). Same shape deriv() uses.
-    {
-        std::vector<Monomial> dpolys;
-        for (const auto& t : poly_) {
-            if (!t.enabled || t.exponent == 0) continue;
-            dpolys.push_back({t.effective_coeff(a) * static_cast<double>(t.exponent),
-                              t.exponent - 1});
-        }
-        std::vector<PoleFactor> dpoles;
-        for (const auto& t : pole_) {
-            if (!t.enabled) continue;
-            dpoles.push_back({t.effective_location(a), t.order + 1,
-                              -static_cast<double>(t.order) * t.effective_strength(a)});
-        }
-        const ClearedFraction dfrac = clear_denominators(dpolys, dpoles);
-        const std::vector<Cplx> candidates = roots(Polynomial{dfrac.numerator});
-
-        for (Cplx z : candidates) {
-            bool at_pole = false;
-            for (Cplx p : poles) {
-                const double scale = std::max(1.0, std::abs(p));
-                if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
-            }
-            if (!at_pole) out.push_back(z);
-        }
     }
 
     // R's own numerator/denominator (not the derivative's) drive both
@@ -831,22 +878,54 @@ std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
     return out;
 }
 
+std::vector<Cplx> RationalMap::critical_points(Cplx a) const {
+    const std::vector<Cplx> poles = pole_locations(a);
+    const std::vector<Cplx> candidates = roots(Polynomial{deriv_numerator_poly(a)});
+    return assemble_critical_points(a, exclude_pole_coincident(candidates, poles));
+}
+
 std::vector<Cplx> RationalMap::distinct_critical_points(Cplx a, double rel_tol) const {
-    const std::vector<Cplx> all = critical_points(a);
-    std::vector<Cplx> out;
-    for (Cplx z : all) {
-        const bool z_inf = std::isinf(z.real()) || std::isinf(z.imag());
-        bool found = false;
-        for (Cplx existing : out) {
-            const bool existing_inf = std::isinf(existing.real()) || std::isinf(existing.imag());
-            if (z_inf != existing_inf) continue;   // one finite, one infinite: distinct
-            if (z_inf) { found = true; break; }     // both infinite: the same point
-            const double scale = std::max(1.0, std::max(std::abs(z), std::abs(existing)));
-            if (std::abs(z - existing) < rel_tol * scale) { found = true; break; }
-        }
-        if (!found) out.push_back(z);
+    return dedup_points(critical_points(a), rel_tol);
+}
+
+// -----------------------------------------------------------------------------
+// Stage 2: spatial continuation.
+// -----------------------------------------------------------------------------
+ContinuedCriticalPoints RationalMap::distinct_critical_points_continued(
+    Cplx a, const std::vector<Cplx>& predictor, double rel_tol) const {
+    constexpr double kCollapseRelTol = 1e-9;   // "did two refined roots merge" -- a tight,
+                                               // numerical-noise-only tolerance, deliberately
+                                               // NOT rel_tol (distinct_critical_points' own
+                                               // dedup radius, which is meant to be loose
+                                               // enough to catch a genuine multiple root)
+
+    const std::vector<Cplx> deriv_num = deriv_numerator_poly(a);
+    const Polynomial deriv_poly{deriv_num};
+    const int expected_n = effective_degree(deriv_poly);
+
+    auto cold = [&]() -> ContinuedCriticalPoints {
+        const std::vector<Cplx> ordinary =
+            expected_n <= 0 ? std::vector<Cplx>{}
+                            : exclude_pole_coincident(roots(deriv_poly), pole_locations(a));
+        return {dedup_points(assemble_critical_points(a, ordinary), rel_tol), ordinary, false};
+    };
+
+    if (expected_n <= 0 || static_cast<int>(predictor.size()) != expected_n) return cold();
+
+    std::vector<Cplx> refined;
+    refined.reserve(predictor.size());
+    for (Cplx guess : predictor) {
+        const NewtonRefineResult r = newton_refine(deriv_poly, guess);
+        if (!r.converged) return cold();
+        refined.push_back(r.z);
     }
-    return out;
+    if (has_collapsed_pair(refined, kCollapseRelTol)) return cold();
+
+    const std::vector<Cplx> poles = pole_locations(a);
+    const std::vector<Cplx> surviving = exclude_pole_coincident(refined, poles);
+    if (surviving.size() != refined.size()) return cold();   // a refined root landed on a pole
+
+    return {dedup_points(assemble_critical_points(a, refined), rel_tol), refined, true};
 }
 
 bool RationalMap::critical_points_constant() const {
@@ -886,27 +965,44 @@ bool RationalMap::critical_points_constant() const {
     return true;
 }
 
-std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
+// P(z) - z*Q(z) (pq_-backed) or N(z) - z*D(z) after clearing denominators
+// (term-based) -- the ONE polynomial whose roots are the finite fixed-point
+// candidates at `a`. Factored out of fixed_points() for the same reason as
+// deriv_numerator_poly above: Stage 2's fixed_points_continued needs the
+// SAME polynomial to Newton-refine against.
+std::vector<Cplx> RationalMap::fixed_point_poly(Cplx a) const {
     if (pq_) {
         const auto params = pq_binding(pq_param_, a);
         const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
         const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+        return poly_add(P, poly_negate(poly_shift(Q, 1)));
+    }
+    const ClearedFraction frac = own_fraction(poly_, pole_, a);
+    return poly_add(frac.numerator, poly_negate(poly_shift(frac.denominator, 1)));
+}
 
-        // R(z) == z  <=>  P(z) - z*Q(z) == 0
-        const std::vector<Cplx> fixed_poly = poly_add(P, poly_negate(poly_shift(Q, 1)));
-        const std::vector<Cplx> candidates = roots(Polynomial{fixed_poly});
+// Appends {z, deriv(z,a)} for each already-pole-excluded finite candidate,
+// then the infinity fixed point (closed-form/deterministic, never root-
+// found) when R(infinity) == infinity -- shared by the cold fixed_points()
+// path and Stage 2's fixed_points_continued for the same reason
+// assemble_critical_points is shared above.
+std::vector<FixedPoint> RationalMap::assemble_fixed_points(
+    Cplx a, const std::vector<Cplx>& finite_candidates) const {
+    std::vector<FixedPoint> out;
+    for (Cplx z : finite_candidates) out.push_back({z, deriv(z, a)});
 
-        const std::vector<Cplx> poles = pole_locations(a);
-        std::vector<FixedPoint> out;
-        for (Cplx z : candidates) {
-            bool at_pole = false;
-            for (Cplx p : poles) {
-                const double scale = std::max(1.0, std::abs(p));
-                if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
-            }
-            if (!at_pole) out.push_back({z, deriv(z, a)});
-        }
-
+    // Infinity is fixed iff R(infinity) == infinity, i.e. the numerator
+    // degree p exceeds the denominator degree q after clearing
+    // denominators. Its multiplier comes from the w=1/z chart: writing
+    // R(z) ~ (N_lead/D_lead) z^(p-q) for large z, R~(w) = 1/R(1/w) ~
+    // (D_lead/N_lead) w^(p-q), so R~'(0) is 0 when p-q >= 2 (matching
+    // critical_points()'s infinity rule -- consistent, since a fixed point
+    // with multiplier 0 is by definition also critical) and D_lead/N_lead
+    // when p-q == 1 (an ordinary, non-critical fixed point at infinity).
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        const std::vector<Cplx> P = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
         const int p_deg = effective_degree(Polynomial{P});
         const int q_deg = effective_degree(Polynomial{Q});
         if (p_deg > q_deg) {
@@ -920,36 +1016,6 @@ std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
     }
 
     const ClearedFraction frac = own_fraction(poly_, pole_, a);
-
-    // R(z) == z  <=>  N(z) - z*D(z) == 0
-    const std::vector<Cplx> fixed_poly =
-        poly_add(frac.numerator, poly_negate(poly_shift(frac.denominator, 1)));
-    const std::vector<Cplx> candidates = roots(Polynomial{fixed_poly});
-
-    // Same reasoning as critical_points()'s pole exclusion: an unreduced
-    // denominator (redundant same-location terms) can make a genuine pole
-    // look, algebraically, like it solves N(z)-zD(z)=0 too. A true pole is
-    // never actually a fixed point (R is not defined there), so filter it
-    // out the same way.
-    const std::vector<Cplx> poles = pole_locations(a);
-    std::vector<FixedPoint> out;
-    for (Cplx z : candidates) {
-        bool at_pole = false;
-        for (Cplx p : poles) {
-            const double scale = std::max(1.0, std::abs(p));
-            if (std::abs(z - p) < kPoleExclRelTol * scale) { at_pole = true; break; }
-        }
-        if (!at_pole) out.push_back({z, deriv(z, a)});
-    }
-
-    // Infinity is fixed iff R(infinity) == infinity, i.e. the numerator
-    // degree p exceeds the denominator degree q after clearing
-    // denominators. Its multiplier comes from the w=1/z chart: writing
-    // R(z) ~ (N_lead/D_lead) z^(p-q) for large z, R~(w) = 1/R(1/w) ~
-    // (D_lead/N_lead) w^(p-q), so R~'(0) is 0 when p-q >= 2 (matching
-    // critical_points()'s infinity rule -- consistent, since a fixed point
-    // with multiplier 0 is by definition also critical) and D_lead/N_lead
-    // when p-q == 1 (an ordinary, non-critical fixed point at infinity).
     const int p_deg = effective_degree(Polynomial{frac.numerator});
     const int q_deg = effective_degree(Polynomial{frac.denominator});
     if (p_deg > q_deg) {
@@ -960,8 +1026,50 @@ std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
               frac.numerator[static_cast<std::size_t>(p_deg)];
         out.push_back({Cplx(std::numeric_limits<double>::infinity(), 0.0), multiplier});
     }
-
     return out;
+}
+
+std::vector<FixedPoint> RationalMap::fixed_points(Cplx a) const {
+    // Same reasoning as critical_points()'s pole exclusion: an unreduced
+    // denominator (redundant same-location terms) can make a genuine pole
+    // look, algebraically, like it solves N(z)-zD(z)=0 too. A true pole is
+    // never actually a fixed point (R is not defined there), so filter it
+    // out the same way.
+    const std::vector<Cplx> poles = pole_locations(a);
+    const std::vector<Cplx> candidates = roots(Polynomial{fixed_point_poly(a)});
+    return assemble_fixed_points(a, exclude_pole_coincident(candidates, poles));
+}
+
+ContinuedFixedPoints RationalMap::fixed_points_continued(Cplx a,
+                                                         const std::vector<Cplx>& predictor) const {
+    constexpr double kCollapseRelTol = 1e-9;   // see distinct_critical_points_continued's own note
+
+    const Polynomial poly{fixed_point_poly(a)};
+    const int expected_n = effective_degree(poly);
+
+    auto cold = [&]() -> ContinuedFixedPoints {
+        const std::vector<Cplx> finite =
+            expected_n <= 0 ? std::vector<Cplx>{}
+                            : exclude_pole_coincident(roots(poly), pole_locations(a));
+        return {assemble_fixed_points(a, finite), finite, false};
+    };
+
+    if (expected_n <= 0 || static_cast<int>(predictor.size()) != expected_n) return cold();
+
+    std::vector<Cplx> refined;
+    refined.reserve(predictor.size());
+    for (Cplx guess : predictor) {
+        const NewtonRefineResult r = newton_refine(poly, guess);
+        if (!r.converged) return cold();
+        refined.push_back(r.z);
+    }
+    if (has_collapsed_pair(refined, kCollapseRelTol)) return cold();
+
+    const std::vector<Cplx> poles = pole_locations(a);
+    const std::vector<Cplx> surviving = exclude_pole_coincident(refined, poles);
+    if (surviving.size() != refined.size()) return cold();   // a refined root landed on a pole
+
+    return {assemble_fixed_points(a, refined), refined, true};
 }
 
 // -----------------------------------------------------------------------------

@@ -13,6 +13,7 @@
 #include "cdx/analysis.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -2010,6 +2011,92 @@ int main() {
               "a built-in Family with no RationalMap behind it (never actually reached by "
               "the app, which always renders through Map::custom) is honestly all-"
               "undetermined, not a guess");
+    }
+
+    // ---- Stage 2 (spatial continuation): pixel-identical vs cold-only, plus timing ----
+    std::printf("\nStage 2 (spatial continuation): Parameter_basin's continued counts are "
+               "PIXEL-IDENTICAL to a cold-only reference, on Nova:\n");
+    {
+        RationalMap nova("nova");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+
+        const Viewport v{{0.0, 0.0}, 3.0, 121};
+        const RenderSettings settings{150, 2.0, 1e-6, 1};
+        Renderer r(Map::custom(nova), v, settings);
+
+        Image unresolved, certain;
+        const Image continued = r.render_parameter_basin(nullptr, &unresolved, &certain);
+
+        // Cold-only reference: the EXACT pre-Stage-2 per-pixel algorithm --
+        // distinct_critical_points(p) and complete_attractors_from_seeds
+        // with no fp_predictor -- reproduced independently here rather than
+        // by disabling continuation inside the renderer, so this is a
+        // genuine second implementation, not the same code timed twice.
+        const FindAttractorsOptions opts;
+        Image cold_counts(v.resolution, v.resolution);
+        Image cold_unresolved(v.resolution, v.resolution);
+        Image cold_certain(v.resolution, v.resolution);
+        const auto t_cold_start = std::chrono::steady_clock::now();
+        for (int col = 0; col < v.resolution; ++col) {
+            for (int row = 0; row < v.resolution; ++row) {
+                const Cplx p = v.coord(col, row);
+                const std::vector<Cplx> crit_pts = nova.distinct_critical_points(p);
+                int unresolved_n = 0, certain_n = 0;
+                const std::vector<Cycle> cycles = complete_attractors_from_seeds(
+                    crit_pts, nova, p, opts, &unresolved_n, &certain_n);
+                cold_counts.at(col, row) = static_cast<double>(cycles.size());
+                cold_unresolved.at(col, row) = static_cast<double>(unresolved_n);
+                cold_certain.at(col, row) = static_cast<double>(certain_n);
+            }
+        }
+        const auto t_cold_end = std::chrono::steady_clock::now();
+
+        bool identical = true;
+        for (std::size_t i = 0; i < continued.data.size(); ++i) {
+            if (continued.data[i] != cold_counts.data[i] ||
+                unresolved.data[i] != cold_unresolved.data[i] ||
+                certain.data[i] != cold_certain.data[i]) {
+                identical = false;
+                break;
+            }
+        }
+        check(identical,
+              "render_parameter_basin's count/unresolved/certain images are BYTE-IDENTICAL "
+              "to the independently-computed cold-only reference -- continuation changed "
+              "nothing about the answer, only how it was obtained");
+
+        // Timing: render_parameter_basin's own (continuation-enabled) time vs the
+        // cold-only reference loop above, same map/viewport/settings/work.
+        const auto t_warm_start = std::chrono::steady_clock::now();
+        r.render_parameter_basin(nullptr, nullptr, nullptr);
+        const auto t_warm_end = std::chrono::steady_clock::now();
+
+        const double cold_ms =
+            std::chrono::duration<double, std::milli>(t_cold_end - t_cold_start).count();
+        const double warm_ms =
+            std::chrono::duration<double, std::milli>(t_warm_end - t_warm_start).count();
+        std::printf("  TIMING (Nova, %dx%d Parameter_basin): cold-only=%.1fms  "
+                   "continuation-enabled=%.1fms  (%.2fx)\n",
+                   v.resolution, v.resolution, cold_ms, warm_ms,
+                   warm_ms > 0.0 ? cold_ms / warm_ms : 0.0);
+    }
+
+    std::printf("\nStage 2: render_parameter's rational path also renders successfully with "
+               "continuation engaged (Nova), still shows real detail:\n");
+    {
+        RationalMap nova("nova");
+        nova.add_poly({2.0 / 3.0, 0.0}, 1, 0, "(2/3)z");
+        nova.add_pole({0.0, 0.0}, {1.0 / 3.0, 0.0}, 2, 0, "(1/3)z^-2");
+        nova.add_poly({1.0, 0.0}, 0, 1, "a");
+        Renderer r(Map::custom(nova), Viewport{{0.0, 0.0}, 2.0, 121}, RenderSettings{150, 2.0, 1e-6, 1});
+        const Image img = r.render_parameter();
+        bool some_nonzero = false, some_zero = false;
+        for (double v : img.data) { if (v > 0.0) some_nonzero = true; else some_zero = true; }
+        check(some_nonzero && some_zero,
+              "Nova's Parameter render (continuation-enabled) still has both resolved and "
+              "unresolved pixels -- Stage 1's own sphere-aware detail is preserved");
     }
 
     std::printf("\n%s (%d failure%s)\n",
