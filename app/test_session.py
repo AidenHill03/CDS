@@ -333,6 +333,53 @@ def main() -> None:
     check(not np.array_equal(st_c[2], st_c1[2]),
           "critical_index selects which free orbit parameter_period reports")
 
+    # ---- Parameter: multi-critical polynomials (Bug B, part 1) --------------------
+    print("\nParameter: z^3 + a z + 1 iterates BOTH free critical orbits, per strategy:")
+    cubic_b = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_b")
+    res_b, scale_b = 120, 1.5
+    vp_b = cdx.Viewport(0j, scale_b, res_b)
+    set_b = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    imgs_b = {name: render_map(cubic_b, 0j, vp_b, set_b, "parameter", strategy=name)
+              for name in ("slowest", "fastest", "per_critical")}
+    imgs_b["per_critical_1"] = render_map(cubic_b, 0j, vp_b, set_b, "parameter",
+                                          strategy="per_critical", critical_index=1)
+    s_b = 2 * scale_b / (res_b - 1)
+    a_b = (-scale_b + s_b * np.arange(res_b))[None, :] + 1j * (-scale_b + s_b * np.arange(res_b))[:, None]
+    # Independent reference: does each of +-sqrt(-a/3) escape |z| > R within
+    # max_iter? (The R used here is the render's own; whether R is itself a
+    # valid bound is part 2's concern, not this check's.)
+    esc_b = []
+    with np.errstate(over="ignore", invalid="ignore"):
+        for sign in (1, -1):
+            zb = sign * np.sqrt(-a_b / 3 + 0j)
+            e = np.zeros(a_b.shape, dtype=bool)
+            for _ in range(200):
+                zb = np.where(e, zb, zb ** 3 + a_b * zb + 1)
+                e |= np.abs(zb) > 2.0
+            esc_b.append(e)
+    some_bounded = ~(esc_b[0] & esc_b[1])
+    none_escape = ~(esc_b[0] | esc_b[1])
+    check(np.mean((imgs_b["slowest"] == 0) == some_bounded) > 0.995,
+          "Slowest is 0 exactly where SOME free orbit stays bounded")
+    check(np.mean((imgs_b["fastest"] == 0) == none_escape) > 0.995,
+          "Fastest is 0 exactly where NO free orbit escapes (the connectedness locus)")
+    check(np.all(imgs_b["slowest"] >= 0) and
+          np.all((imgs_b["slowest"] == 0) | (imgs_b["slowest"] >= imgs_b["fastest"])),
+          "where both escape, Slowest >= Fastest pixel-for-pixel")
+    pc_pair = np.stack([imgs_b["per_critical"] > 0, imgs_b["per_critical_1"] > 0])
+    ref_pair = np.stack([esc_b[0], esc_b[1]])
+    same_set = ((pc_pair[0] == ref_pair[0]) & (pc_pair[1] == ref_pair[1])) | \
+               ((pc_pair[0] == ref_pair[1]) & (pc_pair[1] == ref_pair[0]))
+    check(np.mean(same_set) > 0.995,
+          "PerCritical 0 and 1 are the two individual free orbits (as an unordered pair)")
+    check(not np.array_equal(imgs_b["slowest"], imgs_b["fastest"]) and
+          not np.array_equal(imgs_b["slowest"], imgs_b["per_critical_1"]),
+          "the strategies genuinely differ (they were byte-identical before)")
+    for name in ("slowest", "fastest"):
+        img = imgs_b[name]
+        check(np.array_equal(img > 0, np.flipud(img) > 0),
+              f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
+
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
     s.map = cdx.RationalMap.mandelbrot()

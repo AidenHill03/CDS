@@ -761,7 +761,7 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // correct here because a CERTIFIED polynomial's infinity is ALWAYS
 // superattracting, so a fixed |z| > escape_radius test is a provably
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
-Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) const {
+Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
     const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
@@ -822,6 +822,126 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
         }
     }, cancel);
     return img;
+}
+
+
+// -----------------------------------------------------------------------------
+// Several free critical points (B1). Every free critical orbit is iterated
+// per pixel and combined with the SAME ParameterStrategy semantics the
+// rational path uses -- see ParameterStrategy's own doc comment:
+//   Slowest     0 iff SOME free orbit stays bounded, else the largest smooth
+//               escape value (the slowest orbit to leave);
+//   Fastest     0 iff NO free orbit escapes (the connectedness locus), else
+//               the smallest smooth escape value;
+//   PerCritical the orbit critical_index selects (clamped into range).
+// Critical points are continued down each column (warm-started Newton on
+// the derivative numerator, as render_parameter_rational does), or computed
+// once when they do not move at all (critical_points_constant()).
+//
+// Smooth value: n + 2 - log(log|z_n|) / log d at the first n with
+// |z_n| > R -- the degree-d form of the unicritical path's base-2 formula
+// (continuous across escape bands for every d, not only d = 2).
+// -----------------------------------------------------------------------------
+Image Renderer::render_parameter_polynomial_multicritical(
+    ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
+    const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    const RationalMap* custom = map_.custom_map();
+
+    const double R2 = settings_.escape_radius * settings_.escape_radius;
+    const double inv_log_d = 1.0 / std::log(static_cast<double>(custom->degree(Cplx(0.0, 0.0))));
+
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0),
+                                                custom->distinct_critical_points(Cplx(1.0, 0.0)),
+                                                free_s)
+                 : std::vector<Cplx>{};
+
+    // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
+    // escape value (> 0 by construction: n + 2 - log_d(log|z|) with |z|
+    // barely past R is about n + 2).
+    auto escape_value = [&](const CompiledMap& compiled, Cplx c0, bool& escaped) {
+        double zr = c0.real(), zi = c0.imag();
+        escaped = false;
+        for (int n = 0; n < settings_.max_iter; ++n) {
+            compiled.step(zr, zi);
+            const double m2 = zr * zr + zi * zi;
+            if (m2 > R2) {
+                escaped = true;
+                const double nu = static_cast<double>(n + 2) -
+                                  std::log(std::log(std::sqrt(m2))) * inv_log_d;
+                return is_bad(nu) ? static_cast<double>(n + 1) : nu;
+            }
+            if (is_bad(m2) || m2 > kHuge) { escaped = true; return static_cast<double>(n + 1); }
+        }
+        return 0.0;
+    };
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit;
+            if (cp_fixed) {
+                crit = fixed_free;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                prev_ordinary = cc.ordinary_raw;
+                crit = custom->free_critical_points(p, cc.distinct, free_s);
+            }
+            if (crit.empty()) { img.at(col, row) = 0.0; continue; }
+
+            const CompiledMap compiled = custom->compile(p);
+            double out = 0.0;
+            bool escaped = false;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {
+                    double worst = 0.0;
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, c0, escaped);
+                        if (!escaped) { worst = 0.0; break; }   // a bounded orbit decides it
+                        worst = std::max(worst, v);
+                    }
+                    out = worst;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {
+                    double best = 0.0;
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, c0, escaped);
+                        if (escaped && (best == 0.0 || v < best)) best = v;
+                    }
+                    out = best;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(crit.size()) - 1);
+                    out = escape_value(compiled, crit[static_cast<std::size_t>(idx)], escaped);
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+        }
+    }, cancel);
+    return img;
+}
+
+// Dispatch for a certified polynomial. A recognised built-in shape, or a
+// map with at most ONE free critical point (z^d + a, any
+// critical_points_constant() unicritical map, z^2 + a z, ...), keeps the
+// single-orbit path unchanged; several free critical points take the
+// multi-critical path above.
+Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
+                                            const std::atomic<bool>* cancel) const {
+    const RationalMap* custom = map_.custom_map();
+    if (!custom || recognize_family(*custom)) return render_parameter_polynomial_unicritical(cancel);
+    const FreeCriticalStructure free_s = custom->free_critical_structure();
+    if (free_s.generic_free_count <= 1) return render_parameter_polynomial_unicritical(cancel);
+    return render_parameter_polynomial_multicritical(strategy, critical_index, free_s, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -978,7 +1098,7 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrat
                                  int critical_index) const {
     // A composed map has no free parameter (see Map::composed): honest zeros.
     if (map_.family() == Family::Composed) return Image(view_.resolution, view_.resolution);
-    if (map_.escape_certified()) return render_parameter_polynomial(cancel);
+    if (map_.escape_certified()) return render_parameter_polynomial(strategy, critical_index, cancel);
     return render_parameter_rational(strategy, critical_index, cancel);
 }
 

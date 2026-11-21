@@ -975,6 +975,78 @@ int main() {
               "where escape_radius is a real tuning knob, not an invariant of the map");
     }
 
+    // ---- Parameter: the unicritical polynomial path is pinned bit-for-bit -----------
+    // Reference = the pre-B1 single-orbit loop, re-implemented here from
+    // public API only: start at critical_points(p).front() (or 0 for a
+    // recognised shape), escape at |z| > escape_radius, smooth value
+    // n + 2 - log2(log|z|). Every strategy must reproduce it exactly.
+    std::printf("\nParameter: unicritical polynomials (z^d + a and friends) are pinned "
+               "BIT-FOR-BIT to the single-orbit form, for every strategy:\n");
+    {
+        auto reference = [](const RationalMap& m, const Viewport& v, const RenderSettings& st) {
+            Image img(v.resolution, v.resolution);
+            const std::optional<Family> fam = recognize_family(m);
+            const double R2 = st.escape_radius * st.escape_radius;
+            const double inv_log2 = 1.0 / std::log(2.0);
+            const bool cpf = !fam && m.critical_points_constant();
+            const Cplx c_fixed = cpf ? m.critical_points(Cplx(1.0, 0.0)).front() : Cplx(0.0, 0.0);
+            for (int col = 0; col < v.resolution; ++col) {
+                for (int row = 0; row < v.resolution; ++row) {
+                    const Cplx p = v.coord(col, row);
+                    const Cplx c0 = fam ? Map::critical_point(*fam, p)
+                                        : (cpf ? c_fixed : m.critical_points(p).front());
+                    const CompiledMap compiled = fam ? CompiledMap{} : m.compile(p);
+                    double zr = c0.real(), zi = c0.imag(), out = 0.0;
+                    for (int n = 0; n < st.max_iter; ++n) {
+                        if (fam) Map::step_with(*fam, p.real(), p.imag(), zr, zi);
+                        else compiled.step(zr, zi);
+                        const double m2 = zr * zr + zi * zi;
+                        if (m2 > R2) {
+                            const double nu = static_cast<double>(n + 1) + 1.0 -
+                                              std::log(std::log(std::sqrt(m2))) * inv_log2;
+                            out = (nu != nu) ? static_cast<double>(n + 1) : nu;
+                            break;
+                        }
+                        if (m2 != m2 || m2 > 1e300) { out = static_cast<double>(n + 1); break; }
+                    }
+                    img.at(col, row) = out;
+                }
+            }
+            return img;
+        };
+        struct PinCase { const char* label; RationalMap map; Viewport view; };
+        const PinCase pins[] = {
+            {"z^2+a (term, recognised)", RationalMap::mandelbrot(), Viewport{{-0.5, 0.0}, 1.5, 61}},
+            {"z^2+a (term, recognised), |a| up to 7", RationalMap::mandelbrot(),
+             Viewport{{0.0, 0.0}, 5.0, 41}},
+            {"z^3+a (term, recognised), |a| up to 7", RationalMap::multibrot(3),
+             Viewport{{0.0, 0.0}, 5.0, 41}},
+            {"z^2+a (typed, P/Q)", RationalMap::from_expression("z^2+a", "a", {}),
+             Viewport{{-0.5, 0.0}, 1.5, 61}},
+            {"z^4+a (typed, critical points constant)", RationalMap::from_expression("z^4+a", "a", {}),
+             Viewport{{0.0, 0.0}, 1.5, 41}},
+            {"z^2+a*z (one MOVING free critical point)", RationalMap::from_expression("z^2+a*z", "a", {}),
+             Viewport{{0.0, 0.0}, 1.0, 41}},
+        };
+        const RenderSettings st{100, 2.0, 1e-6, 1};
+        for (const PinCase& pc : pins) {
+            const Image want = reference(pc.map, pc.view, st);
+            bool all_same = true;
+            for (ParameterStrategy strat : {ParameterStrategy::Slowest, ParameterStrategy::Fastest,
+                                            ParameterStrategy::PerCritical}) {
+                for (int ci : {0, 1}) {
+                    Renderer r(Map::custom(pc.map), pc.view, st);
+                    const Image got = r.render_parameter(nullptr, strat, ci);
+                    if (got.data != want.data) all_same = false;
+                }
+            }
+            char msg[200];
+            std::snprintf(msg, sizeof msg, "%s: every strategy is bit-identical to the "
+                         "single-orbit reference", pc.label);
+            check(all_same, msg);
+        }
+    }
+
     // ---- Parameter (Stage 1): a rational family is sphere-aware, multi-critical, escape_radius-free --
     std::printf("\nParameter (Stage 1): a rational family shows real detail via the complete "
                "attractor backbone, with NO escape_radius dependence:\n");

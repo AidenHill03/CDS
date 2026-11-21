@@ -279,10 +279,11 @@ std::optional<int> relaxed_newton_power_n(const RationalMap& m);
 // critical orbit escape to infinity" -- see render_parameter's own doc
 // comment for why THIS version (sphere-aware, any attractor, not just
 // infinity) fixes the gap that made the earlier one useless on a Nova-like
-// family. Meaningless for a CERTIFIED polynomial (which has, at most, ONE
-// finite critical point that ever distinguishes parameter pixels -- see
-// render_parameter's own comment for why -- so there is nothing for a
-// strategy to combine) and for a non-Custom built-in RATIONAL family
+// family. A CERTIFIED polynomial with SEVERAL free critical points (e.g.
+// z^3 + a z + 1, critical points +-sqrt(-a/3)) uses the same three
+// semantics, with "settles" meaning "escapes to infinity" (see
+// render_parameter); a unicritical one (z^d + a) has one orbit and ignores
+// the strategy. Also meaningless for a non-Custom built-in RATIONAL family
 // (McMullen2/McMullen3/Newton3), which keeps using its existing single-
 // representative critical point (see Map::critical_point's own doc
 // comment) for the same reason Map::critical_point already gave: every
@@ -425,14 +426,20 @@ public:
     // McMullenbrot. TWO PATHS, same certification dispatch as render_julia/
     // render_greens (Map::escape_certified):
     //
-    //   CERTIFIED POLYNOMIAL: UNCHANGED from before this milestone --
-    //   escape_radius-based escape-TIME, orbit starts at the map's own
-    //   SINGLE finite critical point (every finite critical point of a
-    //   z^d+a-shaped family coincides at 0; infinity is trivially,
-    //   uninformatively superattracting there, deliberately excluded --
-    //   see Map::critical_point's own doc comment). `strategy`/
-    //   `critical_index` are ignored entirely -- there is nothing for a
-    //   strategy to combine with only one orbit. NOTE: this mode is a
+    //   CERTIFIED POLYNOMIAL: escape-TIME of the FREE critical orbits
+    //   (infinity, structurally pre-fixed, excluded -- see
+    //   FreeCriticalStructure). A polynomial can have several (z^3 + a z
+    //   + 1 has +-sqrt(-a/3)); an earlier version iterated only
+    //   critical_points(a).front(), whichever root Aberth listed first,
+    //   which ignored `strategy` and drew a seam where that order flipped.
+    //   With ONE free critical point (z^d + a, unicritical
+    //   critical_points_constant() maps) the single-orbit path is kept
+    //   bit-for-bit and `strategy`/`critical_index` are ignored. With
+    //   several, every free orbit is iterated and combined exactly as the
+    //   rational path does: Slowest = 0 iff some orbit stays bounded, else
+    //   the largest smooth escape value; Fastest = 0 iff no orbit escapes
+    //   (the connectedness locus), else the smallest; PerCritical = the
+    //   orbit `critical_index` selects. NOTE: this mode is a
     //   VISUALIZATION, not a set-membership computation -- unlike the
     //   Julia SET or Green's function, which are invariants of the map
     //   and so must never depend on escape_radius (see their own doc
@@ -780,7 +787,12 @@ private:
 
     // render_parameter's own two paths, same split rationale as render_
     // julia's -- see render_parameter's own doc comment for what each is.
-    Image render_parameter_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
+                                      const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial_multicritical(ParameterStrategy strategy, int critical_index,
+                                                    const FreeCriticalStructure& free_s,
+                                                    const std::atomic<bool>* cancel) const;
     Image render_parameter_rational(ParameterStrategy strategy, int critical_index,
                                     const std::atomic<bool>* cancel) const;
 
