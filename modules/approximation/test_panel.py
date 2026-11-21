@@ -14,7 +14,8 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtCore import QEvent
+from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
 REF = os.path.join(os.path.dirname(__file__), "test_reference")
@@ -123,6 +124,32 @@ def main():
           "make_panel + add_panel put the tab in the window")
     import phoenix
     check(len(phoenix._module_panels()) == 1, "phoenix.py finds the Approximation panel")
+
+    # Controls registry: the tab documents its own controls in the Info tab,
+    # and each documented gesture does what it says on the Basins canvas.
+    info = window.info_panel.toPlainText()
+    check(all(e.action in info for e in widget.controls) and "Approximation tab" in info,
+          "add_panel puts the Approximation tab's controls into the Info tab")
+    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
+          "Info stays the last tab after the Approximation tab is added")
+    canvas = widget.basin_canvas
+    canvas._interactive = True
+    canvas.set_image(QImage(64, 64, QImage.Format.Format_RGB32), (-1.0, 1.0, -1.0, 1.0))
+    canvas.resize(200, 200)
+    zooms, resets, hovers = [], [], []
+    canvas.zoom_requested.connect(lambda z, f: zooms.append(f))
+    canvas.reset_requested.connect(lambda: resets.append(1))
+    canvas.hovered.connect(hovers.append)
+    canvas.wheelEvent(QWheelEvent(QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, 120),
+                                  Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                  Qt.ScrollPhase.NoScrollPhase, False))
+    check(zooms and zooms[0] > 1, "approx.wheel_zoom: scrolling the Basins view zooms it")
+    canvas.mouseDoubleClickEvent(None)
+    check(resets == [1], "approx.double_click_reset: double-clicking the Basins view resets it")
+    canvas.mouseMoveEvent(QMouseEvent(QEvent.Type.MouseMove, QPointF(100, 100), QPointF(100, 100),
+                                      Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                                      Qt.KeyboardModifier.NoModifier))
+    check(len(hovers) == 1, "approx.hover_readout: hovering reports the point under the cursor")
     window.close()
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "

@@ -39,12 +39,14 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
+from app import controls
 from app.about_dialog import AboutDialog
 from app.color import (color_basin, color_escape_time, color_parameter_basin,
                         color_parameter_period, color_scalar_field)
 from app.complex_field import ComplexField
 from app.equation_panel import EquationPanel
 from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
+from app.info_panel import InfoPanel
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
@@ -1047,13 +1049,25 @@ _ARROW_DIRECTIONS: dict[Qt.Key, complex] = {
     Qt.Key.Key_Down:  complex(0.0, -1.0),
 }
 
+# Plot-scoped key sets, read from the controls registry (app/controls.py) so
+# the Info tab documents exactly what the handler does.
+_CANCEL_KEYS = controls.plot_keys("plot.esc_cancel")
+_ZOOM_IN_KEYS = controls.plot_keys("plot.key_zoom_in")
+_ZOOM_OUT_KEYS = controls.plot_keys("plot.key_zoom_out")
+_ORBIT_STEP_KEYS = controls.plot_keys("plot.space_step")
+_RUN_N_MODIFIERS = controls.plot_modifiers("plot.shift_space_run")
+_ALT_PAN_MODIFIERS = controls.plot_modifiers("plot.alt_arrows_pan")
+assert set(_ARROW_DIRECTIONS) == controls.plot_keys("plot.arrows_pan")
+
 
 def preferences_shortcuts(platform_bindings: list[QKeySequence] | None = None) -> list[QKeySequence]:
     """Settings: StandardKey.Preferences (Cmd+, on macOS); that binding is
-    EMPTY on Windows, so fall back to Ctrl+, there."""
-    bindings = (QKeySequence.keyBindings(QKeySequence.StandardKey.Preferences)
-                if platform_bindings is None else platform_bindings)
-    return list(bindings) or [QKeySequence("Ctrl+,")]
+    EMPTY on Windows, so the registry's fallback (Ctrl+,) is used there.
+    `platform_bindings` injects the StandardKey result for tests."""
+    if platform_bindings is None:
+        return controls.key_sequences("app.settings")
+    fallback = controls.entry("app.settings").binding.fallback
+    return list(platform_bindings) or [QKeySequence(text) for text in fallback]
 
 
 def text_undo_target(widget: QWidget | None):
@@ -1066,16 +1080,17 @@ def text_undo_target(widget: QWidget | None):
     return None
 
 
-def pane_hint(render_mode: str, coupled: bool) -> str:
-    """The status-bar hint shown when the cursor enters a pane."""
+def pane_hint(render_mode: str, coupled: bool, platform: str | None = None) -> str:
+    """The status-bar hint shown when the cursor enters a pane: the
+    registry's hinted controls for that plane (app/controls.py), labelled
+    for `platform` (default: the running one)."""
     if render_mode in PARAMETER_PLANE_MODES:
-        hint = ("Drag: pan · Shift-drag: box zoom · Click: set a · Scroll/pinch: zoom · "
-                "Arrows: nudge a · Alt-arrows: pan")
+        parts = controls.hint_parts((controls.ANY_PANE, controls.PARAMETER), platform)
         if not coupled:
-            hint += " · (Coupled View off: clicking also switches this pane to julia)"
-        return hint
-    return ("Drag: pan · Shift-drag: box zoom · Click: seed orbit · Scroll/pinch: zoom · "
-            "Arrows: pan · Space: step orbit")
+            parts.append("Coupled View off: a click also switches this pane to julia")
+    else:
+        parts = controls.hint_parts((controls.ANY_PANE, controls.DYNAMICAL), platform)
+    return " · ".join(parts)
 
 
 class ImageView(QWidget):
@@ -1996,7 +2011,7 @@ class ImageView(QWidget):
         window's QAction shortcuts)."""
         key = event.key()
         mods = self._plain_modifiers(event)
-        if key == Qt.Key.Key_Escape and self.cancel_gesture():
+        if key in _CANCEL_KEYS and self.cancel_gesture():
             event.accept()
             return
         if key == Qt.Key.Key_Shift:
@@ -2013,7 +2028,7 @@ class ImageView(QWidget):
             # Dynamical plane: arrows pan. Parameter plane: arrows nudge the
             # marker, Alt/Option+arrows pan. Decided per key press.
             pans = (self.pane.render_mode not in PARAMETER_PLANE_MODES or
-                    bool(mods & Qt.KeyboardModifier.AltModifier))
+                    bool(mods & _ALT_PAN_MODIFIERS))
             if pans:
                 self._held_pan_arrows.add(direction)
                 self._do_key_pan()
@@ -2027,16 +2042,16 @@ class ImageView(QWidget):
         if mods & Qt.KeyboardModifier.AltModifier:
             super().keyPressEvent(event)
             return
-        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+        if key in _ZOOM_IN_KEYS:
             self.zoom_at_center(KEY_ZOOM_FACTOR)
             event.accept()
             return
-        if key == Qt.Key.Key_Minus:
+        if key in _ZOOM_OUT_KEYS:
             self.zoom_at_center(1.0 / KEY_ZOOM_FACTOR)
             event.accept()
             return
-        if key == Qt.Key.Key_Space and self.pane.render_mode not in PARAMETER_PLANE_MODES:
-            if mods & Qt.KeyboardModifier.ShiftModifier:
+        if key in _ORBIT_STEP_KEYS and self.pane.render_mode not in PARAMETER_PLANE_MODES:
+            if (mods & _RUN_N_MODIFIERS) == _RUN_N_MODIFIERS:
                 self.run_n_requested.emit()
             else:
                 self.step_orbit(1)
@@ -2667,6 +2682,9 @@ class SandboxWindow(QMainWindow):
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
                                           self._on_library_changed, self)
         self.tabs.addTab(self.library_panel, "Library")
+        # Info is always the LAST tab: add_panel inserts module tabs before it.
+        self.info_panel = InfoPanel(self)
+        self.tabs.addTab(self.info_panel, "Info")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
         self._extra_panels: list[QWidget] = []   # see add_panel
@@ -2726,8 +2744,8 @@ class SandboxWindow(QMainWindow):
         # Shortcuts: StandardKey wherever one exists, so Qt renders and binds
         # the native sequence per platform ("Ctrl" in a QKeySequence IS
         # Command on macOS -- never hard-code Cmd).
-        self.save_experiment_action.setShortcuts(QKeySequence.StandardKey.Save)
-        self.open_experiment_action.setShortcuts(QKeySequence.StandardKey.Open)
+        self.save_experiment_action.setShortcuts(controls.key_sequences("app.save"))
+        self.open_experiment_action.setShortcuts(controls.key_sequences("app.open"))
 
         # File > Export (Stage 4): a rendered PNG at a CHOSEN resolution, or
         # a JSON fact sheet -- both of the FOCUSED pane specifically (see
@@ -2736,7 +2754,7 @@ class SandboxWindow(QMainWindow):
         self.export_menu = self.file_menu.addMenu("Export")
         self.export_image_action = self.export_menu.addAction("Export Image (PNG)...")
         self.export_image_action.triggered.connect(self._on_export_image)
-        self.export_image_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.export_image_action.setShortcuts(controls.key_sequences("app.export_image"))
         self.export_facts_action = self.export_menu.addAction("Export Facts (JSON)...")
         self.export_facts_action.triggered.connect(self._on_export_facts)
         self.file_menu.addSeparator()
@@ -2760,10 +2778,10 @@ class SandboxWindow(QMainWindow):
         # forwards to the field too when the action is chosen from the menu.
         self.edit_menu = self.menuBar().addMenu("Edit")
         self.undo_action = self.edit_menu.addAction("Undo")
-        self.undo_action.setShortcuts(QKeySequence.StandardKey.Undo)
+        self.undo_action.setShortcuts(controls.key_sequences("app.undo"))
         self.undo_action.triggered.connect(lambda: self._route_undo(redo=False))
         self.redo_action = self.edit_menu.addAction("Redo")
-        self.redo_action.setShortcuts(QKeySequence.StandardKey.Redo)
+        self.redo_action.setShortcuts(controls.key_sequences("app.redo"))
         self.redo_action.triggered.connect(lambda: self._route_undo(redo=True))
 
         # ---- View menu: the SOLE control for every toggle below (Stage 4) -------
@@ -2782,16 +2800,15 @@ class SandboxWindow(QMainWindow):
         self.view_menu = self.menuBar().addMenu("View")
         self.reset_view_action = self.view_menu.addAction("Reset View")
         self.reset_view_action.triggered.connect(self._reset_view)
-        self.reset_view_action.setShortcut(QKeySequence("Ctrl+0"))
+        self.reset_view_action.setShortcuts(controls.key_sequences("app.reset_view"))
         # Zoom the FOCUSED pane about its center (the plot's own +/- keys do
         # the same, focus-scoped; these work from anywhere in the window).
         self.zoom_in_action = self.view_menu.addAction("Zoom In")
-        self.zoom_in_action.setShortcuts(
-            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn) + [QKeySequence("Ctrl+=")])
+        self.zoom_in_action.setShortcuts(controls.key_sequences("app.zoom_in"))
         self.zoom_in_action.triggered.connect(
             lambda: self._focused_pane.image_view.zoom_at_center(KEY_ZOOM_FACTOR))
         self.zoom_out_action = self.view_menu.addAction("Zoom Out")
-        self.zoom_out_action.setShortcuts(QKeySequence.StandardKey.ZoomOut)
+        self.zoom_out_action.setShortcuts(controls.key_sequences("app.zoom_out"))
         self.zoom_out_action.triggered.connect(
             lambda: self._focused_pane.image_view.zoom_at_center(1.0 / KEY_ZOOM_FACTOR))
         self.view_menu.addSeparator()
@@ -2857,6 +2874,11 @@ class SandboxWindow(QMainWindow):
         self.help_menu = self.menuBar().addMenu("Help")
         self.about_action = self.help_menu.addAction(f"About {PRODUCT_NAME}")
         self.about_action.triggered.connect(self._show_about_dialog)
+        # StandardKey.HelpContents (F1 on Windows, Cmd+? on macOS) plus F1
+        # everywhere -- see the registry's app.info entry.
+        self.info_action = self.help_menu.addAction("Controls && Shortcuts")
+        self.info_action.setShortcuts(controls.key_sequences("app.info"))
+        self.info_action.triggered.connect(lambda: self.tabs.setCurrentWidget(self.info_panel))
 
         self.statusBar().showMessage("")
         # Transient controls hint for the pane under the cursor: its OWN
@@ -3432,7 +3454,8 @@ class SandboxWindow(QMainWindow):
 
     # ---- extra panels (research modules) ----------------------------------------
     def add_panel(self, widget: QWidget, title: str) -> int:
-        """Adds `widget` as a tab after the built-in ones and returns its index.
+        """Adds `widget` as a tab after the built-in ones (before Info, which
+        stays last) and returns its index.
 
         This is how a research module's UI (modules/<name>/panel.py) appears in
         the window WITHOUT app/ importing anything from modules/: the
@@ -3442,16 +3465,21 @@ class SandboxWindow(QMainWindow):
         panel with background work of its own can cancel and drain it.
         """
         self._extra_panels.append(widget)
-        index = self.tabs.addTab(widget, title)
+        index = self.tabs.insertTab(self.tabs.indexOf(self.info_panel), widget, title)
+        # A panel documents its own controls by carrying a `controls`
+        # sequence of app.controls.ControlEntry (see modules/approximation).
+        self.info_panel.add_entries(getattr(widget, "controls", ()))
         self._rebuild_tab_actions()
         return index
 
     def _rebuild_tab_actions(self) -> None:
         self.go_to_tab_menu.clear()
         self.tab_actions = []
-        for index in range(min(self.tabs.count(), 9)):
+        first, last = controls.entry("app.go_to_tab").binding.sequences   # "Ctrl+1", "Ctrl+9"
+        prefix, start, stop = first[:-1], int(first[-1]), int(last[-1])
+        for index in range(min(self.tabs.count(), stop - start + 1)):
             action = self.go_to_tab_menu.addAction(self.tabs.tabText(index))
-            action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
+            action.setShortcut(QKeySequence(f"{prefix}{start + index}"))
             action.triggered.connect(lambda _checked=False, i=index: self.tabs.setCurrentIndex(i))
             self.tab_actions.append(action)
 

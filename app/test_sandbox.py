@@ -1642,10 +1642,10 @@ def main() -> None:
 
     # ---- Settings dialog (Stage 5): menu-opened, not a tab -------------------------
     print("\nsettings dialog:")
-    check(window.tabs.count() == 4 and window.tabs.tabText(0) == "View"
+    check(window.tabs.count() == 5 and window.tabs.tabText(0) == "View"
           and window.tabs.tabText(1) == "Equation" and window.tabs.tabText(2) == "Facts"
-          and window.tabs.tabText(3) == "Library",
-          "the window has View, Equation, Facts, and Library tabs, in that order -- Settings is "
+          and window.tabs.tabText(3) == "Library" and window.tabs.tabText(4) == "Info",
+          "the window has View, Equation, Facts, Library and Info tabs, in that order -- Settings is "
           "no longer one of them")
     check(window.tabs.widget(1) is window.equation_panel,
           "the Equation tab holds the actual EquationPanel instance")
@@ -2633,8 +2633,10 @@ def main() -> None:
     n_tabs = window.tabs.count()
     extra = _PanelWithShutdown("extra")
     index = window.add_panel(extra, "Extra")
-    check(window.tabs.count() == n_tabs + 1 and index == n_tabs,
-          "add_panel appends exactly one tab, after the built-in ones")
+    check(window.tabs.count() == n_tabs + 1 and index == n_tabs - 1,
+          "add_panel adds exactly one tab, after the built-in ones and before Info")
+    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
+          "Info stays the last tab")
     check(window.tabs.widget(index) is extra and window.tabs.tabText(index) == "Extra",
           "the tab holds the given widget under the given title")
     plain = QLabel("no shutdown method")
@@ -2736,10 +2738,12 @@ def main() -> None:
 
     print("\nkeyboard: application shortcuts (QActions):")
     SK = QKeySequence.StandardKey
-    check(window.save_experiment_action.shortcuts() == QKeySequence.keyBindings(SK.Save)
+    def _usable(standard):
+        return [q for q in QKeySequence.keyBindings(standard) if sandbox_module.controls._is_usable(q)]
+    check(window.save_experiment_action.shortcuts() == _usable(SK.Save)
           and window.save_experiment_action.shortcuts(),
           "Save Experiment uses StandardKey.Save")
-    check(window.open_experiment_action.shortcuts() == QKeySequence.keyBindings(SK.Open),
+    check(window.open_experiment_action.shortcuts() == _usable(SK.Open),
           "Open Experiment uses StandardKey.Open")
     check(window.export_image_action.shortcut() == QKeySequence("Ctrl+E"), "Export Image is Ctrl/Cmd+E")
     check(window.reset_view_action.shortcut() == QKeySequence("Ctrl+0"), "Reset View is Ctrl/Cmd+0")
@@ -2749,11 +2753,11 @@ def main() -> None:
           "...falling back to Ctrl+, where the platform has none (Windows)")
     check(sandbox_module.preferences_shortcuts([QKeySequence("Ctrl+,")]) == [QKeySequence("Ctrl+,")],
           "...and using the platform's own binding where it has one (macOS)")
-    check(all(seq in window.zoom_in_action.shortcuts() for seq in QKeySequence.keyBindings(SK.ZoomIn))
-          and window.zoom_out_action.shortcuts() == QKeySequence.keyBindings(SK.ZoomOut),
+    check(all(seq in window.zoom_in_action.shortcuts() for seq in _usable(SK.ZoomIn))
+          and window.zoom_out_action.shortcuts() == _usable(SK.ZoomOut),
           "Zoom In/Out use StandardKey.ZoomIn/ZoomOut")
-    check(window.undo_action.shortcuts() == QKeySequence.keyBindings(SK.Undo)
-          and window.redo_action.shortcuts() == QKeySequence.keyBindings(SK.Redo),
+    check(window.undo_action.shortcuts() == _usable(SK.Undo)
+          and window.redo_action.shortcuts() == _usable(SK.Redo),
           "Undo/Redo use StandardKey.Undo/Redo (all platform alternatives, e.g. Ctrl+Y on Windows)")
     menu_titles = [a.text() for a in window.menuBar().actions()]
     check(menu_titles.index("File") < menu_titles.index("Edit") < menu_titles.index("View"),
@@ -2821,13 +2825,17 @@ def main() -> None:
 
     # ---- controls redesign, Step 3: status-bar pane hints ------------------------------
     print("\nstatus-bar pane hints:")
-    dyn_hint = sandbox_module.pane_hint("julia", coupled=True)
-    par_hint = sandbox_module.pane_hint("parameter", coupled=True)
-    check("Drag: pan" in dyn_hint and "Shift-drag: box zoom" in dyn_hint and
-          "Click: seed orbit" in dyn_hint and "Scroll/pinch: zoom" in dyn_hint,
-          "the dynamical-plane hint names drag, Shift-drag, click and scroll/pinch")
-    check("Click: set a" in par_hint and "Arrows: nudge a" in par_hint and "julia" not in par_hint,
-          "the parameter-plane hint says click sets a and arrows nudge it")
+    dyn_hint = sandbox_module.pane_hint("julia", coupled=True, platform="win32")
+    par_hint = sandbox_module.pane_hint("parameter", coupled=True, platform="win32")
+    check("Drag: pan" in dyn_hint and "Shift+Drag: box zoom" in dyn_hint and
+          "Click: seed orbit" in dyn_hint and "Scroll: zoom (pinch too)" in dyn_hint and
+          "Space: step orbit" in dyn_hint and "nudge" not in dyn_hint,
+          "the dynamical-plane hint names drag, Shift-drag, click, scroll/pinch and Space")
+    check("Click: set a" in par_hint and "←↑→↓: nudge a" in par_hint and "Alt+←↑→↓: pan" in par_hint
+          and "julia" not in par_hint and "seed orbit" not in par_hint,
+          "the parameter-plane hint says click sets a, arrows nudge it, Alt-arrows pan")
+    check("⇧ Drag: box zoom" in sandbox_module.pane_hint("julia", coupled=True, platform="darwin"),
+          "on macOS the hint uses ⇧/⌥ symbols")
     check("switches this pane to julia" in sandbox_module.pane_hint("parameter", coupled=False),
           "with Coupled View off, the parameter hint warns that a click switches the pane to julia")
     window._on_cursor_readout_changed("z = 0.1+0.2i")
@@ -2846,6 +2854,246 @@ def main() -> None:
     check(window.pane_hint_label.text() == "" and not window._pane_hint_timer.isActive(),
           "leaving the pane clears the hint immediately")
     window._on_cursor_readout_changed("")
+
+    # ---- controls redesign, Step 4: registry <-> handler agreement ---------------------
+    # One check per registry entry that has a binding: drive the REAL handler
+    # with exactly what the registry says, and confirm the documented effect.
+    # The final check fails if an entry is added without an agreement check.
+    print("\ncontrols registry <-> handlers:")
+    from app import controls as reg
+    from app.facts_panel import FactsPanel
+    from app.library_panel import LibraryPanel
+
+    def _mods(entry_id):
+        return reg.plot_modifiers(entry_id)
+
+    def _press_release(view, key, mods):
+        view.keyPressEvent(_key(key, mods, text=" " if key == Qt.Key.Key_Space else ""))
+        view.keyReleaseEvent(_key(key, mods, press=False))
+
+    def _drag(view, a, b, button=Qt.MouseButton.LeftButton, mods=None):
+        view.mousePressEvent(_FakeMouseEvent(a, button, mods))
+        view.mouseMoveEvent(_FakeMouseEvent(b, button, mods))
+        view.mouseReleaseEvent(_FakeMouseEvent(b, button, mods))
+
+    def _vp():
+        return kb_pane.viewport
+
+    def agree_drag_pan():
+        ok = True
+        for mode in ("julia", "parameter"):
+            _kb_reset(mode)
+            _drag(kb_view, QPoint(100, 100), QPoint(200, 100))
+            ok &= _vp().center != 0j and _vp().scale == 2.0
+        return ok
+
+    def agree_middle_drag():
+        _kb_reset()
+        _drag(kb_view, QPoint(100, 100), QPoint(200, 100), Qt.MouseButton.MiddleButton)
+        return _vp().center != 0j and _vp().scale == 2.0
+
+    def agree_box_zoom():
+        _kb_reset()
+        _drag(kb_view, QPoint(100, 100), QPoint(300, 300), mods=SHIFT)
+        return _vp().scale < 2.0
+
+    def agree_wheel():
+        _kb_reset()
+        kb_view.wheelEvent(_wheel(QPoint(300, 120), 120))
+        return _vp().scale < 2.0
+
+    def agree_pinch():
+        _kb_reset()
+        kb_view.event(QNativeGestureEvent(Qt.NativeGestureType.ZoomNativeGesture,
+                                          QPointingDevice.primaryPointingDevice(), 2,
+                                          QPointF(300, 120), QPointF(300, 120), QPointF(300, 120),
+                                          0.2, QPointF(0, 0)))
+        pinched = _vp().scale < 2.0
+        _kb_reset()
+        kb_view.wheelEvent(_wheel(QPoint(300, 120), 120, modifiers=Qt.KeyboardModifier.ControlModifier))
+        return pinched and _vp().scale < 2.0   # Windows: pinch == Ctrl+wheel
+
+    def agree_esc():
+        _kb_reset()
+        kb_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100)))
+        kb_view.mouseMoveEvent(_FakeMouseEvent(QPoint(250, 100)))
+        for key in reg.plot_keys("plot.esc_cancel"):
+            kb_view.keyPressEvent(_key(key))
+        kb_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(250, 100)))
+        return _vp().center == 0j
+
+    def agree_key_zoom(entry_id, zoom_in):
+        ok = True
+        for key in reg.plot_keys(entry_id):
+            _kb_reset()
+            kb_view.keyPressEvent(_key(key, _mods(entry_id)))
+            ok &= (_vp().scale < 2.0) if zoom_in else (_vp().scale > 2.0)
+        return ok
+
+    def agree_action(action, entry_id):
+        return action.shortcuts() == reg.key_sequences(entry_id) and len(action.shortcuts()) > 0
+
+    def agree_app_zoom(action, entry_id, zoom_in):
+        view = window._focused_pane.image_view
+        before = view.pane.viewport.scale
+        action.trigger()
+        after = view.pane.viewport.scale
+        action_back = window.zoom_out_action if zoom_in else window.zoom_in_action
+        action_back.trigger()
+        return agree_action(action, entry_id) and ((after < before) if zoom_in else (after > before))
+
+    def agree_reset():
+        view = window._focused_pane.image_view
+        view.pane.viewport = cdx.Viewport(complex(5, 5), 1e-3, view.pane.viewport.resolution)
+        window.reset_view_action.trigger()
+        return agree_action(window.reset_view_action, "app.reset_view") and \
+            view.pane.viewport.scale > 1e-3
+
+    def agree_hover():
+        texts = []
+        kb_view.cursor_readout_changed.connect(texts.append)
+        kb_view.mouseMoveEvent(_FakeMouseEvent(QPoint(120, 120)))
+        kb_view.cursor_readout_changed.disconnect(texts.append)
+        return bool(texts and texts[-1])
+
+    def agree_click_seed():
+        _kb_reset()
+        kb_view.clear_orbit()
+        kb_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+        kb_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))
+        return kb_view.orbit_tracker.state is not None
+
+    def agree_click_set_a():
+        _kb_reset("parameter")
+        got = []
+        kb_view.param_changed.connect(got.append)
+        kb_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+        kb_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))
+        kb_view.param_changed.disconnect(got.append)
+        return len(got) == 1
+
+    def agree_arrows(entry_id, mode, expect_pan):
+        ok = True
+        for key in reg.plot_keys(entry_id):
+            _kb_reset(mode)
+            before = len(nudges)
+            _press_release(kb_view, key, _mods(entry_id))
+            panned = _vp().center != 0j
+            nudged = len(nudges) > before
+            ok &= (panned and not nudged) if expect_pan else (nudged and not panned)
+        return ok
+
+    def agree_space(entry_id, expect_run):
+        _kb_reset()
+        kb_view.clear_orbit()
+        kb_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+        kb_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))
+        runs_before = len(run_requests)
+        (key,) = reg.plot_keys(entry_id)
+        kb_view.keyPressEvent(_key(key, _mods(entry_id), text=" "))
+        if expect_run:
+            return len(run_requests) == runs_before + 1 and kb_view.orbit_tracker.state.n == 0
+        return kb_view.orbit_tracker.state.n == 1 and len(run_requests) == runs_before
+
+    facts_session = Session()
+    facts_session.map = cdx.RationalMap.newton_cubic()
+    facts_session.param = 0j
+    seeded_pts, centered_pts = [], []
+    facts = FactsPanel(facts_session, centered_pts.append, seeded_pts.append)
+
+    def agree_facts(table, expect_seed):
+        row = next(r for r, p in enumerate(facts._row_points[id(table)])
+                   if p is not None and not _is_inf(p))
+        seeded_pts.clear(); centered_pts.clear()
+        facts._on_row_clicked(table, row)
+        return (len(seeded_pts), len(centered_pts)) == ((1, 0) if expect_seed else (0, 1))
+
+    def agree_library():
+        loaded = []
+        lib = LibraryPanel(Session(), lambda: loaded.append(1), lambda: None)
+        lib._list.itemDoubleClicked.emit(lib._list.currentItem())
+        return loaded == [1]
+
+    def agree_tabs():
+        first, last = reg.entry("app.go_to_tab").binding.sequences
+        return (window.tab_actions[0].shortcut() == QKeySequence(first) and
+                len(window.tab_actions) == min(window.tabs.count(), 9) and
+                all(a.shortcut() == QKeySequence(f"{first[:-1]}{i + 1}")
+                    for i, a in enumerate(window.tab_actions)) and
+                QKeySequence(last).toString().startswith(first[:-1]))
+
+    def agree_info():
+        window.tabs.setCurrentIndex(0)
+        window.info_action.trigger()
+        ok = window.tabs.currentWidget() is window.info_panel and \
+            agree_action(window.info_action, "app.info")
+        window.tabs.setCurrentIndex(0)
+        return ok
+
+    AGREEMENT = {
+        "plot.drag_pan": agree_drag_pan,
+        "plot.middle_drag_pan": agree_middle_drag,
+        "plot.shift_drag_box_zoom": agree_box_zoom,
+        "plot.wheel_zoom": agree_wheel,
+        "plot.pinch_zoom": agree_pinch,
+        "plot.esc_cancel": agree_esc,
+        "plot.key_zoom_in": lambda: agree_key_zoom("plot.key_zoom_in", True),
+        "plot.key_zoom_out": lambda: agree_key_zoom("plot.key_zoom_out", False),
+        "app.zoom_in": lambda: agree_app_zoom(window.zoom_in_action, "app.zoom_in", True),
+        "app.zoom_out": lambda: agree_app_zoom(window.zoom_out_action, "app.zoom_out", False),
+        "app.reset_view": agree_reset,
+        "plot.hover_readout": agree_hover,
+        "plot.click_seed": agree_click_seed,
+        "plot.arrows_pan": lambda: agree_arrows("plot.arrows_pan", "julia", True),
+        "plot.click_set_a": agree_click_set_a,
+        "plot.arrows_nudge": lambda: agree_arrows("plot.arrows_nudge", "parameter", False),
+        "plot.alt_arrows_pan": lambda: agree_arrows("plot.alt_arrows_pan", "parameter", True),
+        "plot.space_step": lambda: agree_space("plot.space_step", False),
+        "plot.shift_space_run": lambda: agree_space("plot.shift_space_run", True),
+        "panel.facts_seed": lambda: agree_facts(facts._critical_table, True),
+        "panel.facts_center": lambda: agree_facts(facts._pole_table, False),
+        "panel.library_load": agree_library,
+        "app.save": lambda: agree_action(window.save_experiment_action, "app.save"),
+        "app.open": lambda: agree_action(window.open_experiment_action, "app.open"),
+        "app.export_image": lambda: agree_action(window.export_image_action, "app.export_image"),
+        "app.settings": lambda: agree_action(window.settings_action, "app.settings"),
+        "app.undo": lambda: agree_action(window.undo_action, "app.undo"),
+        "app.redo": lambda: agree_action(window.redo_action, "app.redo"),
+        "app.go_to_tab": agree_tabs,
+        "app.info": agree_info,
+    }
+    for control in reg.CONTROLS:
+        if control.binding is not None and control.id in AGREEMENT:
+            check(AGREEMENT[control.id](),
+                  f"{control.id}: '{reg.binding_label(control.binding)}' does what the Info tab says "
+                  f"({control.action})")
+    bound_ids = {c.id for c in reg.CONTROLS if c.binding is not None}
+    check(bound_ids == set(AGREEMENT),
+          "every bound registry entry has an agreement check, and every check has an entry "
+          f"(missing: {sorted(bound_ids - set(AGREEMENT))}, stale: {sorted(set(AGREEMENT) - bound_ids)})")
+    _kb_reset()
+
+    # ---- Info tab: generated, last, and extended by module panels --------------------
+    print("\nInfo tab:")
+    check(window.tabs.tabText(window.tabs.count() - 1) == "Info", "the Info tab is the last tab")
+    check(window.info_panel.isReadOnly(), "the Info tab is read-only")
+    info_text = window.info_panel.toPlainText()
+    check(all(c.action in info_text for c in reg.CONTROLS),
+          "the Info tab shows every registry entry")
+
+    class _PanelWithControls(QLabel):
+        controls = (reg.ControlEntry("demo.wheel", reg.PANELS, "Demo: zoom the demo view",
+                                     "Demo tab", reg.MouseBinding("wheel")),)
+    tabs_before = len(window.tab_actions)
+    window.add_panel(_PanelWithControls("demo"), "Demo")
+    check("Demo: zoom the demo view" in window.info_panel.toPlainText() and
+          "Demo tab" in window.info_panel.toPlainText(),
+          "a panel's own `controls` entries are added to the Info tab by add_panel")
+    check(len(window.tab_actions) == min(window.tabs.count(), 9) and
+          len(window.tab_actions) >= min(tabs_before + 1, 9),
+          "add_panel renumbers the Go to Tab shortcuts")
+    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
+          "...and Info is still last")
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded

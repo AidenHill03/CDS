@@ -37,6 +37,25 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, 
                                QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from . import construction, scoring
+from app.controls import PANELS, ControlEntry, MouseBinding
+
+_TAB = "Approximation tab"
+
+# This tab's controls, for the Info tab (SandboxWindow.add_panel reads the
+# panel's `controls` attribute). app/ never imports this module.
+APPROXIMATION_CONTROLS = (
+    ControlEntry("approx.note", PANELS,
+                 "Open image… picks a target; Build constructs a map (Cancel stops it); Score "
+                 "compares it with the target; Save report / Save images export the results. "
+                 "The Target, Basins, Certified and Report sub-tabs show each stage.", _TAB),
+    ControlEntry("approx.wheel_zoom", PANELS, "Basins view: zoom in/out at the cursor (fixed steps)",
+                 _TAB, MouseBinding("wheel")),
+    ControlEntry("approx.double_click_reset", PANELS, "Basins view: reset to the full view", _TAB,
+                 MouseBinding("double-click")),
+    ControlEntry("approx.hover_readout", PANELS,
+                 "Target / Basins / Certified views: show the point under the cursor below the "
+                 "view", _TAB, MouseBinding("hover")),
+)
 
 UNRESOLVED_RGB = (0.30, 0.30, 0.30)
 UNDECIDED_RGB = (0.0, 0.0, 0.0)
@@ -162,6 +181,8 @@ class _Job(QRunnable):
 
 class ApproximationPanel(QWidget):
     """The Approximation tab."""
+
+    controls = APPROXIMATION_CONTROLS
 
     BASIN_RESOLUTION = 512
     # Coarse-first: every basin render shows a pass at 1/4 the resolution per
