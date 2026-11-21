@@ -1569,18 +1569,21 @@ int main() {
         for (const auto& c : broken_cycles) {
             if (c.points.size() == 9 && close(c.points[0], target, 1e-3)) mislabeled_as_period9 = true;
         }
-        check(mislabeled_as_period9,
-              "REPRODUCED: find_attractors' own default-options output labels this point's "
-              "orbit as a period-9 cycle of the identical point repeated 9 times, not the "
-              "period-1 fixed point it actually is");
+        // This case USED to be asserted as reproduced (find_attractors
+        // returned the identical point repeated 9 times as a "period-9
+        // cycle"). find_attractors now reduces every closure to its minimal
+        // period (reduce_to_minimal_period, analysis.cpp), so the raw output
+        // is correct too -- these two checks were inverted when that landed.
+        check(!mislabeled_as_period9,
+              "FIXED AT THE SOURCE: find_attractors no longer labels this point's orbit as "
+              "a period-9 cycle of the identical point repeated 9 times");
         bool correctly_period1_in_broken = false;
         for (const auto& c : broken_cycles) {
             if (c.points.size() == 1 && close(c.points[0], target, 1e-3)) correctly_period1_in_broken = true;
         }
-        check(!correctly_period1_in_broken,
-              "...and find_attractors' own output has NO separate, correctly-labeled "
-              "period-1 entry for it either -- this fixed point is genuinely unrepresented "
-              "as what it actually is, not just duplicated");
+        check(correctly_period1_in_broken,
+              "...find_attractors' own output now has the correctly-labeled period-1 entry "
+              "for it (minimal-period reduction)");
 
         const auto fixed_cycles = complete_attractors(nova, a);
         bool correctly_period1_in_fixed = false;
@@ -1993,6 +1996,49 @@ int main() {
         const int center = v.resolution / 2;
         check(is_inf.at(center, center) == 1.0 && undetermined.at(center, center) == 0.0,
               "a well outside |a-n|=n reports the infinity class, not undetermined");
+    }
+
+    // ---- FromMap: any map's OWN free critical points (Bug A) -------------------------
+    std::printf("\nFromMap: z^2 + a iterates its own critical point 0, not relaxed-Newton "
+               "seeds:\n");
+    {
+        check(relaxed_newton_power_n(nova_n) == std::optional<int>(n),
+              "relaxed_newton_power_n recognises relaxed Newton of z^6 - 1");
+        check(!relaxed_newton_power_n(RationalMap::mandelbrot()).has_value() &&
+              !relaxed_newton_power_n(RationalMap::from_expression("z^2+a", "a", {})).has_value(),
+              "...and does not recognise z^2 + a (term-based or P/Q)");
+
+        const RationalMap mandel = RationalMap::mandelbrot();
+        const FreeCriticalStructure fs = mandel.free_critical_structure();
+        check(fs.exclude_infinity && fs.generic_free_count == 1,
+              "z^2 + a: infinity is structurally pre-fixed, exactly one free critical point");
+
+        struct Case { Cplx a; int period; bool inf; bool undet; };
+        const Case cases[] = {
+            {{0.0, 0.0}, 1, false, false},       {{-1.0, 0.0}, 2, false, false},
+            {{-1.31, 0.0}, 4, false, false},     {{-1.7549, 0.0}, 3, false, false},
+            {{-1.1, 0.2}, 2, false, false},      {{-0.1226, 0.7449}, 3, false, false},
+            {{0.25, 0.5}, 0, false, true},       // root of the period-4 bulb: parabolic
+            {{0.5, 0.5}, 0, true, false},
+        };
+        for (const Case& c : cases) {
+            Renderer r(Map::custom(mandel), Viewport{c.a, 1e-9, 3}, RenderSettings{200, 2.0, 1e-6, 1});
+            Image und, inf;
+            const Image per = r.render_parameter_period(CriticalPointFamily::FromMap, 0, nullptr,
+                                                        &und, &inf);
+            char msg[160];
+            std::snprintf(msg, sizeof msg, "Mandelbrot a=(%g,%g): period %.0f inf %.0f undet %.0f",
+                         c.a.real(), c.a.imag(), per.at(1, 1), inf.at(1, 1), und.at(1, 1));
+            check(per.at(1, 1) == c.period && (inf.at(1, 1) == 1.0) == c.inf &&
+                  (und.at(1, 1) == 1.0) == c.undet, msg);
+        }
+
+        // Minimal period: a fixed point with multiplier ~0.96 e^(2 pi i/3)
+        // used to be reported as a "3-cycle" of one point repeated.
+        const Cplx a_rot{-0.06894150417827305, -0.6142061281337047};
+        const auto outs = per_seed_outcomes({Cplx(0.0, 0.0)}, mandel, a_rot, {});
+        check(outs.size() == 1 && outs[0].resolved && outs[0].period == 1,
+              "a slowly-rotating attracting fixed point reports period 1, not a multiple");
     }
 
     // ---- NO REGRESSION: a map with no RationalMap behind it degrades honestly -------

@@ -127,6 +127,36 @@ struct ContinuedFixedPoints {
 };
 
 // -----------------------------------------------------------------------------
+// Which critical points are FREE -- see RationalMap::free_critical_structure.
+// Computed once per render (it costs three cold critical/fixed-point solves),
+// then applied per pixel by RationalMap::free_critical_points.
+//
+// THE RULE. A critical point c is STRUCTURALLY PRE-FIXED -- not free -- when,
+// at each of three generic parameter values (kGenericParams in rational.cpp),
+// c is a critical point at the same location and either c is a fixed point
+// or f(c) is a fixed point, the same one at all three. Its orbit then says
+// nothing about the parameter: it is the same at every `a`. Identification
+// is by location, with two kinds of point identified by type instead,
+// because their location is a closed-form consequence of the map's shape:
+//   * infinity, when it is a critical point: pre-fixed iff infinity is a
+//     fixed point at all three (every polynomial: f(inf) = inf);
+//   * a pole of order >= 2 (critical in its own right): f(pole) = inf, so it
+//     is pre-fixed iff infinity is a fixed point at all three -- even when
+//     the pole MOVES with `a` (e.g. relaxed Newton of z^n - 1, whose z = 0 is
+//     an order n-1 pole mapping to the fixed point at infinity).
+// A finite, non-pole critical point that is pre-fixed but moves with `a`
+// (e.g. c = a for (z - a)^2 + a) is NOT recognised and stays "free"; its
+// orbit then reports a constant period 1, which is honest, just
+// uninformative.
+// -----------------------------------------------------------------------------
+struct FreeCriticalStructure {
+    std::vector<Cplx> excluded_finite;   // parameter-independent, pre-fixed, finite, non-pole
+    bool exclude_infinity = false;       // infinity (when critical) is pre-fixed
+    bool exclude_poles    = false;       // every pole-critical point is pre-fixed
+    int  generic_free_count = 0;         // max #free distinct critical points at the generic params
+};
+
+// -----------------------------------------------------------------------------
 // RationalMap::eval(z, a) redoes every term's effective_coeff/
 // effective_location/effective_strength -- each an a^param_power call -- on
 // EVERY invocation, even though every caller that matters (an escape-time
@@ -641,6 +671,24 @@ public:
     // kTrimRelTol (1e-12) -- i.e. |a| astronomically outside any parameter
     // range this project's viewports actually explore.
     bool critical_points_constant() const;
+
+    // The free/pre-fixed split of this map's critical points -- see
+    // FreeCriticalStructure's own comment for the rule. Parameter-
+    // independent by construction; compute it once per render.
+    FreeCriticalStructure free_critical_structure() const;
+
+    // `distinct` (a distinct_critical_points(a)-style list AT `a`) with every
+    // structurally pre-fixed entry removed, order otherwise preserved. A
+    // finite entry within 1e-4 (relative, distinct_critical_points' own
+    // dedup radius) of an excluded location counts as that location.
+    std::vector<Cplx> free_critical_points(Cplx a, const std::vector<Cplx>& distinct,
+                                           const FreeCriticalStructure& s) const;
+
+    // f's own coefficients at `a`, ASCENDING (index k multiplies z^k), when
+    // is_polynomial_structurally(); returns false (and leaves `out`
+    // untouched) otherwise. Trailing exact zeros are trimmed, so
+    // out.back() is the leading coefficient a_d.
+    bool polynomial_coefficients(Cplx a, std::vector<Cplx>& out) const;
 
     // All fixed points R(z) == z, found algebraically (root the polynomial
     // N(z) - z*D(z) after clearing denominators; NOT limited to attracting

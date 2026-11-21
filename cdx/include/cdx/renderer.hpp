@@ -250,7 +250,24 @@ enum class CriticalPointFamily {
     // how a caller that only has a RationalMap, not the n it was built
     // with, can still recover it).
     RelaxedNewtonPower,
+
+    // The map's OWN free critical points, whatever the map is: per pixel,
+    // RationalMap::distinct_critical_points_continued (warm-started down
+    // each column, as render_parameter_rational does) filtered through
+    // RationalMap::free_critical_points (structurally pre-fixed points such
+    // as infinity for a polynomial dropped -- see FreeCriticalStructure).
+    // `n` is ignored. This is the default for every map that is not
+    // structurally relaxed Newton (relaxed_newton_power_n below): it is what
+    // makes z^2 + a iterate 0, not RelaxedNewtonPower's +-sqrt(a/(2-a)).
+    FromMap,
 };
+
+// n if `m` is STRUCTURALLY relaxed Newton of z^n - 1, i.e. m(z, a) ==
+// ((n - a) z^n + a) / (n z^{n-1}) as a function of both z and a (checked by
+// evaluation at three generic (z, a) pairs, so it is representation-
+// agnostic: term-based or P/Q, either written form). nullopt otherwise.
+// The only maps for which CriticalPointFamily::RelaxedNewtonPower is valid.
+std::optional<int> relaxed_newton_power_n(const RationalMap& m);
 
 // -----------------------------------------------------------------------------
 // How render_parameter's own rational path (below) combines MULTIPLE free
@@ -578,10 +595,9 @@ public:
     // exact arithmetic, so this is a tie-break for numerical stragglers,
     // not a real policy choice for THAT family; a future, genuinely
     // asymmetric family (a bicritical one, whose two critical points CAN
-    // converge to two actually-different cycles) would need this
-    // documented explicitly wherever it is used -- this method does not
-    // attempt to detect or flag such a disagreement itself (no "mixed"
-    // class yet; not needed by any family this method currently supports).
+    // converge to two actually-different cycles) is handled by FromMap
+    // below, which selects by `critical_index` and flags disagreement in
+    // `mixed` instead of tie-breaking.
     //
     // The pixel value is the period (>= 1) when a tracked seed resolves to
     // a FINITE cycle; 0 (paired with `undetermined` set) when NONE of the
@@ -601,18 +617,31 @@ public:
     //
     // Requires a Custom-wrapped map (map_.custom_map() non-null), same as
     // Parameter_basin -- degrades to an honest all-undetermined image
-    // otherwise, rather than guessing. CURRENTLY SUPPORTS EXACTLY ONE
-    // seed_family (RelaxedNewtonPower) -- calling this on a map that is
-    // not structurally that family produces seeds that do not correspond
-    // to its actual critical points, and the result is meaningless (not a
-    // crash: those seeds' own orbits are followed under the map's real
-    // dynamics regardless, they simply are not the family's own critical
-    // points) -- this is a scope limitation to document at every call
-    // site, not a case this method itself detects or guards against.
+    // otherwise, rather than guessing. RelaxedNewtonPower is valid ONLY for
+    // a map that is structurally that family (relaxed_newton_power_n): on
+    // any other map its closed-form seeds are not the map's critical
+    // points and the result is meaningless. That was a real bug (z^2 + a
+    // was seeded at +-sqrt(a/(2-a)) and reported "escapes" over a fifth of
+    // the Mandelbrot interior); callers must pick FromMap for everything
+    // else, as app/session.py does.
+    //
+    // FromMap (the default for anything that is not relaxed Newton -- see
+    // CriticalPointFamily::FromMap): seeds are the map's own FREE critical
+    // points at each pixel. With one, the pixel reports its period. With
+    // more than one, it reports the period of the one selected by
+    // `critical_index` (clamped into range; same labelling as
+    // render_parameter's PerCritical), and `mixed`, if given, is replaced
+    // with an Image that is 1.0 where the RESOLVED free critical orbits
+    // reached cycles of different periods or different cycles of the same
+    // period (unresolved orbits are not counted either way), 0.0 elsewhere.
+    // RelaxedNewtonPower keeps its first-resolved tie-break above and
+    // leaves `mixed` all-zero (its n seeds agree by symmetry).
     Image render_parameter_period(CriticalPointFamily seed_family, int n,
                                   const std::atomic<bool>* cancel = nullptr,
                                   Image* undetermined = nullptr,
-                                  Image* is_infinity = nullptr) const;
+                                  Image* is_infinity = nullptr,
+                                  int critical_index = 0,
+                                  Image* mixed = nullptr) const;
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.

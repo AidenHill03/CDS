@@ -349,7 +349,15 @@ struct SeedOutcome {
     int  period      = 0;       // 0 iff !resolved -- never a real period otherwise
     bool is_infinity = false;
     bool resolved    = false;
+    // The points of the cycle this seed reached (empty iff !resolved;
+    // {inf} for infinity). Lets a caller tell two DIFFERENT cycles of the
+    // same period apart -- see Renderer::render_parameter_period's `mixed`.
+    std::vector<Cplx> cycle;
 };
+
+// True iff two resolved outcomes reached the SAME cycle: equal period and
+// some point of one is chordally within `tol` of the other's first point.
+bool same_cycle(const SeedOutcome& x, const SeedOutcome& y, double tol = 1e-6);
 
 std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const RationalMap& map,
                                            Cplx a, const FindAttractorsOptions& opts = {});

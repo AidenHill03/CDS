@@ -143,6 +143,29 @@ std::optional<Family> recognize_family(const RationalMap& m) {
 }
 
 // -----------------------------------------------------------------------------
+// relaxed_newton_power_n -- see the header. Evaluation-based rather than a
+// term/P-Q pattern match, so "z - a*(z^n-1)/(n*z^(n-1))" and
+// "((n-a)*z^n + a)/(n*z^(n-1))" (and a term-based build) all qualify.
+// -----------------------------------------------------------------------------
+std::optional<int> relaxed_newton_power_n(const RationalMap& m) {
+    const Cplx as[3] = {Cplx(0.3711, 0.2179), Cplx(1.4183, -0.6127), Cplx(-0.5813, 0.4417)};
+    const Cplx zs[3] = {Cplx(0.8123, 0.3391), Cplx(-0.4417, 1.1309), Cplx(1.7071, -0.9133)};
+    const int n = m.degree(as[0]);
+    if (n < 2) return std::nullopt;
+    for (const Cplx& a : as) {
+        if (m.degree(a) != n) return std::nullopt;
+        for (const Cplx& z : zs) {
+            const Cplx zn1 = std::pow(z, n - 1);
+            const Cplx want = ((static_cast<double>(n) - a) * zn1 * z + a) /
+                              (static_cast<double>(n) * zn1);
+            const Cplx got = m.eval(z, a);
+            if (!(std::abs(got - want) <= 1e-9 * std::max(1.0, std::abs(want)))) return std::nullopt;
+        }
+    }
+    return n;
+}
+
+// -----------------------------------------------------------------------------
 // Map
 // -----------------------------------------------------------------------------
 Map Map::composed(ComposedMap m) {
@@ -1075,6 +1098,8 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
             }
             return seeds;
         }
+        case CriticalPointFamily::FromMap:
+            break;   // per-pixel continuation; handled in render_parameter_period itself
     }
     return {};   // unreachable for a valid enumerator; never guess a seed list
 }
@@ -1083,11 +1108,13 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
 
 Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
                                         const std::atomic<bool>* cancel, Image* undetermined,
-                                        Image* is_infinity) const {
+                                        Image* is_infinity, int critical_index,
+                                        Image* mixed) const {
     const int res = view_.resolution;
     Image img(res, res);
     if (undetermined) *undetermined = Image(res, res);
     if (is_infinity) *is_infinity = Image(res, res);
+    if (mixed) *mixed = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     // An all-undetermined degenerate image (never guessed) matches
@@ -1101,27 +1128,71 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
     }
 
     const FindAttractorsOptions opts;
+    const bool from_map = seed_family == CriticalPointFamily::FromMap;
+
+    // FromMap: the free/pre-fixed split is structural -- once per render.
+    // A map whose critical points do not move gets them once, too.
+    FreeCriticalStructure free_s;
+    bool cp_fixed = false;
+    std::vector<Cplx> fixed_distinct;
+    if (from_map) {
+        free_s = custom->free_critical_structure();
+        cp_fixed = custom->critical_points_constant();
+        if (cp_fixed) fixed_distinct = custom->distinct_critical_points(Cplx(1.0, 0.0));
+    }
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
         for (int row = 0; row < res; ++row) {
             const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
-            const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
 
             int period = 0;
             bool inf_flag = false;
             bool resolved_any = false;
-            if (!seeds.empty()) {
-                // First tracked seed (in `seeds`' own generation order) that
-                // resolves wins -- see render_parameter_period's own doc
-                // comment for why this is a tie-break for RelaxedNewtonPower
-                // specifically (its n seeds are equivariant-guaranteed to
-                // agree), not a general disagreement policy.
-                for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
-                    if (outcome.resolved) {
-                        period = outcome.period;
-                        inf_flag = outcome.is_infinity;
+            bool mixed_flag = false;
+
+            if (from_map) {
+                std::vector<Cplx> distinct;
+                if (cp_fixed) {
+                    distinct = fixed_distinct;
+                } else {
+                    const ContinuedCriticalPoints cc =
+                        custom->distinct_critical_points_continued(a, prev_ordinary);
+                    distinct = cc.distinct;
+                    prev_ordinary = cc.ordinary_raw;
+                }
+                const std::vector<Cplx> seeds = custom->free_critical_points(a, distinct, free_s);
+                if (!seeds.empty()) {
+                    const std::vector<SeedOutcome> outs = per_seed_outcomes(seeds, *custom, a, opts);
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(outs.size()) - 1);
+                    const SeedOutcome& sel = outs[static_cast<std::size_t>(idx)];
+                    if (sel.resolved) {
+                        period = sel.period;
+                        inf_flag = sel.is_infinity;
                         resolved_any = true;
-                        break;
+                    }
+                    const SeedOutcome* first = nullptr;
+                    for (const SeedOutcome& o : outs) {
+                        if (!o.resolved) continue;
+                        if (!first) { first = &o; continue; }
+                        if (!same_cycle(*first, o, opts.tol * 1e3)) { mixed_flag = true; break; }
+                    }
+                }
+            } else {
+                const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
+                if (!seeds.empty()) {
+                    // First tracked seed (in `seeds`' own generation order) that
+                    // resolves wins -- see render_parameter_period's own doc
+                    // comment for why this is a tie-break for RelaxedNewtonPower
+                    // specifically (its n seeds are equivariant-guaranteed to
+                    // agree), not a general disagreement policy.
+                    for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
+                        if (outcome.resolved) {
+                            period = outcome.period;
+                            inf_flag = outcome.is_infinity;
+                            resolved_any = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1129,6 +1200,7 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
             img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
             if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
             if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+            if (mixed) mixed->at(col, row) = mixed_flag ? 1.0 : 0.0;
         }
     }, cancel);
     return img;

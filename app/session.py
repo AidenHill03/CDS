@@ -191,9 +191,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
     rates into one pixel value -- "slowest" (default), "fastest", or
     "per_critical" (see app.settings.PARAMETER_STRATEGY_CHOICES and
     cdx.ParameterStrategy's own doc comment); `critical_index` only matters
-    for "per_critical". Ignored entirely for a certified polynomial (which
-    has only one finite critical point to begin with) and for every other
-    mode.
+    for "per_critical", and also selects which free critical orbit
+    "parameter_period" reports. Ignored by every other mode.
 
     `cache`, if given, is consulted BEFORE rendering anything (a hit skips
     computation entirely, including find_attractors for basin mode) and
@@ -265,7 +264,7 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         clustering, reusing complete_attractors_from_seeds -- no per-pixel
         find_attractors/complete_attractors that would redundantly
         re-root-find the same critical points).
-      - "parameter_period" always returns a STACKED 3D array, shape (3,
+      - "parameter_period" always returns a STACKED 3D array, shape (4,
         height, width): index 0 is the PERIOD (measured in the raw
         z-plane, never a symmetry quotient -- see cdx.per_seed_outcomes'
         own doc comment) of the attracting cycle a TRACKED critical orbit
@@ -275,17 +274,13 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         1.0 where the resolved cycle is the point at infinity (kept OUT of
         index 0's own value and its golden-hue color family -- see
         app.color.color_parameter_period), 0.0 elsewhere. At most one of
-        indices 1/2 is ever 1.0 for the same pixel. `n`, the family's own
-        structural parameter (the power in relaxed-Newton-of-z^n-1), is
-        NOT a caller-supplied argument here -- it is recovered as
-        round(rational_map.degree(param)), which equals n exactly for
-        this family (see cdx.CriticalPointFamily.RelaxedNewtonPower's own
-        doc comment) regardless of what `param`/`a` happens to be bound
-        to. CURRENTLY SUPPORTS EXACTLY ONE seed family (relaxed Newton of
-        z^n-1) -- calling this mode on an unrelated map produces seeds
-        that do not correspond to its actual critical points, and the
-        result, while not a crash, is not meaningful (see cdx.Renderer.
-        render_parameter_period's own doc comment). Escape-radius-free.
+        indices 1/2 is ever 1.0 for the same pixel. Index 3 is
+        `mixed`: 1.0 where the map's resolved free critical orbits reached
+        different cycles (not coloured yet -- exposed for the UI to use
+        later). The tracked orbit is the map's own free critical point
+        selected by `critical_index` (cdx.CriticalPointFamily.FromMap), or
+        the closed-form seeds when cdx.relaxed_newton_power_n recognises
+        the map as relaxed Newton of z^n - 1. Escape-radius-free.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"unknown render mode {mode!r}; must be one of {RENDER_MODES}")
@@ -295,7 +290,8 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         key = make_key(rational_map.serialize(), param, mode, viewport.center, viewport.scale,
                        viewport.resolution, settings.max_iter, settings.escape_radius, settings.tol,
                        potential if mode in ("greens", "parameter_greens") else None,
-                       (strategy, critical_index) if mode == "parameter" else None)
+                       (strategy, critical_index) if mode == "parameter" else
+                       critical_index if mode == "parameter_period" else None)
         cached = cache.get(key)
         if cached is not None:
             return cached
@@ -368,20 +364,22 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         counts, unresolved, certain = renderer.render_parameter_basin(cancel)
         array = np.stack([counts, unresolved, certain])
     elif mode == "parameter_period":
-        # `n` is a FAMILY-structural choice (the power in relaxed-Newton-
-        # of-z^n-1), not the map's own single active dynamical parameter
-        # -- recovered from the map's own degree rather than threaded
-        # through as a separate piece of session state, since for this
-        # family map.degree(a) equals n exactly (numerator degree n,
-        # denominator degree n-1, after clearing denominators -- see
-        # cdx.CriticalPointFamily.RelaxedNewtonPower's own doc comment)
-        # for any `a` short of the single degenerate a=n point. Only ONE
-        # seed_family exists today; see this function's own docstring for
-        # why this mode is currently scoped to that one family's shape.
-        n = int(round(rational_map.degree(param)))
-        periods, undetermined, is_infinity = renderer.render_parameter_period(
-            cdx.CriticalPointFamily.RelaxedNewtonPower, n, cancel)
-        array = np.stack([periods, undetermined, is_infinity])
+        # Seeds: the closed-form relaxed-Newton critical points ONLY when the
+        # map structurally IS relaxed Newton of z^n - 1 (n recovered by
+        # cdx.relaxed_newton_power_n, not guessed from the degree); every
+        # other map tracks its own free critical points (FromMap), the one
+        # selected by critical_index. Seeding every map with the relaxed-
+        # Newton formula was a real bug: z^2 + a was iterated from
+        # +-sqrt(a/(2-a)) instead of 0 and reported "escapes" over ~21% of
+        # the Mandelbrot interior.
+        n = cdx.relaxed_newton_power_n(rational_map)
+        if n is not None:
+            family = cdx.CriticalPointFamily.RelaxedNewtonPower
+        else:
+            family, n = cdx.CriticalPointFamily.FromMap, 0
+        periods, undetermined, is_infinity, mixed = renderer.render_parameter_period(
+            family, n, cancel, critical_index)
+        array = np.stack([periods, undetermined, is_infinity, mixed])
     else:
         raise AssertionError(f"unreachable: mode={mode!r}")
 

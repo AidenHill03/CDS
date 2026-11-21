@@ -993,6 +993,135 @@ bool RationalMap::critical_points_constant() const {
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Free vs structurally pre-fixed critical points -- see FreeCriticalStructure
+// in the header for the rule this implements.
+// -----------------------------------------------------------------------------
+namespace {
+// Three parameter values with no special meaning: irrational-looking,
+// spread over the unit disc, none on the real axis, none a root of unity.
+// A property that holds at all three is (generically) structural.
+const Cplx kGenericParams[3] = {Cplx(0.3711, 0.2179), Cplx(-0.5813, 0.4417),
+                                Cplx(0.2269, -0.7351)};
+
+bool finite_cplx(Cplx z) { return std::isfinite(z.real()) && std::isfinite(z.imag()); }
+
+double chordal_dist(Cplx z, Cplx w) {
+    const bool zi = !finite_cplx(z), wi = !finite_cplx(w);
+    if (zi && wi) return 0.0;
+    if (zi) return 2.0 / std::sqrt(1.0 + std::norm(w));
+    if (wi) return 2.0 / std::sqrt(1.0 + std::norm(z));
+    return 2.0 * std::abs(z - w) / std::sqrt((1.0 + std::norm(z)) * (1.0 + std::norm(w)));
+}
+
+bool near_rel(Cplx z, Cplx w, double rel_tol) {
+    return std::abs(z - w) < rel_tol * std::max(1.0, std::max(std::abs(z), std::abs(w)));
+}
+}  // namespace
+
+FreeCriticalStructure RationalMap::free_critical_structure() const {
+    constexpr double kSameLocation = 1e-6;   // relative; a multiple root's estimates spread ~1e-5..1e-6
+    constexpr double kFixedTol     = 1e-7;   // chordal; "f(w) == w"
+
+    FreeCriticalStructure s;
+    std::vector<Cplx> crit[3];
+    std::vector<Cplx> poles[3];
+    bool inf_fixed[3] = {false, false, false};
+    for (int i = 0; i < 3; ++i) {
+        crit[i] = distinct_critical_points(kGenericParams[i]);
+        poles[i] = pole_locations(kGenericParams[i]);
+        for (const FixedPoint& fp : fixed_points(kGenericParams[i])) {
+            if (!finite_cplx(fp.point)) inf_fixed[i] = true;
+        }
+    }
+    const bool inf_fixed_all = inf_fixed[0] && inf_fixed[1] && inf_fixed[2];
+    s.exclude_infinity = inf_fixed_all;
+    s.exclude_poles = inf_fixed_all;
+
+    auto is_pole = [](Cplx z, const std::vector<Cplx>& ps) {
+        for (Cplx p : ps) if (near_rel(z, p, kSameLocation)) return true;
+        return false;
+    };
+
+    // Finite, non-pole candidates from the first generic parameter; each must
+    // reappear at the same location at the other two, pre-fixed onto the
+    // same target every time.
+    for (Cplx c : crit[0]) {
+        if (!finite_cplx(c) || is_pole(c, poles[0])) continue;
+        bool excluded = true;
+        Cplx target0(0.0, 0.0);
+        for (int i = 0; i < 3 && excluded; ++i) {
+            const Cplx a = kGenericParams[i];
+            bool present = false;
+            for (Cplx ci : crit[i]) if (finite_cplx(ci) && near_rel(c, ci, kSameLocation)) present = true;
+            if (!present) { excluded = false; break; }
+
+            const Cplx w = eval(c, a);
+            bool prefixed;
+            if (!finite_cplx(w) || std::abs(w) > 1e12) {
+                prefixed = inf_fixed[i];
+            } else {
+                prefixed = chordal_dist(eval(w, a), w) < kFixedTol;
+            }
+            if (!prefixed) { excluded = false; break; }
+            const Cplx target = finite_cplx(w) && std::abs(w) <= 1e12
+                                    ? w : Cplx(std::numeric_limits<double>::infinity(), 0.0);
+            if (i == 0) target0 = target;
+            else if (chordal_dist(target, target0) > kFixedTol) excluded = false;
+        }
+        if (excluded) s.excluded_finite.push_back(c);
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        const int n = static_cast<int>(free_critical_points(kGenericParams[i], crit[i], s).size());
+        s.generic_free_count = std::max(s.generic_free_count, n);
+    }
+    return s;
+}
+
+std::vector<Cplx> RationalMap::free_critical_points(Cplx a, const std::vector<Cplx>& distinct,
+                                                    const FreeCriticalStructure& s) const {
+    constexpr double kMatch = 1e-4;   // distinct_critical_points' own dedup radius
+    std::vector<Cplx> poles;
+    if (s.exclude_poles && !is_polynomial_structurally()) poles = pole_locations(a);
+
+    std::vector<Cplx> out;
+    out.reserve(distinct.size());
+    for (Cplx z : distinct) {
+        if (!finite_cplx(z)) {
+            if (!s.exclude_infinity) out.push_back(z);
+            continue;
+        }
+        bool drop = false;
+        for (Cplx p : poles) if (near_rel(z, p, 1e-6)) { drop = true; break; }
+        for (Cplx e : s.excluded_finite) if (!drop && near_rel(z, e, kMatch)) { drop = true; break; }
+        if (!drop) out.push_back(z);
+    }
+    return out;
+}
+
+bool RationalMap::polynomial_coefficients(Cplx a, std::vector<Cplx>& out) const {
+    if (!is_polynomial_structurally()) return false;
+    std::vector<Cplx> c;
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        c = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+        const Cplx q0 = Q.empty() ? Cplx(1.0, 0.0) : Q[0];
+        if (q0 != Cplx(1.0, 0.0)) for (Cplx& v : c) v /= q0;
+    } else {
+        for (const auto& t : poly_) {
+            if (!t.enabled) continue;
+            const std::size_t k = static_cast<std::size_t>(t.exponent);
+            if (c.size() <= k) c.resize(k + 1, Cplx(0.0, 0.0));
+            c[k] += t.effective_coeff(a);
+        }
+    }
+    while (!c.empty() && c.back() == Cplx(0.0, 0.0)) c.pop_back();
+    out = std::move(c);
+    return true;
+}
+
 // P(z) - z*Q(z) (pq_-backed) or N(z) - z*D(z) after clearing denominators
 // (term-based) -- the ONE polynomial whose roots are the finite fixed-point
 // candidates at `a`. Factored out of fixed_points() for the same reason as

@@ -301,6 +301,33 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 
 namespace {
 
+// A closure found at step k is only a cycle of period DIVIDING k: an orbit
+// converging to a fixed point with multiplier ~0.96*e^(2*pi*i/3) satisfies
+// |f^3(z) - z| < tol several hundred steps before |f(z) - z| does (the
+// rotation brings it back near itself every 3 steps), so the detector
+// reported "period 3" for a fixed point -- measured on the Mandelbrot
+// interior next to every bulb tangency, ~0.9% of interior pixels, with
+// multiples up to 21 for a 7-cycle. Reduce to the smallest q | k whose
+// points repeat with period q, to within the cycle-dedupe tolerance. A
+// genuine k-cycle never has two of its points that close except within
+// ~tol^2 of the bifurcation parameter where it is born.
+void reduce_to_minimal_period(std::vector<Cplx>& cyc, double tol) {
+    const int k = static_cast<int>(cyc.size());
+    for (int q = 1; q < k; ++q) {
+        if (k % q != 0) continue;
+        bool repeats = true;
+        for (int i = q; i < k && repeats; ++i) {
+            if (chordal(cyc[static_cast<std::size_t>(i)],
+                        cyc[static_cast<std::size_t>(i % q)]) >= tol) repeats = false;
+        }
+        if (repeats) { cyc.resize(static_cast<std::size_t>(q)); return; }
+    }
+}
+
+}  // namespace
+
+namespace {
+
 // find_attractors_from_seeds' body, over an already-bound map so a caller
 // making several discovery calls at the SAME (map, a) -- per_seed_outcomes,
 // one call per seed -- shares one BoundMap (and therefore one pole solve and
@@ -539,6 +566,7 @@ std::vector<Cycle> find_attractors_from_seeds_bound(const std::vector<Cplx>& see
                 !hit_inf_mid_orbit ? confirm_weakly_attracting(orbit, f, opts)
                                    : std::vector<Cplx>{};
             if (!refined.empty()) {
+                reduce_to_minimal_period(refined, opts.tol * 1e3);
                 add_cycle(cycles, std::move(refined), opts.tol * 1e3);
                 continue;
             }
@@ -548,6 +576,7 @@ std::vector<Cycle> find_attractors_from_seeds_bound(const std::vector<Cplx>& see
         }
 
         std::vector<Cplx> cyc(orbit.begin(), orbit.begin() + found);
+        reduce_to_minimal_period(cyc, opts.tol * 1e3);
 
         // ---- verify it is actually attracting ------------------------------
         if (opts.verify_multiplier) {
@@ -734,6 +763,7 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
             outcome.resolved = true;
             outcome.is_infinity = !is_finite_cplx(cycles.front().points.front());
             outcome.period = static_cast<int>(cycles.front().points.size());
+            outcome.cycle = cycles.front().points;
         } else if (!endpoints.empty()) {
             // Reconcile against the algebraic ground truth (same tolerance
             // complete_attractors_from_seeds' own union uses): this seed's
@@ -751,6 +781,7 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
                     outcome.resolved = true;
                     outcome.period = 1;
                     outcome.is_infinity = fp_inf;
+                    outcome.cycle = {fp.point};
                     break;
                 }
             }
@@ -758,6 +789,17 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
         out.push_back(outcome);
     }
     return out;
+}
+
+bool same_cycle(const SeedOutcome& x, const SeedOutcome& y, double tol) {
+    if (!x.resolved || !y.resolved) return false;
+    if (x.period != y.period || x.is_infinity != y.is_infinity) return false;
+    if (x.is_infinity) return true;
+    if (x.cycle.empty() || y.cycle.empty()) return false;
+    for (Cplx p : x.cycle) {
+        if (chordal(p, y.cycle.front()) < tol) return true;
+    }
+    return false;
 }
 
 bool polynomial_escape_certified(const RationalMap& map) {

@@ -145,7 +145,16 @@ PYBIND11_MODULE(cdx, m) {
     py::enum_<CriticalPointFamily>(m, "CriticalPointFamily")
         .value("RelaxedNewtonPower", CriticalPointFamily::RelaxedNewtonPower,
               "Relaxed Newton of z^n-1 -- see the C++ enum's own doc comment for "
-              "the closed-form critical points this generates per pixel.");
+              "the closed-form critical points this generates per pixel. Valid ONLY "
+              "for a map that cdx.relaxed_newton_power_n recognises.")
+        .value("FromMap", CriticalPointFamily::FromMap,
+              "The map's own FREE critical points, per pixel (structurally "
+              "pre-fixed ones, e.g. infinity for a polynomial, dropped). The "
+              "default for every map that is not relaxed Newton.");
+
+    m.def("relaxed_newton_power_n", &relaxed_newton_power_n, py::arg("map"),
+          "n if `map` is structurally relaxed Newton of z^n - 1 "
+          "(((n-a)z^n + a)/(n z^(n-1)) as a function of z and a), else None.");
 
     // ---- ParameterStrategy (Renderer.render_parameter's rational path) -------
     py::enum_<ParameterStrategy>(m, "ParameterStrategy")
@@ -292,6 +301,25 @@ PYBIND11_MODULE(cdx, m) {
              "and infinity (multiplicity |p-q|-1 when |p-q| >= 2). Total "
              "count is 2*degree(a)-2 (Riemann-Hurwitz). Infinity is "
              "complex(float('inf'), 0).")
+        .def("free_critical_points",
+             [](const RationalMap& m, Cplx a) {
+                 return m.free_critical_points(a, m.distinct_critical_points(a),
+                                               m.free_critical_structure());
+             },
+             py::arg("a"),
+             "distinct_critical_points(a) minus the structurally pre-fixed ones "
+             "(infinity for a polynomial, a pole mapping to a fixed infinity, a "
+             "parameter-independent fixed critical point) -- see the C++ "
+             "FreeCriticalStructure comment for the rule.")
+        .def("polynomial_coefficients",
+             [](const RationalMap& m, Cplx a) -> py::object {
+                 std::vector<Cplx> c;
+                 if (!m.polynomial_coefficients(a, c)) return py::none();
+                 return py::cast(c);
+             },
+             py::arg("a"),
+             "Ascending coefficients of f at `a` if the map is structurally a "
+             "polynomial, else None.")
         .def("distinct_critical_points", &RationalMap::distinct_critical_points,
              py::arg("a"), py::arg("rel_tol") = 1e-4,
              "critical_points(a), deduplicated to one representative per "
@@ -708,43 +736,40 @@ PYBIND11_MODULE(cdx, m) {
 
         .def("render_parameter_period",
              [](const Renderer& r, CriticalPointFamily seed_family, int n,
-                std::shared_ptr<CancelToken> cancel) {
+                std::shared_ptr<CancelToken> cancel, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 Image undetermined, is_infinity;
-                 py::array_t<double> periods_arr, undetermined_arr, is_infinity_arr;
+                 Image undetermined, is_infinity, mixed;
+                 py::array_t<double> periods_arr, undetermined_arr, is_infinity_arr, mixed_arr;
                  {
                      py::gil_scoped_release release;
                      Image img = r.render_parameter_period(seed_family, n, cp, &undetermined,
-                                                           &is_infinity);
+                                                           &is_infinity, critical_index, &mixed);
                      py::gil_scoped_acquire acquire;
                      periods_arr = image_to_numpy(std::move(img));
                      undetermined_arr = image_to_numpy(std::move(undetermined));
                      is_infinity_arr = image_to_numpy(std::move(is_infinity));
+                     mixed_arr = image_to_numpy(std::move(mixed));
                  }
-                 return py::make_tuple(periods_arr, undetermined_arr, is_infinity_arr);
+                 return py::make_tuple(periods_arr, undetermined_arr, is_infinity_arr, mixed_arr);
              },
              py::arg("seed_family"), py::arg("n"), py::arg("cancel") = nullptr,
+             py::arg("critical_index") = 0,
              "Parameter_period: each pixel is a parameter value; returns (periods, "
-             "undetermined, is_infinity). periods is the PERIOD (measured in the "
-             "raw z-plane -- see per_seed_outcomes, never a symmetry quotient) of "
-             "the attracting cycle a TRACKED critical orbit converges to, where "
-             "`seed_family` (a CriticalPointFamily) supplies that orbit's closed-"
-             "form location per pixel -- deliberately NOT RationalMap.distinct_"
-             "critical_points(a) the way Parameter_basin uses, since that includes "
-             "critical points structurally unrelated to the tracked orbit (see "
-             "Renderer.render_parameter_period's own C++ doc comment for a measured "
-             "example). `n` is the family's own structural parameter (e.g. the "
-             "power in relaxed-Newton-of-z^n-1; for that family it equals map."
-             "degree(a) exactly, if the caller only has the map itself). "
-             "undetermined is 1.0 where no tracked seed resolved within budget "
-             "(a genuine residual -- Siegel/Herman/parabolic -- never a fabricated "
+             "undetermined, is_infinity, mixed). periods is the PERIOD (measured "
+             "in the raw z-plane -- see per_seed_outcomes, never a symmetry "
+             "quotient) of the attracting cycle a TRACKED critical orbit converges "
+             "to. `seed_family` picks the seeds: FromMap (the map's own free "
+             "critical points; the period of the one selected by critical_index) "
+             "for any map, or RelaxedNewtonPower (closed form, `n` = the power) "
+             "ONLY for a map cdx.relaxed_newton_power_n recognises. undetermined "
+             "is 1.0 where the tracked orbit did not resolve within budget (a "
+             "genuine residual -- Siegel/Herman/parabolic -- never a fabricated "
              "period); is_infinity is 1.0 where the resolved cycle is the point at "
-             "infinity, kept OUT of `periods`' own value and its golden-hue color "
-             "family. At most one of the two is ever 1.0 for the same pixel. "
+             "infinity, kept OUT of `periods`' own value. At most one of the two "
+             "is ever 1.0 for the same pixel. mixed (FromMap only) is 1.0 where "
+             "the resolved free critical orbits reached different cycles. "
              "Escape-radius-free. Requires a Custom-wrapped map -- degrades to an "
-             "honest all-undetermined image otherwise. CURRENTLY SUPPORTS EXACTLY "
-             "ONE seed_family (RelaxedNewtonPower) -- see CriticalPointFamily's "
-             "own doc comment before calling this on any other map shape.")
+             "honest all-undetermined image otherwise.")
 
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,
@@ -864,7 +889,8 @@ PYBIND11_MODULE(cdx, m) {
     py::class_<SeedOutcome>(m, "SeedOutcome")
         .def_readonly("period",      &SeedOutcome::period)
         .def_readonly("is_infinity", &SeedOutcome::is_infinity)
-        .def_readonly("resolved",    &SeedOutcome::resolved);
+        .def_readonly("resolved",    &SeedOutcome::resolved)
+        .def_readonly("cycle",       &SeedOutcome::cycle);
 
     m.def("per_seed_outcomes", &per_seed_outcomes, py::arg("seeds"), py::arg("map"), py::arg("a"),
           py::arg("opts") = FindAttractorsOptions{},
