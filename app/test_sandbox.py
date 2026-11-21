@@ -2581,12 +2581,9 @@ def main() -> None:
           "not just the library.txt entry")
 
     placeholder_image = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
-    saved_row = next(row for row in range(window.library_panel._list.count())
-                     if window.library_panel._list.item(row).data(_NAME_ROLE)
-                     == "stage-c-sidecar-family")
-    saved_icon = (window.library_panel._list.item(saved_row).icon()
+    saved_icon = (window.library_panel.row_icon("stage-c-sidecar-family")
                  .pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage())
-    check(saved_icon != placeholder_image,
+    check(not saved_icon.isNull() and saved_icon != placeholder_image,
           "...and the live LibraryPanel's own list icon reflects it immediately, through the "
           "real _on_library_changed -> refresh_previews wiring, not just on the next full "
           "app restart")
@@ -3242,6 +3239,43 @@ def main() -> None:
     dialog._legend_checkbox.setChecked(True)
     check(dialog.overlay_flags().get("show_legend") is True, "checking it adds the legend to the export")
     dialog.close()
+
+    # ---- UI redesign, Step 4: sidebar ---------------------------------------------------
+    print("\nsidebar: library follows loads, Info shows this map:")
+    lib = window.library_panel
+    lib._select_by_name("newton3")
+    lib._load_selected()
+    check(lib.loaded_name() == "newton3" and lib._selected_name() == "newton3"
+          and window.top_bar.map_chip.name_label.text() == "newton3",
+          "loading a family moves the loaded dot and selection, and the map chip names it")
+    check("Loaded newton3" in window.statusBar().currentMessage(),
+          "loading shows a transient 'Loaded newton3' status message")
+    check(window.workspaces.currentWidget() is window.explore_workspace,
+          "after loading, the planes are showing (focus goes back to them)")
+    window.equation_panel._formula_edit.setText("z^3 - 1 + a*z")
+    window.equation_panel._apply()
+    check(window.map_display_name() == "custom" and window.top_bar.map_chip.name_label.text() == "custom"
+          and lib.loaded_name() is None,
+          "editing the formula away from the entry makes the chip read custom and clears the dot")
+    lib._select_by_name("mandelbrot")
+    lib._load_selected()
+    sandbox_module._PRESET_THUMBNAIL_CACHE.clear()
+    lib._refresh_list()
+    placeholder = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
+    check(all(lib.row_icon(n).pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage() != placeholder
+              for n in sandbox_module.PRESET_FAMILY_NAMES),
+          "every preset row shows a real rendered thumbnail")
+    check(len(sandbox_module._PRESET_THUMBNAIL_CACHE) == len(sandbox_module.PRESET_FAMILY_NAMES),
+          "...cached once per preset")
+    lib._refresh_list()
+    check(len(sandbox_module._PRESET_THUMBNAIL_CACHE) == len(sandbox_module.PRESET_FAMILY_NAMES),
+          "a rebuild reuses the cache instead of re-rendering")
+    window.sidebar.reveal(window.info_panel)
+    rows = dict(window.info_panel.this_map_rows())
+    check(rows.get("Degree") == "2" and "∞" in rows.get("Critical points", "")
+          and any(k.startswith("Orbit of") for k in rows),
+          "Info's This map section: degree, critical points (∞ included), each critical orbit's fate")
+    check("This map" in window.info_panel.toPlainText(), "...shown after the controls")
 
     # ---- Info tab: generated, last, and extended by module panels --------------------
     print("\nInfo tab:")

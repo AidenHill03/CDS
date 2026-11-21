@@ -56,14 +56,17 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
-                               QPlainTextEdit, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
+                               QPushButton, QToolButton, QVBoxLayout, QWidget)
 
 import cdx
+from app import theme
 from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
 from app.settings import preview_path_for
+from app.widgets import ElidedLabel, more_icon, pretty_formula
 
 # Matches self._list.setIconSize below -- a saved family's sidecar preview
 # (see app.sandbox.THUMBNAIL_RESOLUTION/preview_path_for) is rendered
@@ -87,6 +90,8 @@ _DEFAULT_VIEWS: dict[str, tuple[complex, float]] = {
 _FALLBACK_VIEW: tuple[complex, float] = (complex(0.0, 0.0), 2.0)
 
 _NAME_ROLE = Qt.ItemDataRole.UserRole
+_ICON_ROLE = Qt.ItemDataRole.UserRole + 1     # the row's thumbnail (drawn by its row widget)
+_ROW_HEIGHT = 48                               # >= 44 px: sidebar touch-target minimum
 
 
 def default_view_for(name: str) -> tuple[complex, float]:
@@ -212,14 +217,11 @@ def default_view_for_mode(rational_map: cdx.RationalMap, param: complex,
     return default_dynamical_view(rational_map, param)
 
 
-# A flat mid-grey square -- built once, lazily, and reused for every entry
-# without its own sidecar (every preset, always, since _regenerate_library_
-# previews in app/sandbox.py only ever writes one for a non-preset entry;
-# also any brand-new user entry from before its first _on_library_changed
-# has run). Module-level rather than per-QApplication-instance state
-# because QPixmap itself can't be constructed before a QApplication exists
-# -- built lazily on first use, not at import time, for the same reason
-# every other QPixmap/QIcon in this codebase is.
+# A flat placeholder square -- built once, lazily, and reused for every
+# entry without a thumbnail (a user entry before its first sidecar is
+# written; a preset when no thumbnail provider was given, e.g. in tests).
+# Module-level because QPixmap can't be constructed before a QApplication
+# exists -- built on first use, not at import time.
 _placeholder_icon_cache: QIcon | None = None
 
 
@@ -227,7 +229,7 @@ def _placeholder_icon() -> QIcon:
     global _placeholder_icon_cache
     if _placeholder_icon_cache is None:
         pixmap = QPixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE)
-        pixmap.fill(Qt.GlobalColor.lightGray)
+        pixmap.fill(theme.color("raised"))
         _placeholder_icon_cache = QIcon(pixmap)
     return _placeholder_icon_cache
 
@@ -244,13 +246,92 @@ def _icon_for(name: str) -> QIcon:
     return _placeholder_icon()
 
 
+class LibraryRow(QWidget):
+    """One list row: loaded dot, thumbnail, name, formula, and a ⋯ menu."""
+
+    def __init__(self, name: str, formula: str, icon: QIcon, is_preset: bool,
+                 parent: QWidget | None = None):
+        super().__init__(parent)
+        self.name = name
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 4, 4)
+        layout.setSpacing(8)
+        self.dot = QLabel("●", self)
+        self.dot.setProperty("role", "loadedDot")
+        self.dot.setToolTip("Currently loaded")
+        self.dot.setFixedWidth(10)
+        layout.addWidget(self.dot)
+        self.thumbnail = QLabel(self)
+        self.thumbnail.setFixedSize(_LIST_ICON_SIZE, _LIST_ICON_SIZE)
+        layout.addWidget(self.thumbnail)
+        self.set_icon(icon)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        self.name_label = QLabel(name, self)
+        self.formula_label = ElidedLabel(pretty_formula(formula) or "(empty map)", self)
+        self.formula_label.setProperty("role", "muted")
+        self.formula_label.setProperty("mono", True)
+        text.addWidget(self.name_label)
+        text.addWidget(self.formula_label)
+        layout.addLayout(text, 1)
+        self.menu_button = QToolButton(self)
+        self.menu_button.setProperty("role", "icon")
+        self.menu_button.setIcon(more_icon(theme.color("muted")))
+        self.menu_button.setToolTip(f"Actions for {name}")
+        self.menu_button.setAccessibleName(f"Actions for {name}")
+        self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        layout.addWidget(self.menu_button)
+        for label in (self.name_label, self.formula_label, self.thumbnail, self.dot):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.set_loaded(False)
+
+    def set_icon(self, icon: QIcon) -> None:
+        self.thumbnail.setPixmap(icon.pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE))
+
+    def set_loaded(self, loaded: bool) -> None:
+        # Keep the space (so names line up), only show/hide the dot itself.
+        self.dot.setText("●" if loaded else "")
+
+
+class _ReturnLoads(QObject):
+    """Return/Enter on the list loads the current entry."""
+
+    def __init__(self, panel: "LibraryPanel"):
+        super().__init__(panel)
+        self._panel = panel
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return,
+                                                                     Qt.Key.Key_Enter):
+            self._panel._load_selected()
+            return True
+        return False
+
+
 class LibraryPanel(QWidget):
+    """Search, then two sections (Presets, Yours), each row with a loaded
+    dot, a thumbnail and a ⋯ menu; the selected entry's formula and notes
+    below; "Save current as..." at the bottom.
+
+    `thumbnail_provider(name, map) -> QIcon | None` supplies preset
+    thumbnails (SandboxWindow renders and caches them); `confirm(title,
+    text) -> bool` asks before a delete (a QMessageBox by default; tests
+    inject their own).
+    """
+
     def __init__(self, session, on_load: Callable[[], None], on_change: Callable[[], None],
-                parent: QWidget | None = None):
+                parent: QWidget | None = None,
+                thumbnail_provider: Callable[[str, cdx.RationalMap], QIcon | None] | None = None,
+                confirm: Callable[[str, str], bool] | None = None):
         super().__init__(parent)
         self.session = session
         self._on_load = on_load
         self._on_change = on_change
+        self._thumbnail_provider = thumbnail_provider
+        self._confirm = confirm or self._confirm_with_dialog
+        self._loaded_name: str | None = None
+        self._rows: dict[str, LibraryRow] = {}
 
         self._build_ui()
         self._refresh_list()
@@ -258,81 +339,192 @@ class LibraryPanel(QWidget):
     # ---- construction ------------------------------------------------------------------
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-        split = QHBoxLayout()
-        self._list = QListWidget()
-        self._list.setIconSize(QSize(_LIST_ICON_SIZE, _LIST_ICON_SIZE))
+        self.search_field = QLineEdit(self)
+        self.search_field.setPlaceholderText("Search families")
+        self.search_field.setAccessibleName("Search families")
+        self.search_field.setClearButtonEnabled(True)
+        self.search_field.textChanged.connect(self._apply_filter)
+        layout.addWidget(self.search_field)
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._list.setMinimumHeight(_ROW_HEIGHT * 4)
         self._list.currentItemChanged.connect(lambda *_: self._refresh_detail())
-        # Double-click = Load (the press already made it the current item).
+        # Double-click or Return = Load (the press already made it current).
         self._list.itemDoubleClicked.connect(lambda _item: self._load_selected())
-        split.addWidget(self._list, 1)
+        self._list.installEventFilter(_ReturnLoads(self))
+        layout.addWidget(self._list, 1)
 
-        detail = QVBoxLayout()
-        self._formula_label = QLabel()
+        self._formula_label = QLabel(self)
         self._formula_label.setWordWrap(True)
         self._formula_label.setProperty("mono", True)
-        detail.addWidget(self._formula_label)
-        detail.addWidget(QLabel("Notes:"))
-        self._notes_edit = QPlainTextEdit()
+        self._formula_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self._formula_label)
+        notes_caption = QLabel("NOTES", self)
+        notes_caption.setProperty("role", "section")
+        layout.addWidget(notes_caption)
+        self._notes_edit = QPlainTextEdit(self)
+        self._notes_edit.setAccessibleName("Notes")
+        self._notes_edit.setMaximumHeight(110)
         self._notes_edit.textChanged.connect(self._on_notes_edited)
-        detail.addWidget(self._notes_edit)
-        split.addLayout(detail, 1)
-        layout.addLayout(split)
+        layout.addWidget(self._notes_edit)
 
-        self._error_label = QLabel()
+        self._error_label = QLabel(self)
         self._error_label.setWordWrap(True)
         self._error_label.setProperty("role", "error")
         layout.addWidget(self._error_label)
 
-        row = QHBoxLayout()
-        self._load_button = QPushButton("Load")
-        self._load_button.clicked.connect(self._load_selected)
-        self._save_button = QPushButton("Save Current As...")
+        self._save_button = QPushButton("Save current as…", self)
+        self._save_button.setToolTip("Add the current map to Yours under a new name")
         self._save_button.clicked.connect(self._save_current_as)
-        self._rename_button = QPushButton("Rename...")
-        self._rename_button.clicked.connect(self._rename_selected)
-        self._delete_button = QPushButton("Delete")
-        self._delete_button.clicked.connect(self._delete_selected)
-        for b in (self._load_button, self._save_button, self._rename_button,
-                 self._delete_button):
-            row.addWidget(b)
-        row.addStretch(1)
-        layout.addLayout(row)
+        layout.addWidget(self._save_button)
 
     # ---- refresh: rebuild the list (and detail pane) from session.library --------------
+    def _add_section(self, title: str) -> None:
+        item = QListWidgetItem()
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setSizeHint(QSize(0, 28))
+        self._list.addItem(item)
+        label = QLabel(title.upper())
+        label.setProperty("role", "section")
+        label.setContentsMargins(4, 6, 0, 0)
+        self._list.setItemWidget(item, label)
+
+    def _row_icon(self, name: str, entry) -> QIcon:
+        if name in PRESET_FAMILY_NAMES:
+            icon = self._thumbnail_provider(name, entry) if self._thumbnail_provider else None
+            return icon if icon is not None else _placeholder_icon()
+        return _icon_for(name)
+
     def _refresh_list(self, select: str | None = None) -> None:
         self._list.blockSignals(True)
         self._list.clear()
-        for entry_name in self.session.library.names():
-            label = f"{entry_name}  (preset)" if entry_name in PRESET_FAMILY_NAMES else entry_name
-            item = QListWidgetItem(_icon_for(entry_name), label)
-            item.setData(_NAME_ROLE, entry_name)
-            self._list.addItem(item)
+        self._rows.clear()
+        names = list(self.session.library.names())
+        presets = [n for n in names if n in PRESET_FAMILY_NAMES]
+        yours = [n for n in names if n not in PRESET_FAMILY_NAMES]
+        for title, group in (("Presets", presets), ("Yours", yours)):
+            if not group:
+                continue
+            self._add_section(title)
+            for name in group:
+                entry = self.session.library.find(name)
+                icon = self._row_icon(name, entry)
+                item = QListWidgetItem()
+                item.setData(_NAME_ROLE, name)
+                item.setData(_ICON_ROLE, icon)
+                item.setSizeHint(QSize(0, _ROW_HEIGHT))
+                item.setToolTip("Double-click or press Return to load")
+                self._list.addItem(item)
+                row = LibraryRow(name, entry.to_formula() if entry is not None else "", icon,
+                                 name in PRESET_FAMILY_NAMES)
+                row.menu_button.setMenu(self._row_menu(name))
+                row.set_loaded(name == self._loaded_name)
+                self._list.setItemWidget(item, row)
+                self._rows[name] = row
         self._list.blockSignals(False)
-        target = select if select is not None else self.session.map.name
+        target = select if select is not None else (self._loaded_name or self.session.map.name)
         self._select_by_name(target)
+        self._apply_filter(self.search_field.text())
         self._refresh_detail()
 
-    def refresh_previews(self) -> None:
-        """Re-reads each item's icon from disk without touching selection or
-        the detail pane -- called by SandboxWindow._on_library_changed after
-        it (re)writes the sidecar thumbnails themselves (this panel never
-        touches disk directly -- see this module's own docstring), so an
-        icon that just got (re)generated actually shows up without a full
-        _refresh_list rebuild (which would also reset the current
-        selection).
-        """
+    def _row_menu(self, name: str) -> QMenu:
+        menu = QMenu(self)
+        load = menu.addAction("Load")
+        load.triggered.connect(lambda: (self._select_by_name(name), self._load_selected()))
+        if name not in PRESET_FAMILY_NAMES:   # presets are read-only: no rename/delete
+            menu.addSeparator()
+            overwrite = menu.addAction("Save current map here")
+            overwrite.triggered.connect(lambda: self._do_save_as(name))
+            rename = menu.addAction("Rename…")
+            rename.triggered.connect(lambda: (self._select_by_name(name), self._rename_selected()))
+            delete = menu.addAction("Delete…")
+            delete.triggered.connect(lambda: (self._select_by_name(name), self._delete_selected()))
+        return menu
+
+    def row_menu_texts(self, name: str) -> list[str]:
+        row = self._rows.get(name)
+        if row is None:
+            return []
+        return [a.text() for a in row.menu_button.menu().actions() if a.text()]
+
+    def row_icon(self, name: str) -> QIcon | None:
+        item = self._item_for(name)
+        return item.data(_ICON_ROLE) if item is not None else None
+
+    def entry_names(self) -> list[str]:
+        """The entries in list order (section headers excluded)."""
+        return [self._list.item(r).data(_NAME_ROLE) for r in range(self._list.count())
+                if self._list.item(r).data(_NAME_ROLE) is not None]
+
+    def visible_entry_names(self) -> list[str]:
+        return [n for n in self.entry_names() if not self._item_for(n).isHidden()]
+
+    def _item_for(self, name: str) -> QListWidgetItem | None:
         for row in range(self._list.count()):
             item = self._list.item(row)
-            item.setIcon(_icon_for(item.data(_NAME_ROLE)))
+            if item.data(_NAME_ROLE) == name:
+                return item
+        return None
+
+    def refresh_previews(self) -> None:
+        """Re-reads each row's thumbnail without touching selection or the
+        detail pane -- called by SandboxWindow._on_library_changed after it
+        (re)writes the sidecar thumbnails (this panel never writes to disk)."""
+        for name in self.entry_names():
+            item = self._item_for(name)
+            icon = self._row_icon(name, self.session.library.find(name))
+            item.setData(_ICON_ROLE, icon)
+            if name in self._rows:
+                self._rows[name].set_icon(icon)
+
+    # ---- search ----------------------------------------------------------------------------
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        section_item = None
+        section_has_visible = False
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            name = item.data(_NAME_ROLE)
+            if name is None:   # a section header
+                if section_item is not None:
+                    section_item.setHidden(not section_has_visible)
+                section_item, section_has_visible = item, False
+                continue
+            entry = self.session.library.find(name)
+            formula = entry.to_formula() if entry is not None else ""
+            haystack = f"{name} {formula} {pretty_formula(formula)}".lower()
+            hidden = bool(needle) and needle not in haystack
+            item.setHidden(hidden)
+            section_has_visible = section_has_visible or not hidden
+        if section_item is not None:
+            section_item.setHidden(not section_has_visible)
+
+    # ---- loaded entry: a dot, and the selection follows it ------------------------------
+    def set_loaded(self, name: str | None) -> None:
+        """Marks `name` as the loaded family (None: the map is custom) and
+        selects its row."""
+        self._loaded_name = name
+        for row_name, row in self._rows.items():
+            row.set_loaded(row_name == name)
+        if name is not None and name in self._rows:
+            self._select_by_name(name)
+
+    def loaded_name(self) -> str | None:
+        return self._loaded_name
 
     def _select_by_name(self, name: str) -> None:
-        for row in range(self._list.count()):
-            if self._list.item(row).data(_NAME_ROLE) == name:
-                self._list.setCurrentRow(row)
-                return
-        if self._list.count() > 0:
-            self._list.setCurrentRow(0)
+        item = self._item_for(name)
+        if item is not None:
+            self._list.setCurrentItem(item)
+            return
+        names = self.entry_names()
+        if names:
+            self._list.setCurrentItem(self._item_for(names[0]))
 
     def _selected_name(self) -> str | None:
         item = self._list.currentItem()
@@ -347,10 +539,12 @@ class LibraryPanel(QWidget):
             self._notes_edit.setReadOnly(True)
         else:
             entry = self.session.library.find(name)
-            self._formula_label.setText((entry.to_formula() if entry is not None else "")
-                                        or "(empty map)")
+            formula = entry.to_formula() if entry is not None else ""
+            self._formula_label.setText(f"{name}: {pretty_formula(formula) or '(empty map)'}")
             self._notes_edit.setPlainText(entry.notes if entry is not None else "")
             self._notes_edit.setReadOnly(name in PRESET_FAMILY_NAMES)
+            self._notes_edit.setPlaceholderText("" if name in PRESET_FAMILY_NAMES
+                                                else "Notes about this family")
         self._notes_edit.blockSignals(False)
 
     # ---- notes: live edit, same "apply on every edit" spirit as the term editor --------
@@ -368,11 +562,8 @@ class LibraryPanel(QWidget):
 
     # ---- load: replaces session.map; the CALLER resets its own pane's viewport --------
     def _load_selected(self) -> None:
-        # Viewport reset to this family's default used to happen HERE, but
-        # session no longer owns a viewport (see app.pane.Pane) -- on_load
-        # (app/sandbox.py's _on_family_loaded) does it now, for whichever
-        # pane(s) it owns, via default_view_for_mode(self.session.map, ...)
-        # -- MODE-aware per pane (Stage 2), not just name-keyed.
+        # The viewport reset (mode-aware, per pane) is on_load's job
+        # (app/sandbox.py's _on_family_loaded): this panel touches no viewport.
         name = self._selected_name()
         if name is None:
             return
@@ -382,6 +573,7 @@ class LibraryPanel(QWidget):
             self._error_label.setText(str(e))
             return
         self._error_label.setText("")
+        self.set_loaded(name)
         self._on_load()
 
     # ---- save current map as a new (or updated) library entry --------------------------
@@ -399,6 +591,7 @@ class LibraryPanel(QWidget):
             self._error_label.setText(str(e))
             return
         self._error_label.setText("")
+        self._loaded_name = name   # the current map now IS this entry
         self._refresh_list(select=name)
         self._on_change()
 
@@ -419,13 +612,26 @@ class LibraryPanel(QWidget):
             self._error_label.setText(str(e))
             return
         self._error_label.setText("")
+        if self._loaded_name == old_name:
+            self._loaded_name = new_name
         self._refresh_list(select=new_name)
         self._on_change()
 
-    # ---- delete a library entry ----------------------------------------------------------
+    # ---- delete a library entry (asks first) -----------------------------------------------
+    @staticmethod
+    def _confirm_with_dialog(title: str, text: str) -> bool:
+        answer = QMessageBox.question(None, title, text,
+                                      QMessageBox.StandardButton.Delete
+                                      | QMessageBox.StandardButton.Cancel,
+                                      QMessageBox.StandardButton.Cancel)
+        return answer == QMessageBox.StandardButton.Delete
+
     def _delete_selected(self) -> None:
         name = self._selected_name()
         if name is None:
+            return
+        if not self._confirm("Delete family",
+                             f"Delete \"{name}\" from your library? This can't be undone."):
             return
         self._do_delete(name)
 
@@ -436,5 +642,7 @@ class LibraryPanel(QWidget):
             self._error_label.setText(str(e))
             return
         self._error_label.setText("")
+        if self._loaded_name == name:
+            self._loaded_name = None
         self._refresh_list()
         self._on_change()

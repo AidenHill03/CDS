@@ -25,6 +25,7 @@ import math
 import tempfile
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
@@ -167,7 +168,7 @@ def main() -> None:
     changes: list[None] = []
     panel = LibraryPanel(session, lambda: loads.append(None), lambda: changes.append(None))
 
-    check(panel._list.count() == len(session.library),
+    check(len(panel.entry_names()) == len(session.library),
           "the list has one row per library entry (six presets, nothing saved yet)")
     check(panel._selected_name() is not None, "something is selected on construction")
 
@@ -272,11 +273,10 @@ def main() -> None:
     placeholder_image = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
 
     def icon_image(name: str):
-        for row in range(panel._list.count()):
-            item = panel._list.item(row)
-            if item.data(_NAME_ROLE) == name:
-                return item.icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
-        raise AssertionError(f"{name!r} not found in the list")
+        icon = panel.row_icon(name)
+        if icon is None:
+            raise AssertionError(f"{name!r} not found in the list")
+        return icon.pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
 
     check(icon_image("thumbed-family") != placeholder_image,
           "an entry WITH a sidecar preview shows that thumbnail as its list icon, not the "
@@ -307,6 +307,60 @@ def main() -> None:
     panel._list.itemDoubleClicked.emit(panel._list.currentItem())
     check(len(loads) == 1 and session.map.name == session.library.find("mandelbrot").name,
           "double-clicking a library entry loads it, exactly like the Load button")
+
+    # ---- UI redesign: sections, search, loaded dot, row menus, confirm ------------------
+    print("\nsidebar library (UI redesign):")
+    from app.session import PRESET_FAMILY_NAMES
+    names = panel.entry_names()
+    presets = [n for n in names if n in PRESET_FAMILY_NAMES]
+    check(names[:len(presets)] == presets and all(n not in PRESET_FAMILY_NAMES for n in names[len(presets):]),
+          "two sections: Presets first, then Yours")
+    headers = [panel._list.itemWidget(panel._list.item(r)).text()
+               for r in range(panel._list.count()) if panel._list.item(r).data(_NAME_ROLE) is None]
+    check(headers == ["PRESETS", "YOURS"], "the sections are headed PRESETS and YOURS")
+    panel.search_field.setText("mcm")
+    check(panel.visible_entry_names() == ["mcmullen2", "mcmullen3"], "search filters by name")
+    panel.search_field.setText("z^5")
+    check("multibrot5" in panel.visible_entry_names() and "mandelbrot" not in panel.visible_entry_names(),
+          "search filters by formula too")
+    panel.search_field.setText("")
+    check(panel.visible_entry_names() == names, "clearing the search shows every entry again")
+    check(panel.row_menu_texts("mandelbrot") == ["Load"],
+          "a preset row's ⋯ menu offers Load only (no rename/delete)")
+    check(panel.row_menu_texts("thumbed-family") == ["Load", "Save current map here", "Rename…", "Delete…"],
+          "a user row's ⋯ menu offers Load, Save current map here, Rename, Delete")
+
+    loads.clear()
+    panel._select_by_name("multibrot3")
+    panel._load_selected()
+    check(panel.loaded_name() == "multibrot3" and panel._rows["multibrot3"].dot.text() == "●"
+          and panel._rows["mandelbrot"].dot.text() == "", "the loaded dot follows a load")
+    panel.set_loaded("mcmullen2")
+    check(panel._selected_name() == "mcmullen2" and panel._rows["mcmullen2"].dot.text() == "●",
+          "set_loaded moves the dot and selects that row")
+    panel._select_by_name("newton3")
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent as _QEvent
+    loads.clear()
+    QApplication.sendEvent(panel._list, QKeyEvent(_QEvent.Type.KeyPress, Qt.Key.Key_Return,
+                                                  Qt.KeyboardModifier.NoModifier))
+    check(loads == [None] and session.map.name == "newton3", "Return loads the selected entry")
+
+    asked: list[str] = []
+    panel._confirm = lambda title, text: asked.append(text) or False
+    panel._select_by_name("thumbed-family")
+    panel._delete_selected()
+    check(asked and "thumbed-family" in session.library.names(),
+          "Delete asks first, and a No leaves the entry alone")
+    panel._confirm = lambda title, text: True
+    panel._delete_selected()
+    check("thumbed-family" not in session.library.names(), "...and a Yes deletes it")
+
+    provided: list[str] = []
+    thumbed = LibraryPanel(Session(), lambda: None, lambda: None,
+                           thumbnail_provider=lambda name, entry: provided.append(name) or _placeholder_icon())
+    check(sorted(provided) == sorted(PRESET_FAMILY_NAMES),
+          "preset thumbnails come from the thumbnail provider (one call per preset)")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

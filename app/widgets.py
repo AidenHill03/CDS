@@ -412,6 +412,35 @@ def more_icon(color) -> QIcon:
     return _icon(paint)
 
 
+# ---- a label that elides instead of clipping ----------------------------------------------
+class ElidedLabel(QLabel):
+    """Shows "…" when its text doesn't fit; the full text is in the tooltip."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:   # noqa: N802 (Qt naming)
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        width = max(0, self.width())
+        shown = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, width) \
+            if width > 0 else self._full
+        super().setText(shown)
+
+
 # ---- formula pretty-printing ----------------------------------------------------------------
 _SUPERSCRIPTS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
 

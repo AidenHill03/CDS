@@ -309,6 +309,15 @@ QLabel[mono="true"], QLineEdit[mono="true"], QTableWidget[mono="true"] {{
     font-family: "{FONT_MONO}";
 }}
 QLabel[role="empty"] {{ color: {c('muted')}; }}
+QLabel[role="loadedDot"] {{ color: {c('teal')}; font-size: 9px; }}
+QListWidget::item {{ border-radius: {RADIUS_CONTROL}px; margin: 1px 0; }}
+QListWidget::item:selected {{ background: {c('control_on')}; }}
+QListWidget::item:hover:!selected {{ background: {c('row')}; }}
+QToolButton[role="sectionToggle"] {{
+    background: transparent; border: 1px solid transparent; color: {c('text')}; font-weight: 600;
+    text-align: left; padding: 0 4px;
+}}
+QToolButton[role="sectionToggle"]:focus {{ border: 1px solid {c('teal')}; }}
 
 /* ---- inputs ---- */
 QLineEdit, QAbstractSpinBox, QComboBox, QPlainTextEdit, QTextEdit {{

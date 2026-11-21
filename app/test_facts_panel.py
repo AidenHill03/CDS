@@ -68,7 +68,7 @@ def main() -> None:
     seeded: list[complex] = []
     panel = FactsPanel(session, centered.append, seeded.append)
 
-    check("Degree: 3" in panel._degree_label.text(), "degree label shows the map's actual degree")
+    check(panel._degree_label.text() == "3", "degree label shows the map's actual degree")
     expected_rh = 2 * 3 - 2
     check(str(expected_rh) in panel._rh_label.text(),
           "Riemann-Hurwitz label shows the expected 2d-2 count")
@@ -95,16 +95,16 @@ def main() -> None:
                         (panel._cycle_table, CENTER_ROW_HINT), (panel._pole_table, CENTER_ROW_HINT)):
         points = panel._row_points[id(table)]
         expected = [hint if p is not None and not _is_inf(p) else INFINITE_ROW_HINT for p in points]
-        shown = [table.item(r, 0).toolTip() for r in range(table.rowCount())]
+        shown = [table.item(r, 0).toolTip().split("\n")[-1] for r in range(table.rowCount())]
         check(shown == expected and table.rowCount() > 0,
               f"every row of a '{hint}' table carries that tooltip (infinite points say so)")
-        same_row = all(table.item(r, c).toolTip() == shown[r]
+        same_row = all(table.item(r, c).toolTip().split("\n")[-1] == shown[r]
                        for r in range(table.rowCount()) for c in range(table.columnCount())
                        if table.item(r, c) is not None)
         check(same_row, "...on every cell of the row, not just the first column")
         captions = [w.text() for w in table.parentWidget().findChildren(_QLabel)]
         check(hint in captions, "...and the table's group shows the same hint as a caption")
-    check(INFINITE_ROW_HINT in [panel._fixed_table.item(r, 0).toolTip()
+    check(INFINITE_ROW_HINT in [panel._fixed_table.item(r, 0).toolTip().split("\n")[-1]
                                 for r in range(panel._fixed_table.rowCount())],
           "newton_cubic's fixed point at infinity is labelled as not clickable")
 
@@ -258,6 +258,33 @@ def main() -> None:
     check(round_tripped["degree"] == data["degree"] and
           round_tripped["map"]["formula"] == data["map"]["formula"],
           "the rest of the dict round-trips through real JSON too, not just in memory")
+
+    # ---- UI redesign: summary, 6-digit cells, full values, collapsible sections ----------
+    print("\nsidebar layout (UI redesign):")
+    from app.facts_panel import _FULL_ROLE, critical_orbit_fates, format_short
+    check(format_short(complex(-0.12261234567, 0.74491234567)) == "-0.122612 + 0.744912i"
+          and format_short(complex(math.inf, 0)) == "∞",
+          "cells show 6 significant digits, and infinity as ∞")
+    item = panel._fixed_table.item(0, 0)
+    full = item.data(_FULL_ROLE)
+    check(full and (full == item.text() or item.toolTip().startswith(full)),
+          "a shortened cell carries its full value in the tooltip")
+    panel._fixed_table.selectRow(0)
+    copied = panel.copy_rows(panel._fixed_table)
+    check(copied.split("\t")[0] == full, "Copy copies the full value, not the 6-digit text")
+    toggle = panel.section_toggle(panel._fixed_table)
+    toggle.setChecked(False)
+    check(panel._fixed_table.isHidden(), "each table's section collapses")
+    toggle.setChecked(True)
+    check(not panel._fixed_table.isHidden(), "...and expands again")
+    check("∞" in panel2._critical_summary.text(),
+          "the summary includes infinity among z^2's critical points")
+    check(panel2._cycles_summary.text().startswith("∞ (fixed)") or "∞" in panel2._cycles_summary.text(),
+          "...and infinity as an attracting fixed point")
+    fates = dict(critical_orbit_fates(session2.map, 0j, session2.dynamical_facts(), 200, 1e-6))
+    inf_key = next(k for k in fates if _is_inf(k))
+    check(fates[0j].startswith("→ fixed point") and fates[inf_key].startswith("→ ∞"),
+          "critical orbit fates for z^2: 0 stays at 0, infinity at infinity (chordal, sphere-first)")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

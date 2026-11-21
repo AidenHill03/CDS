@@ -32,7 +32,7 @@ import shiboken6
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect,
                             QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal,
                             Slot)
-from PySide6.QtGui import (QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
+from PySide6.QtGui import (QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPolygonF)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -47,7 +47,8 @@ from app.color import (color_basin, color_escape_time, color_parameter_basin,
                         color_parameter_period, color_scalar_field)
 from app.complex_field import ComplexField
 from app.equation_panel import EquationPanel
-from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
+from app.facts_panel import (FactsPanel, _classify, _is_inf, critical_orbit_fates, facts_to_dict,
+                             format_short)
 from app.info_panel import InfoPanel
 from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
 from app.metadata_header import MetadataHeader, describe_parameter_role
@@ -93,6 +94,10 @@ PAN_KEY_REPEAT_MS = 60
 # How long the status bar's per-pane controls hint stays after the cursor
 # enters a pane (it also clears when the cursor leaves).
 PANE_HINT_MS = 6000
+STATUS_FLASH_MS = 4000
+
+# Preset thumbnails (render_thumbnail), shared by every window of the process.
+_PRESET_THUMBNAIL_CACHE: dict[tuple, "QIcon"] = {}
 
 # ---- render modes as the UI shows them ------------------------------------------------------
 # RENDER_MODES ids stay data; the segmented controls show these labels, and
@@ -3047,7 +3052,8 @@ class SandboxWindow(QMainWindow):
         self.sidebar = TabbedDock("Sidebar", "SidebarDock", "right", self)
         self.info_panel = InfoPanel(self)
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
-                                          self._on_library_changed, self)
+                                          self._on_library_changed, self,
+                                          thumbnail_provider=self._preset_thumbnail)
         self.facts_panel = FactsPanel(self.session, self._on_center_view,
                                       self._on_seed_orbit_from_facts, self)
         # Info scrolls itself (a QTextBrowser); the others get a scroll area.
@@ -3056,6 +3062,7 @@ class SandboxWindow(QMainWindow):
         self.sidebar.add_tab(self.facts_panel, "Facts", "Critical points, fixed points, cycles, poles")
         self.sidebar.set_current_widget(self.library_panel)
         self.sidebar.currentChanged.connect(self._on_sidebar_tab_changed)
+        self.sidebar.collapsedChanged.connect(lambda _c: self._refresh_this_map())
         # Expanding the sidebar by hand makes it the user's choice again.
         self.sidebar.collapsedChanged.connect(
             lambda collapsed: None if collapsed else setattr(self, "_sidebar_auto_collapsed", False))
@@ -3296,6 +3303,10 @@ class SandboxWindow(QMainWindow):
         self._pane_hint_timer.setSingleShot(True)
         self._pane_hint_timer.setInterval(PANE_HINT_MS)
         self._pane_hint_timer.timeout.connect(self.pane_hint_label.clear)
+        self._status_flash = ""
+        self._status_flash_timer = QTimer(self)
+        self._status_flash_timer.setSingleShot(True)
+        self._status_flash_timer.timeout.connect(self._clear_status_flash)
 
         self._build_overlay_chips()
         self._update_pane_focus_styling()
@@ -3888,6 +3899,7 @@ class SandboxWindow(QMainWindow):
     def _on_sidebar_tab_changed(self, index: int) -> None:
         if self.sidebar.widget(index) is self.facts_panel:
             self.facts_panel.refresh()
+        self._refresh_this_map()
 
     def _placeholder_tab(self, text: str) -> QWidget:
         page = QWidget(self)
@@ -4056,6 +4068,10 @@ class SandboxWindow(QMainWindow):
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
         self._refresh_header()   # name/formula/param all just changed wholesale
+        self.flash_status(f"Loaded {self.session.map.name}")
+        # Back to the planes: loading is done from the sidebar, exploring isn't.
+        self.show_workspace("explore")
+        self._focused_pane.image_view.setFocus(Qt.FocusReason.OtherFocusReason)
         for pane in self.panes:
             center, scale = default_view_for_mode(self.session.map, self.session.param,
                                                   pane.render_mode)
@@ -4246,6 +4262,54 @@ class SandboxWindow(QMainWindow):
     def _refresh_header(self) -> None:
         self.metadata_header.refresh()
         self._refresh_map_chip()
+        self._this_map_dirty = True
+        self._refresh_this_map()
+
+    def _preset_thumbnail(self, name: str, entry: cdx.RationalMap) -> QIcon:
+        """A preset's real thumbnail (render_thumbnail), rendered once per
+        (formula, coloring) and cached for the process -- presets never change."""
+        st = self.session.settings
+        key = (name, entry.to_formula(), st.color_palette, st.color_scaling, st.color_period)
+        icon = _PRESET_THUMBNAIL_CACHE.get(key)
+        if icon is None:
+            image = render_thumbnail(entry, 0j, st, self.session.render_settings)
+            icon = QIcon(QPixmap.fromImage(image))
+            _PRESET_THUMBNAIL_CACHE[key] = icon
+        return icon
+
+    def _refresh_this_map(self) -> None:
+        """Info's "This map" section -- computed only while Info is showing
+        (it needs the dynamical facts), otherwise on the next reveal."""
+        if not getattr(self, "_this_map_dirty", True) or not hasattr(self, "sidebar"):
+            return
+        if self.sidebar.current_widget() is not self.info_panel or self.sidebar.is_collapsed():
+            return
+        self._this_map_dirty = False
+        self.info_panel.set_this_map(self.this_map_rows())
+
+    def this_map_rows(self) -> list[tuple[str, str]]:
+        m, a = self.session.map, self.session.param
+        facts = self.session.dynamical_facts()
+        rows = [("Map", f"{self.map_display_name()}: {m.to_formula() or '(empty map)'}"),
+                ("Degree", str(facts.degree)),
+                ("Critical points", ", ".join(format_short(c, 4) for c in m.distinct_critical_points(a))
+                 or "none")]
+        rs = self.session.render_settings
+        for c, fate in critical_orbit_fates(m, a, facts, rs.max_iter, max(rs.tol, 1e-6)):
+            rows.append((f"Orbit of {format_short(c, 4)}", fate))
+        rows.append(("a", format_readout_complex(a)))
+        return rows
+
+    def flash_status(self, text: str, ms: int = STATUS_FLASH_MS) -> None:
+        """A transient status-bar message ("Loaded newton3") shown ahead of
+        the scale/cursor readout, which it never replaces."""
+        self._status_flash = text
+        self._status_flash_timer.start(ms)
+        self._render_status_bar()
+
+    def _clear_status_flash(self) -> None:
+        self._status_flash = ""
+        self._render_status_bar()
 
     def map_display_name(self) -> str:
         """The family name while the map is still exactly a library entry,
@@ -4260,7 +4324,11 @@ class SandboxWindow(QMainWindow):
         if not hasattr(self, "top_bar"):
             return
         chip = self.top_bar.map_chip
-        chip.set_map(self.map_display_name(), self.session.map.to_formula())
+        display = self.map_display_name()
+        chip.set_map(display, self.session.map.to_formula())
+        loaded = None if display == "custom" else display
+        if loaded != self.library_panel.loaded_name():
+            self.library_panel.set_loaded(loaded)   # the dot (and selection) follow the map
         chip.setToolTip(f"{self.session.map.name}: {self.session.map.to_formula()}\n"
                         f"a: {describe_parameter_role(self.session.map)}\n"
                         "Click to open the Library")
@@ -4412,7 +4480,8 @@ class SandboxWindow(QMainWindow):
     def _render_status_bar(self) -> None:
         text = f"{self._status_base_message}   {self._status_cursor_text}" \
             if self._status_cursor_text else self._status_base_message
-        self.statusBar().showMessage(text)
+        flash = getattr(self, "_status_flash", "")
+        self.statusBar().showMessage(f"{flash}   ·   {text}" if flash else text)
 
     # ---- shutdown ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
