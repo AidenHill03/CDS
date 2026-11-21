@@ -263,6 +263,8 @@ class LibraryPanel(QWidget):
         self._list = QListWidget()
         self._list.setIconSize(QSize(_LIST_ICON_SIZE, _LIST_ICON_SIZE))
         self._list.currentItemChanged.connect(lambda *_: self._refresh_detail())
+        # Double-click = Load (the press already made it the current item).
+        self._list.itemDoubleClicked.connect(lambda _item: self._load_selected())
         split.addWidget(self._list, 1)
 
         detail = QVBoxLayout()

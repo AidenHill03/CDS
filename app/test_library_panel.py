@@ -299,6 +299,15 @@ def main() -> None:
     check(panel._selected_name() == "bare-family",
           "...and does not disturb the current selection, unlike _refresh_list")
 
+    # ---- double-click = Load (controls redesign, Step 3) -------------------------------
+    print("\ndouble-click loads:")
+    loads.clear()
+    panel._select_by_name("mandelbrot")
+    session.map = cdx.RationalMap("scratch")
+    panel._list.itemDoubleClicked.emit(panel._list.currentItem())
+    check(len(loads) == 1 and session.map.name == session.library.find("mandelbrot").name,
+          "double-clicking a library entry loads it, exactly like the Load button")
+
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")
     raise SystemExit(0 if failures == 0 else 1)

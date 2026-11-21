@@ -57,6 +57,13 @@ POLE_COLUMNS = ("Location", "Order")
 _NEUTRAL_TOL = 1e-6
 
 
+
+# Row-click hints (controls redesign, Step 3): each table's caption, and the
+# tooltip on every one of its rows.
+SEED_ROW_HINT = "Click to seed an orbit here"
+CENTER_ROW_HINT = "Click to center the view here"
+INFINITE_ROW_HINT = "At infinity -- clicking does nothing"
+
 def _format_complex(z: complex) -> str:
     # str(complex) always round-trips through complex() exactly, but wraps
     # anything with a nonzero imaginary part in parens ("(1+2j)") -- drop
@@ -197,6 +204,8 @@ class FactsPanel(QWidget):
         # hashable in a way worth relying on) -- which complex point
         # clicking a given row should centre the view on.
         self._row_points: dict[int, list[complex | None]] = {}
+        # What clicking a row of each table does, as a tooltip/caption.
+        self._row_hints: dict[int, str] = {}
 
         self._build_ui()
         self.refresh()
@@ -213,10 +222,13 @@ class FactsPanel(QWidget):
         self._rh_label.setWordWrap(True)
         layout.addWidget(self._rh_label)
 
-        self._critical_table = self._add_table_group(layout, "Critical Points", CRITICAL_COLUMNS)
-        self._fixed_table = self._add_table_group(layout, "Fixed Points", FIXED_COLUMNS)
-        self._cycle_table = self._add_table_group(layout, "Attracting Cycles", CYCLE_COLUMNS)
-        self._pole_table = self._add_table_group(layout, "Poles", POLE_COLUMNS)
+        self._critical_table = self._add_table_group(layout, "Critical Points", CRITICAL_COLUMNS,
+                                                     SEED_ROW_HINT)
+        self._fixed_table = self._add_table_group(layout, "Fixed Points", FIXED_COLUMNS,
+                                                  SEED_ROW_HINT)
+        self._cycle_table = self._add_table_group(layout, "Attracting Cycles", CYCLE_COLUMNS,
+                                                  CENTER_ROW_HINT)
+        self._pole_table = self._add_table_group(layout, "Poles", POLE_COLUMNS, CENTER_ROW_HINT)
 
         row = QHBoxLayout()
         refresh_btn = QPushButton("Refresh")
@@ -228,10 +240,13 @@ class FactsPanel(QWidget):
         layout.addStretch(1)
 
     def _add_table_group(self, layout: QVBoxLayout, title: str,
-                         columns: tuple[str, ...]) -> QTableWidget:
+                         columns: tuple[str, ...], row_hint: str) -> QTableWidget:
         box = QGroupBox(title)
         v = QVBoxLayout(box)
+        caption = QLabel(row_hint)
+        v.addWidget(caption)
         table = QTableWidget(0, len(columns))
+        self._row_hints[id(table)] = row_hint
         table.setHorizontalHeaderLabels(columns)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -282,6 +297,7 @@ class FactsPanel(QWidget):
             table.setItem(row, 1, QTableWidgetItem(str(mult)))
             points.append(point)
         self._row_points[id(table)] = points
+        self._apply_row_tooltips(table)
 
     def _fill_fixed_table(self) -> None:
         table = self._fixed_table
@@ -295,6 +311,7 @@ class FactsPanel(QWidget):
             table.setItem(row, 3, QTableWidgetItem(_classify(fp.multiplier)))
             points.append(fp.point)
         self._row_points[id(table)] = points
+        self._apply_row_tooltips(table)
 
     def _fill_cycle_table(self) -> None:
         table = self._cycle_table
@@ -313,6 +330,7 @@ class FactsPanel(QWidget):
             # find_attractors), not an arbitrary pick.
             points.append(cyc.points[0] if cyc.points else None)
         self._row_points[id(table)] = points
+        self._apply_row_tooltips(table)
 
     def _fill_pole_table(self) -> None:
         table = self._pole_table
@@ -325,6 +343,16 @@ class FactsPanel(QWidget):
             table.setItem(row, 1, QTableWidgetItem(str(order)))
             points.append(loc)
         self._row_points[id(table)] = points
+        self._apply_row_tooltips(table)
+
+    def _apply_row_tooltips(self, table: QTableWidget) -> None:
+        hint = self._row_hints[id(table)]
+        for row, point in enumerate(self._row_points[id(table)]):
+            text = hint if point is not None and not _is_inf(point) else INFINITE_ROW_HINT
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                if item is not None:
+                    item.setToolTip(text)
 
     # ---- click a row -> seeds an orbit (critical/fixed) or centres the view (pole) ------
     def _on_row_clicked(self, table: QTableWidget, row: int) -> None:

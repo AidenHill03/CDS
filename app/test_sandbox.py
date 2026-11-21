@@ -2819,6 +2819,34 @@ def main() -> None:
     formula_edit.setText(original_formula)
     window.equation_panel.undo, window.equation_panel.redo = real_undo, real_redo
 
+    # ---- controls redesign, Step 3: status-bar pane hints ------------------------------
+    print("\nstatus-bar pane hints:")
+    dyn_hint = sandbox_module.pane_hint("julia", coupled=True)
+    par_hint = sandbox_module.pane_hint("parameter", coupled=True)
+    check("Drag: pan" in dyn_hint and "Shift-drag: box zoom" in dyn_hint and
+          "Click: seed orbit" in dyn_hint and "Scroll/pinch: zoom" in dyn_hint,
+          "the dynamical-plane hint names drag, Shift-drag, click and scroll/pinch")
+    check("Click: set a" in par_hint and "Arrows: nudge a" in par_hint and "julia" not in par_hint,
+          "the parameter-plane hint says click sets a and arrows nudge it")
+    check("switches this pane to julia" in sandbox_module.pane_hint("parameter", coupled=False),
+          "with Coupled View off, the parameter hint warns that a click switches the pane to julia")
+    window._on_cursor_readout_changed("z = 0.1+0.2i")
+    readout_before = window.statusBar().currentMessage()
+    window.image_view2.hover_changed.emit(True)
+    check(window.pane_hint_label.text() == sandbox_module.pane_hint(
+              window.pane2.render_mode, window.coupled_view_action.isChecked()),
+          "entering a pane shows that pane's hint in the status bar")
+    check(window.statusBar().currentMessage() == readout_before and "z = 0.1+0.2i" in readout_before,
+          "...in its own label: the coordinate readout is left intact")
+    check(window._pane_hint_timer.isActive(), "...and the hint is transient (a timer will clear it)")
+    window._pane_hint_timer.timeout.emit()
+    check(window.pane_hint_label.text() == "", "the timer clears the hint")
+    window.image_view2.hover_changed.emit(True)
+    window.image_view2.hover_changed.emit(False)
+    check(window.pane_hint_label.text() == "" and not window._pane_hint_timer.isActive(),
+          "leaving the pane clears the hint immediately")
+    window._on_cursor_readout_changed("")
+
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded
     # render requests" section above deliberately leaves a stale task's

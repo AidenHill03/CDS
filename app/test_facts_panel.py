@@ -87,6 +87,27 @@ def main() -> None:
           "poles table: newton_cubic has one pole")
     check(panel._pole_table.item(0, 1).text() == "2", "the pole's order column reads 2")
 
+    # ---- row-click hints (controls redesign, Step 3) ------------------------------------
+    print("\nrow-click hints:")
+    from app.facts_panel import CENTER_ROW_HINT, INFINITE_ROW_HINT, SEED_ROW_HINT
+    from PySide6.QtWidgets import QLabel as _QLabel
+    for table, hint in ((panel._critical_table, SEED_ROW_HINT), (panel._fixed_table, SEED_ROW_HINT),
+                        (panel._cycle_table, CENTER_ROW_HINT), (panel._pole_table, CENTER_ROW_HINT)):
+        points = panel._row_points[id(table)]
+        expected = [hint if p is not None and not _is_inf(p) else INFINITE_ROW_HINT for p in points]
+        shown = [table.item(r, 0).toolTip() for r in range(table.rowCount())]
+        check(shown == expected and table.rowCount() > 0,
+              f"every row of a '{hint}' table carries that tooltip (infinite points say so)")
+        same_row = all(table.item(r, c).toolTip() == shown[r]
+                       for r in range(table.rowCount()) for c in range(table.columnCount())
+                       if table.item(r, c) is not None)
+        check(same_row, "...on every cell of the row, not just the first column")
+        captions = [w.text() for w in table.parentWidget().findChildren(_QLabel)]
+        check(hint in captions, "...and the table's group shows the same hint as a caption")
+    check(INFINITE_ROW_HINT in [panel._fixed_table.item(r, 0).toolTip()
+                                for r in range(panel._fixed_table.rowCount())],
+          "newton_cubic's fixed point at infinity is labelled as not clickable")
+
     # ---- |multiplier| column (cosmetic batch, Part A) --------------------------------
     print("\n|multiplier| column:")
     fixed_points = session.dynamical_facts().fixed_points

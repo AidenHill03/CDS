@@ -84,6 +84,10 @@ KEY_PAN_FRACTION = 0.1
 PAN_KEY_REPEAT_DELAY_MS = 300
 PAN_KEY_REPEAT_MS = 60
 
+# How long the status bar's per-pane controls hint stays after the cursor
+# enters a pane (it also clears when the cursor leaves).
+PANE_HINT_MS = 6000
+
 # Restarted on every wheel/pan-move event; a render is only actually
 # started once this settles, so a fast scroll or drag does not queue a
 # backlog of renders.
@@ -1062,6 +1066,18 @@ def text_undo_target(widget: QWidget | None):
     return None
 
 
+def pane_hint(render_mode: str, coupled: bool) -> str:
+    """The status-bar hint shown when the cursor enters a pane."""
+    if render_mode in PARAMETER_PLANE_MODES:
+        hint = ("Drag: pan · Shift-drag: box zoom · Click: set a · Scroll/pinch: zoom · "
+                "Arrows: nudge a · Alt-arrows: pan")
+        if not coupled:
+            hint += " · (Coupled View off: clicking also switches this pane to julia)"
+        return hint
+    return ("Drag: pan · Shift-drag: box zoom · Click: seed orbit · Scroll/pinch: zoom · "
+            "Arrows: pan · Space: step orbit")
+
+
 class ImageView(QWidget):
     """The single image pane: displays the current render, and owns every
     mouse/wheel/pinch interaction (drag pan, Shift-drag box zoom, scroll/pinch zoom) and,
@@ -1114,6 +1130,9 @@ class ImageView(QWidget):
     viewport_changed = Signal()
     orbit_changed = Signal()
     cursor_readout_changed = Signal(str)
+    # True when the cursor enters this pane, False when it leaves -- the
+    # window shows a transient controls hint for the pane (pane_hint).
+    hover_changed = Signal(bool)
     # Emitted at the start of every mouse press -- Stage 2's only hook for
     # "which pane did the user just interact with." ImageView itself has
     # no notion of a window or of other panes; SandboxWindow is the one
@@ -1917,12 +1936,14 @@ class ImageView(QWidget):
 
     def enterEvent(self, event) -> None:
         self._update_cursor(QApplication.queryKeyboardModifiers())
+        self.hover_changed.emit(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         if self._gesture is None:
             self._update_cursor()
         self.cursor_readout_changed.emit("")
+        self.hover_changed.emit(False)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._gesture is None or event.button() != self._gesture_button:
@@ -2542,6 +2563,7 @@ class SandboxWindow(QMainWindow):
         for pane, view in ((self.pane, self.image_view), (self.pane2, self.image_view2)):
             view.viewport_changed.connect(lambda p=pane: self._on_viewport_changed(p))
             view.cursor_readout_changed.connect(self._on_cursor_readout_changed)
+            view.hover_changed.connect(lambda inside, p=pane: self._on_pane_hover(p, inside))
             # No pane-capturing lambda needed here -- mousePressEvent
             # always emits pane_activated (moving focus) BEFORE a release
             # can ever emit param_changed, so by the time this fires,
@@ -2837,6 +2859,16 @@ class SandboxWindow(QMainWindow):
         self.about_action.triggered.connect(self._show_about_dialog)
 
         self.statusBar().showMessage("")
+        # Transient controls hint for the pane under the cursor: its OWN
+        # label (right side), so it never overwrites the scale/coordinate
+        # readout in the message area; cleared on leave or after
+        # PANE_HINT_MS.
+        self.pane_hint_label = QLabel(self)
+        self.statusBar().addPermanentWidget(self.pane_hint_label)
+        self._pane_hint_timer = QTimer(self)
+        self._pane_hint_timer.setSingleShot(True)
+        self._pane_hint_timer.setInterval(PANE_HINT_MS)
+        self._pane_hint_timer.timeout.connect(self.pane_hint_label.clear)
 
         self._update_pane_focus_styling()
         self._sync_orbit_panel()
@@ -3695,6 +3727,15 @@ class SandboxWindow(QMainWindow):
             message += f"   ⚠ approaching the precision floor ({floor:.3e})"
         self._status_base_message = message
         self._render_status_bar()
+
+    def _on_pane_hover(self, pane: Pane, inside: bool) -> None:
+        if inside:
+            self.pane_hint_label.setText(
+                pane_hint(pane.render_mode, coupled=self.coupled_view_action.isChecked()))
+            self._pane_hint_timer.start()
+        else:
+            self.pane_hint_label.clear()
+            self._pane_hint_timer.stop()
 
     def _on_cursor_readout_changed(self, text: str) -> None:
         self._status_cursor_text = text
