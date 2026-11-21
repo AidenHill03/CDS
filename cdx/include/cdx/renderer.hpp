@@ -22,6 +22,7 @@
 // =============================================================================
 #pragma once
 
+#include "cdx/composed.hpp"
 #include "cdx/rational.hpp"
 
 #include <atomic>
@@ -54,7 +55,8 @@ enum class Family {
     McMullen2,   // z^2 + a/z^2
     McMullen3,   // z^3 + a/z^3
     Newton3,     // Newton map of z^3 - 1  (parameter unused)
-    Custom       // a general RationalMap; see Map::custom()
+    Custom,      // a general RationalMap; see Map::custom()
+    Composed     // a composition of RationalMaps kept unexpanded; see Map::composed()
 };
 
 std::string to_string(Family f);
@@ -89,6 +91,15 @@ public:
     // it per pixel regardless of what is bound here (see step_with_param).
     static Map custom(RationalMap m, Cplx param = {0.0, 0.0});
 
+    // Wraps a ComposedMap (cdx/composed.hpp) as a Family::Composed map. Every
+    // stage's parameter is already bound inside the ComposedMap, so this Map's
+    // own param() plays no role. Dynamical-plane modes (render_julia's rational
+    // path, render_basin, render_greens) work unchanged through step();
+    // parameter-plane modes do not apply and return an all-zero image.
+    // Attractors are not discovered for a composed map (that would need
+    // root-finding at the full degree): pass them in as Cycles.
+    static Map composed(ComposedMap m);
+
     Family family() const { return family_; }
     Cplx   param()  const { return param_; }
     void   set_param(Cplx p) { param_ = p; }
@@ -96,7 +107,12 @@ public:
     // The wrapped RationalMap, or nullptr unless family() == Custom.
     const RationalMap* custom_map() const { return custom_.get(); }
 
-    // Degree of the map as a rational map of the sphere.
+    // The wrapped ComposedMap, or nullptr unless family() == Composed.
+    const ComposedMap* composed_map() const { return composed_.get(); }
+
+    // Degree of the map as a rational map of the sphere. For a composed map
+    // whose degree exceeds INT_MAX this saturates at INT_MAX; use
+    // composed_map()->degree() / log10_degree() for the actual value.
     int degree() const;
 
     // Stage 1's polynomial_escape_certified, family-aware -- true for the
@@ -148,6 +164,7 @@ private:
     Family family_ = Family::Quadratic;
     Cplx   param_  = {0.0, 0.0};
     std::shared_ptr<const RationalMap> custom_;   // non-null iff family_ == Custom
+    std::shared_ptr<const ComposedMap> composed_; // non-null iff family_ == Composed
 };
 
 // -----------------------------------------------------------------------------

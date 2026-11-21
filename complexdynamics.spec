@@ -52,8 +52,25 @@ if not cdx_extension_candidates:
     )
 cdx_extension = cdx_extension_candidates[0]
 
+# The research modules' compiled kernels live inside their package
+# directories (modules/<name>/_*.so|.pyd -- see each module's CMakeLists.txt).
+# phoenix.py imports a module's panel lazily and skips it if the kernel is
+# missing, so a missing kernel would silently ship an app without that tab:
+# fail the packaging instead.
+module_kernels = (sorted((repo_root / "modules").glob("*/_*kernel*.so")) +
+                  sorted((repo_root / "modules").glob("*/_*kernel*.pyd")))
+if not module_kernels:
+    raise SystemExit(
+        "module kernels not found -- build them first:\n"
+        "  cmake -B modules/approximation/build -S modules/approximation && "
+        "cmake --build modules/approximation/build --config Release"
+    )
+
 a = Analysis(
-    ["app/sandbox.py"],
+    # phoenix.py, not app/sandbox.py: the composition root that attaches the
+    # research modules' panels (see ARCHITECTURE.md). Its main() runs
+    # app.sandbox.main, so the launch self-test below is unchanged.
+    ["phoenix.py"],
     # cdx_extension.parent (NOT cdx_build_dir itself) MUST come before
     # repo_root here. repo_root is needed so app.* absolute imports
     # resolve, but repo_root also contains the cdx/ C++ SOURCE tree
@@ -78,10 +95,18 @@ a = Analysis(
     pathex=[str(cdx_extension.parent), str(repo_root)],
     binaries=[(str(cdx_extension), ".")],
     datas=[],
-    hiddenimports=[],
+    # The panel import in phoenix.py is inside a function; listed explicitly so
+    # the module package and its kernel are collected however the analysis
+    # treats that import.
+    hiddenimports=["modules.approximation.panel", "modules.approximation._approx_kernel"],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    # scipy's test helpers import pytest when it is installed (an Anaconda
+    # base environment has it); following that drags in pkg_resources and
+    # its runtime hook, which then fails at launch ("The 'platformdirs'
+    # package is required" -- seen packaging this exact spec with scipy
+    # added). The app never runs tests: keep the test frameworks out.
+    excludes=["pytest", "_pytest"],
 )
 
 # ---- conditional Qt-plugin fix: DETECT the mismatch, don't assume it ------

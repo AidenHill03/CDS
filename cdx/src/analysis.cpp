@@ -50,6 +50,67 @@ bool near_infinity_chordally(Cplx z, double tol) {
     return chordal(z, Cplx(std::numeric_limits<double>::infinity(), 0.0)) < tol * 100.0;
 }
 
+// -----------------------------------------------------------------------------
+// One (map, a) pair as discovery's inner loops see it.
+//
+// MEASURED (bench/bench_newton.py + `sample`, relaxed Newton n=5, Parameter_
+// basin): 60% of a parameter-plane render was RationalMap::eval on a P/Q-
+// backed map -- every call rebuilt a std::map<std::string, Cplx> binding and
+// re-walked each coefficient's ParamExpr tree, although `a` is fixed for the
+// whole discovery call -- and a further 23% was RationalMap::pole_locations
+// (an Aberth solve of Q), repeated once per seed for the pole nudge and again
+// inside every fixed_points() call of the infinity check.
+//
+// This binds the parameter ONCE: the P/Q coefficients are evaluated at `a`
+// up front (RationalMap::pq_coefficients, the same ParamExpr::eval calls
+// RationalMap::eval makes) and eval() is then the SAME Horner recurrence in
+// the SAME std::complex operations, in the same order, followed by the same
+// division -- so every value is bit-identical to map.eval(z, a); only the
+// repeated coefficient evaluation is gone. pole_locations(a) and
+// fixed_points(a) are deterministic functions of (map, a), computed at most
+// once here, on first use, and reused. A term-backed map has no P/Q
+// coefficients to bind and keeps calling map.eval directly. deriv() is not
+// bound: it is called a handful of times per seed, not per iteration.
+// -----------------------------------------------------------------------------
+class BoundMap {
+public:
+    BoundMap(const RationalMap& map, Cplx a) : map_(map), a_(a) {
+        pq_ = map.pq_coefficients(a, P_, Q_);
+    }
+
+    Cplx eval(Cplx z) const {
+        if (!pq_) return map_.eval(z, a_);
+        // Mirrors PolyZ::eval (rational_parser.cpp) operation for operation.
+        Cplx num(0.0, 0.0);
+        for (std::size_t i = P_.size(); i-- > 0;) num = num * z + P_[i];
+        Cplx den(0.0, 0.0);
+        for (std::size_t i = Q_.size(); i-- > 0;) den = den * z + Q_[i];
+        if (den == Cplx(0.0, 0.0)) return Cplx(1e300, 0.0);
+        return num / den;
+    }
+
+    Cplx deriv(Cplx z) const { return map_.deriv(z, a_); }
+
+    const std::vector<Cplx>& pole_locations() const {
+        if (!have_poles_) { poles_ = map_.pole_locations(a_); have_poles_ = true; }
+        return poles_;
+    }
+
+    const std::vector<FixedPoint>& fixed_points() const {
+        if (!have_fixed_) { fixed_ = map_.fixed_points(a_); have_fixed_ = true; }
+        return fixed_;
+    }
+
+private:
+    const RationalMap& map_;
+    Cplx a_;
+    bool pq_ = false;
+    std::vector<Cplx> P_, Q_;
+    mutable bool have_poles_ = false, have_fixed_ = false;
+    mutable std::vector<Cplx> poles_;
+    mutable std::vector<FixedPoint> fixed_;
+};
+
 // Appends new_cycle unless it matches an existing one up to cyclic rotation
 // (chordally, within tol).
 void add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double tol) {
@@ -82,8 +143,8 @@ void add_cycle(std::vector<Cycle>& cycles, std::vector<Cplx> new_cycle, double t
 // vector if no weakly-attracting cycle could be confirmed within budget --
 // callers must not mistake an empty return for "period zero", only for
 // "nothing to add here".
-std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const RationalMap& map,
-                                            Cplx a, const FindAttractorsOptions& opts) {
+std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const BoundMap& f,
+                                            const FindAttractorsOptions& opts) {
     if (!opts.verify_multiplier || !opts.confirm_weakly_attracting) return {};
 
     // ---- settle further, re-anchoring progressively instead of waiting for --
@@ -113,7 +174,7 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
 
     const int total_budget = opts.extended_max_period + opts.max_period;
     for (int n = 0; n < total_budget; ++n) {
-        Cplx zn = map.eval(orbit.back(), a);
+        Cplx zn = f.eval(orbit.back());
         if (counts_as_infinite(zn, opts.inf_cutoff)) return {};
         orbit.push_back(zn);
         const int steps_done = n + 1;
@@ -143,7 +204,7 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
                 // code's own single-check acceptance there exactly. k==1
                 // remains safe with one extra confirmation step.
                 if (k == 1) {
-                    Cplx zc = map.eval(zn, a);
+                    Cplx zc = f.eval(zn);
                     accept = !counts_as_infinite(zc, opts.inf_cutoff) && chordal(zc, zn) < opts.loose_tol;
                 } else {
                     accept = false;
@@ -189,8 +250,8 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
         bool ok = true;
         for (int i = 0; i < loose_found; ++i) {
             if (!is_finite_cplx(zk)) { ok = false; break; }
-            deriv_prod *= map.deriv(zk, a);
-            zk = map.eval(zk, a);
+            deriv_prod *= f.deriv(zk);
+            zk = f.eval(zk);
         }
         if (!ok || !is_finite_cplx(zk)) return {};
         const Cplx gprime = deriv_prod - Cplx(1.0, 0.0);
@@ -211,7 +272,7 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
     for (int i = 0; i < loose_found; ++i) {
         if (!is_finite_cplx(zk)) return {};
         refined.push_back(zk);
-        zk = map.eval(zk, a);
+        zk = f.eval(zk);
     }
     // The refined point must genuinely close (f^p(z0) ~= z0) at a tolerance
     // much tighter than the LOOSE one that found the candidate in the first
@@ -225,7 +286,7 @@ std::vector<Cplx> confirm_weakly_attracting(std::vector<Cplx>& orbit, const Rati
     // candidate leaves a small floating-point residual that would
     // otherwise read as "just barely attracting".
     Cplx multiplier(1.0, 0.0);
-    for (Cplx zc : refined) multiplier *= map.deriv(zc, a);
+    for (Cplx zc : refined) multiplier *= f.deriv(zc);
     if (!(std::abs(multiplier) < 1.0 - opts.attracting_margin)) return {};
 
     return refined;
@@ -238,11 +299,17 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
     return find_attractors_from_seeds(map.distinct_critical_points(a), map, a, opts);
 }
 
-std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
-                                              const RationalMap& map, Cplx a,
-                                              const FindAttractorsOptions& opts,
-                                              int* unresolved_count,
-                                              std::vector<Cplx>* unresolved_endpoints) {
+namespace {
+
+// find_attractors_from_seeds' body, over an already-bound map so a caller
+// making several discovery calls at the SAME (map, a) -- per_seed_outcomes,
+// one call per seed -- shares one BoundMap (and therefore one pole solve and
+// one fixed-point solve) between them.
+std::vector<Cycle> find_attractors_from_seeds_bound(const std::vector<Cplx>& seeds,
+                                                    const BoundMap& f,
+                                                    const FindAttractorsOptions& opts,
+                                                    int* unresolved_count,
+                                                    std::vector<Cplx>* unresolved_endpoints) {
     std::vector<Cycle> cycles;
     if (unresolved_count) *unresolved_count = 0;
     if (unresolved_endpoints) unresolved_endpoints->clear();
@@ -265,7 +332,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
         // (large but finite, and then free to evolve either way) behaviour
         // near the pole rather than the singular value exactly at it.
         if (is_finite_cplx(z)) {
-            for (Cplx p : map.pole_locations(a)) {
+            for (Cplx p : f.pole_locations()) {
                 if (std::abs(z - p) < 1e-9) { z += Cplx(1e-4, 3.7e-5); break; }
             }
         }
@@ -323,7 +390,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
 
         const int settle_budget = opts.burn_in + opts.max_period;
         for (int n = 0; n < settle_budget; ++n) {
-            Cplx zn = map.eval(orbit.back(), a);
+            Cplx zn = f.eval(orbit.back());
             const bool zn_inf = counts_as_infinite(zn, opts.inf_cutoff);
             if (zn_inf) {
                 if (n < opts.burn_in) at_inf = true;
@@ -374,7 +441,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                     // -- no confirmation needed at that trial either,
                     // matching old code's own unconfirmed acceptance.
                     if (k == 1) {
-                        Cplx zc = map.eval(zn, a);
+                        Cplx zc = f.eval(zn);
                         accept = !counts_as_infinite(zc, opts.inf_cutoff) && chordal(zc, zn) < opts.tol;
                     } else {
                         accept = false;
@@ -444,7 +511,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
             // it only rejects a spurious one.
             if (opts.verify_multiplier) {
                 bool infinity_attracting = false;
-                for (const FixedPoint& fp : map.fixed_points(a)) {
+                for (const FixedPoint& fp : f.fixed_points()) {
                     if (!is_finite_cplx(fp.point) && std::abs(fp.multiplier) < 1.0) {
                         infinity_attracting = true;
                         break;
@@ -469,7 +536,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
             // orbit has already run off past inf_cutoff there, so there is
             // no live finite state left to continue iterating.
             std::vector<Cplx> refined =
-                !hit_inf_mid_orbit ? confirm_weakly_attracting(orbit, map, a, opts)
+                !hit_inf_mid_orbit ? confirm_weakly_attracting(orbit, f, opts)
                                    : std::vector<Cplx>{};
             if (!refined.empty()) {
                 add_cycle(cycles, std::move(refined), opts.tol * 1e3);
@@ -488,7 +555,7 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
                                              [](Cplx z) { return !is_finite_cplx(z); });
             if (!has_inf) {
                 Cplx multiplier(1.0, 0.0);
-                for (Cplx zc : cyc) multiplier *= map.deriv(zc, a);
+                for (Cplx zc : cyc) multiplier *= f.deriv(zc);
                 if (!(std::abs(multiplier) < 1.0)) {
                     if (unresolved_count) ++*unresolved_count;   // not attracting after all
                     if (unresolved_endpoints) unresolved_endpoints->push_back(cyc.back());
@@ -501,6 +568,17 @@ std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
     }
 
     return cycles;
+}
+
+}  // namespace
+
+std::vector<Cycle> find_attractors_from_seeds(const std::vector<Cplx>& seeds,
+                                              const RationalMap& map, Cplx a,
+                                              const FindAttractorsOptions& opts,
+                                              int* unresolved_count,
+                                              std::vector<Cplx>* unresolved_endpoints) {
+    const BoundMap f(map, a);
+    return find_attractors_from_seeds_bound(seeds, f, opts, unresolved_count, unresolved_endpoints);
 }
 
 // =============================================================================
@@ -630,7 +708,11 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
     // the SAME algebraic ground truth complete_attractors_from_seeds' own
     // union reads, just not injected into a shared cycle list here (there is
     // no shared list; every seed's outcome is independent by construction).
-    const std::vector<FixedPoint> fixed_points = map.fixed_points(a);
+    // One BoundMap for every seed: the fixed points fetched here are the same
+    // ones each seed's own infinity check reads, and the poles are solved for
+    // once rather than once per seed.
+    const BoundMap f(map, a);
+    const std::vector<FixedPoint>& fixed_points = f.fixed_points();
     const double dedupe_tol = opts.tol * 1e3;
 
     std::vector<SeedOutcome> out;
@@ -645,7 +727,7 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
         // add_cycle to dedupe against (irrelevant here: there is only ever
         // at most one cycle per single-seed call).
         const std::vector<Cycle> cycles =
-            find_attractors_from_seeds({seed}, map, a, opts, &unresolved_n, &endpoints);
+            find_attractors_from_seeds_bound({seed}, f, opts, &unresolved_n, &endpoints);
 
         SeedOutcome outcome;
         if (unresolved_n == 0 && !cycles.empty()) {

@@ -6,6 +6,7 @@
 #include "cdx/rational.hpp"
 #include "cdx/rational_parser.hpp"
 
+#include <algorithm>   // std::max(initializer_list); GCC does not pull it in transitively
 #include <cmath>
 #include <cstdio>
 #include <random>

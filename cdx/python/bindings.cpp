@@ -129,7 +129,8 @@ PYBIND11_MODULE(cdx, m) {
         .value("McMullen2", Family::McMullen2)
         .value("McMullen3", Family::McMullen3)
         .value("Newton3",   Family::Newton3)
-        .value("Custom",    Family::Custom);
+        .value("Custom",    Family::Custom)
+        .value("Composed",  Family::Composed);
 
     m.def("family_from_name", &family_from_py, py::arg("name"),
           "Resolve a family name ('mandelbrot', 'mcmullen3', ...) to a Family. "
@@ -172,6 +173,16 @@ PYBIND11_MODULE(cdx, m) {
         .def_static("custom", &Map::custom,
                     py::arg("rational_map"), py::arg("param") = Cplx{0.0, 0.0},
                     "Wrap a RationalMap as a renderable Map (Family.Custom).")
+        .def_static("composed", &Map::composed, py::arg("composed_map"),
+                    "Wrap a ComposedMap as a renderable Map (Family.Composed). "
+                    "Dynamical-plane modes (julia, basin, greens) take its attractors "
+                    "as Cycles; parameter-plane modes return all-zero images.")
+        .def_property_readonly("composed_map",
+            [](const Map& mp) -> py::object {
+                const ComposedMap* p = mp.composed_map();
+                return p ? py::cast(*p) : py::none();
+            },
+            "A COPY of the wrapped ComposedMap, or None.")
         .def_property_readonly("family", &Map::family)
         .def_property("param", &Map::param, &Map::set_param)
         .def_property_readonly("degree", &Map::degree)
@@ -188,6 +199,9 @@ PYBIND11_MODULE(cdx, m) {
                     "Built-in families only; a Custom map's critical points "
                     "come from its wrapped RationalMap.critical_points(a).")
         .def("__repr__", [](const Map& mp) {
+            if (mp.family() == Family::Composed) {
+                return "<cdx.Map composed " + mp.composed_map()->describe() + ">";
+            }
             if (mp.family() == Family::Custom) {
                 return "<cdx.Map custom '" + mp.custom_map()->name() + "' param=(" +
                        std::to_string(mp.param().real()) + "," +
@@ -296,6 +310,32 @@ PYBIND11_MODULE(cdx, m) {
                      throw std::invalid_argument(err);
                  return out;
              }, py::arg("text"))
+        .def_static("from_partial_fractions",
+             [](Cplx constant, py::array_t<Cplx, py::array::c_style | py::array::forcecast> poles,
+                py::array_t<Cplx, py::array::c_style | py::array::forcecast> residues) {
+                 if (poles.size() != residues.size())
+                     throw py::value_error("poles and residues must have the same length");
+                 RationalMap m;
+                 m.add_poly(constant, 0);
+                 const Cplx* p = poles.data();
+                 const Cplx* r = residues.data();
+                 m.pole_terms().reserve(static_cast<std::size_t>(poles.size()));
+                 for (py::ssize_t k = 0; k < poles.size(); ++k) {
+                     // Pushed directly: add_pole's per-pole collision scan is O(m),
+                     // O(m^2) for the whole list. Distinct locations are the
+                     // caller's contract here.
+                     PoleTerm t; t.location = p[k]; t.strength = r[k];
+                     m.pole_terms().push_back(t);
+                 }
+                 m.set_name("partial fractions");
+                 return m;
+             },
+             py::arg("constant"), py::arg("poles"), py::arg("residues"),
+             "constant + sum_k residues[k]/(z - poles[k]) as a term-backed RationalMap. "
+             "Poles must be distinct (not checked: the per-pole check of add_pole is "
+             "quadratic in the number of poles). Suited to ComposedMap stages; the "
+             "root-finding methods (critical_points, fixed_points) are not meant for "
+             "thousands of poles.")
         .def_static("mandelbrot",   &RationalMap::mandelbrot)
         .def_static("multibrot",    &RationalMap::multibrot, py::arg("n"))
         .def_static("mcmullen",     &RationalMap::mcmullen, py::arg("n"))
@@ -404,6 +444,61 @@ PYBIND11_MODULE(cdx, m) {
           "-- the SAME validation RationalMap.from_expression itself uses "
           "when actually building a map, exposed standalone for live-typing "
           "feedback before committing to that.");
+
+    // ---- ComposedMap (cdx/composed.hpp) ----------------------------------------
+    py::class_<ComposedStage>(m, "ComposedStage")
+        .def(py::init([](const RationalMap& map, Cplx param, int repeat) {
+                 ComposedStage st; st.map = map; st.param = param; st.repeat = repeat; return st;
+             }),
+             py::arg("map"), py::arg("param") = Cplx{0.0, 0.0}, py::arg("repeat") = 1,
+             "One stage of a ComposedMap: `map` at `param`, applied `repeat` times.")
+        .def_readwrite("map",    &ComposedStage::map)
+        .def_readwrite("param",  &ComposedStage::param)
+        .def_readwrite("repeat", &ComposedStage::repeat);
+
+    py::class_<ComposedMap>(m, "ComposedMap")
+        .def(py::init([](py::sequence stages) {
+                 std::vector<ComposedStage> out;
+                 for (py::handle h : stages) {
+                     if (py::isinstance<ComposedStage>(h)) { out.push_back(h.cast<ComposedStage>()); continue; }
+                     // (map, param[, repeat]) tuples, for convenience
+                     py::tuple t = h.cast<py::tuple>();
+                     ComposedStage st;
+                     st.map = t[0].cast<RationalMap>();
+                     st.param = t.size() > 1 ? t[1].cast<Cplx>() : Cplx{0.0, 0.0};
+                     st.repeat = t.size() > 2 ? t[2].cast<int>() : 1;
+                     out.push_back(std::move(st));
+                 }
+                 try { return ComposedMap(std::move(out)); }
+                 catch (const std::invalid_argument& e) { throw py::value_error(e.what()); }
+             }),
+             py::arg("stages"),
+             "f = stages[-1]^(n) o ... o stages[0]^(n), kept unexpanded. Each stage is a "
+             "ComposedStage or a (RationalMap, param, repeat) tuple, in APPLICATION order.")
+        .def_property_readonly("stages", &ComposedMap::stages)
+        .def_property_readonly("applications", &ComposedMap::applications)
+        .def_property_readonly("degree", &ComposedMap::degree,
+                               "prod deg^repeat as a float (exact below 2^53).")
+        .def_property_readonly("log10_degree", &ComposedMap::log10_degree)
+        .def("eval", &ComposedMap::eval, py::arg("z"),
+             "f(z) on the sphere; infinity is complex(inf, 0).")
+        .def("deriv", &ComposedMap::deriv, py::arg("z"),
+             "f'(z) by the chain rule (plane chart; NaN at or through infinity).")
+        .def("eval_array",
+             [](const ComposedMap& f, py::array_t<Cplx, py::array::c_style | py::array::forcecast> z) {
+                 py::array_t<Cplx> out(std::vector<py::ssize_t>(z.shape(), z.shape() + z.ndim()));
+                 const Cplx* in = z.data();
+                 Cplx* o = out.mutable_data();
+                 const py::ssize_t n = z.size();
+                 {
+                     py::gil_scoped_release release;
+                     for (py::ssize_t k = 0; k < n; ++k) o[k] = f.eval(in[k]);
+                 }
+                 return out;
+             },
+             py::arg("z"), "Elementwise eval over a complex NumPy array (any shape).")
+        .def("describe", &ComposedMap::describe)
+        .def("__repr__", [](const ComposedMap& f) { return "<cdx.ComposedMap " + f.describe() + ">"; });
 
     // ---- Viewport ----------------------------------------------------------
     py::class_<Viewport>(m, "Viewport")

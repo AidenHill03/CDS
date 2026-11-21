@@ -15,7 +15,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 # ---- core library -----------------------------------------------------------
-add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp)
+add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/composed.cpp)
 target_include_directories(cdx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 find_package(Threads REQUIRED)
@@ -48,6 +48,9 @@ target_link_libraries(cdx_test_rational_pq PRIVATE cdx_core)
 
 add_executable(cdx_test_rational_params test/test_rational_params.cpp)
 target_link_libraries(cdx_test_rational_params PRIVATE cdx_core)
+
+add_executable(cdx_test_composed test/test_composed.cpp)
+target_link_libraries(cdx_test_composed PRIVATE cdx_core)
 
 # Measurement tool, not a PASS/FAIL suite -- see its own header comment.
 # Diagnoses the Parameter_basin unresolved/slow problem on a Nova-style

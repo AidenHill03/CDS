@@ -69,6 +69,14 @@ jobs:
       - name: Build cdx (core + pybind11 extension)
         run: cmake --build cdx/build --config Release --parallel
 
+      # The approximation module's own kernel (_approx_kernel). Its CMake
+      # project compiles cdx's core in as a dependency and writes the
+      # extension straight into modules/approximation/ on every generator.
+      - name: Build the approximation module
+        run: |
+          cmake -B modules/approximation/build -S modules/approximation -DCMAKE_BUILD_TYPE=Release
+          cmake --build modules/approximation/build --config Release --parallel
+
       # Every C++ test binary CMakeLists.txt defines -- there is no CTest
       # registration in this repo (see cdx/CMakeLists.txt), so each is
       # invoked directly. MSVC's multi-config generator on Windows puts
@@ -80,7 +88,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for exe in cdx_test cdx_test_expr cdx_test_rational cdx_test_roots cdx_test_custom cdx_test_analysis; do
+          for exe in cdx_test cdx_test_expr cdx_test_rational cdx_test_roots cdx_test_custom cdx_test_analysis cdx_test_composed; do
             found=""
             for candidate in "cdx/build/$exe" "cdx/build/$exe.exe" "cdx/build/Release/$exe.exe" "cdx/build/Debug/$exe.exe"; do
               if [ -f "$candidate" ]; then found="$candidate"; break; fi
@@ -156,7 +164,21 @@ jobs:
                      app.test_facts_panel app.test_library_panel app.test_metadata_header \
                      app.test_orbit_panel app.test_orbit_tracker app.test_render_cache \
                      app.test_sandbox app.test_session app.test_settings \
-                     app.test_settings_panel app.test_term_editor_panel; do
+                     app.test_settings_panel app.test_equation_panel app.test_pane; do
+            echo "=== $mod ==="
+            python -m "$mod"
+          done
+
+      - name: Run the approximation module's tests (offscreen)
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: ${{ steps.cdx_ext.outputs.dir }}
+        run: |
+          export QT_QPA_PLATFORM_PLUGIN_PATH="${{ steps.qt_plugins.outputs.path }}"
+          set -e
+          for mod in modules.approximation.test_construction modules.approximation.test_vs_matlab \
+                     modules.approximation.test_scoring modules.approximation.test_panel; do
             echo "=== $mod ==="
             python -m "$mod"
           done

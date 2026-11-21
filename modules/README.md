@@ -1,6 +1,6 @@
 # modules/
 
-Self-contained research investigations. Empty for now; see
+Self-contained research investigations; see
 [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the full layering rationale. This
 file states the rule that governs everything placed here.
 
@@ -29,9 +29,8 @@ and `cdx::hausdorff_distance` already have.
 
 ## The first module: `modules/approximation/`
 
-Not yet implemented. It scores candidates for the Fisher–Hill–Lazebnik–Thompson
-simultaneous-approximation construction — conditions (2.4) and (2.5) from the
-paper. See the "Deferred: the approximation module" section of
-`ARCHITECTURE.md` for the construction, the exact statement of both
-conditions, and two specific mistakes already made once and worth not
-repeating.
+The Fisher–Hill–Lazebnik–Thompson simultaneous-approximation construction
+from an image, with certified dynamical data and scoring against the target.
+See [`approximation/README.md`](approximation/README.md). Its panel attaches
+through `SandboxWindow.add_panel`, called from `phoenix.py` (the composition
+root) — the pattern for any later module with a UI.

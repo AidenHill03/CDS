@@ -14,6 +14,7 @@
 #include "cdx/rational_parser.hpp"
 
 #include <cctype>
+#include <algorithm>   // std::max(initializer_list); GCC does not pull it in transitively
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>

@@ -30,6 +30,10 @@ Everything that is true of rational maps in general, independent of what you
 are studying.
 
 - `rational` — `RationalMap` as editable terms; poles as first-class objects
+- `composed` — `ComposedMap`: a composition of `RationalMap` stages (each with
+  a repeat count) kept unexpanded, evaluated stage by stage in both charts of
+  the sphere; `Map::composed` makes it renderable. For maps whose degree rules
+  out a P/Q form (iterates, conjugations, M∘P^n∘R constructions)
 - `expr` — parser/evaluator for user-typed formulas
 - `roots` — Aberth–Ehrlich polynomial root finder
 - `renderer` — Julia / parameter / basin / Green's rendering
@@ -67,7 +71,33 @@ modules that demonstrably need one. The project convention is to measure
 before optimizing; the same applies to abstraction. Premature extension
 machinery is harder to remove than to add.
 
-## Deferred: the approximation module
+## Attaching a module's UI
+
+`app/` never imports a module. The **composition root**, `phoenix.py` at the
+repository root, is the one file that knows every layer: it builds each
+module's panel and hands it to `SandboxWindow.add_panel(widget, title)`, a
+plain method that adds a tab (and calls the widget's `shutdown()`, if it has
+one, when the window closes). `python -m app.sandbox` still starts the plain
+sandbox. Packaging (`complexdynamics.spec`) starts from `phoenix.py`.
+
+## Orientation at the seam
+
+Engine and app rasters have row 0 at the **bottom** (`cdx.Viewport.coord`).
+A module that works in image order (row 0 at the top) converts in exactly one
+named function at its seam — for the approximation module,
+`modules.approximation.construction.to_cdx_orientation` — and nowhere else.
+
+## The approximation module
+
+`modules/approximation/` implements the Fisher–Hill–Lazebnik–Thompson
+construction from an image: Runge approximant `S` by Cauchy quadrature on the
+region edges, `r = M ∘ F^n ∘ S` with `F` the model polynomial in reciprocal
+coordinates, certified trapping disks, certified basin cells, a complete
+critical-point count (argument principle + Ehrlich–Aberth), and scoring
+against the target with `cdx.hausdorff_distance` / `cdx.wada_diagnostic`.
+`r` is evaluated by the engine's `ComposedMap`; the module's own C++ kernel
+(`_approx_kernel`, built by `modules/approximation/CMakeLists.txt`) holds only
+what is specific to the construction. Its panel is the "Approximation" tab.
 
 `verify_conditions` for the Fisher–Hill–Lazebnik–Thompson construction is
 **not** engine code, and this is worth recording because it is easy to
@@ -101,9 +131,11 @@ So the module needs three inputs the sandbox has no notion of: target regions,
 a candidate $R$, and the model map $P_\lambda$. That is precisely why it is a
 module and not engine code.
 
-Implement it when the approximation research resumes, in
-`modules/approximation/`, alongside the Runge/contraction map construction it
-exists to score.
+In the module: (2.4) on the target's interior cores is `construction.
+check_image_cores` (sampled) and `dynamics.certify_cells` (every cell,
+proved); (2.5) is replaced by its consequence that actually matters, Remark
+2.12 — every critical value of `r` lies in a basin — checked directly by
+`dynamics.critical_analysis` for the map that was built.
 
 ## Adding a module: checklist
 

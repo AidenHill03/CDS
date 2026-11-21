@@ -28,6 +28,12 @@ guarantee evaporates. This cost real debugging time.
 **No `-ffast-math`.** The escape tests and NaN guards depend on IEEE
 semantics.
 
+**A composed map is never expanded.** `ComposedMap` (cdx/composed.hpp) keeps
+f = g_k^(n_k) ∘ … ∘ g_1^(n_1) as stages; the approximation module's maps
+have degree 10^6–10^7, where a P/Q form is meaningless in double precision.
+Do not add critical-point or fixed-point root-finding to it — attractors of a
+composed map are supplied by whoever built it, as Cycles.
+
 **Hand-rolled real/imag arithmetic in hot loops, not `std::complex`.**
 `operator*` carries inf/nan branch handling that measurably costs. `std::complex`
 is fine in the API and cold paths.
@@ -103,6 +109,15 @@ Interactive sandbox (from the repository root, requires PySide6):
 
 ```bash
 PYTHONPATH=cdx/build python -m app.sandbox
+```
+
+The full app with the research modules' tabs (the composition root):
+
+```bash
+cmake -B modules/approximation/build -S modules/approximation && cmake --build modules/approximation/build
+PYTHONPATH=cdx/build python phoenix.py
+PYTHONPATH=cdx/build python -m modules.approximation.test_construction   # likewise test_vs_matlab, test_scoring
+QT_QPA_PLATFORM=offscreen PYTHONPATH=cdx/build python -m modules.approximation.test_panel
 ```
 
 ## Current state

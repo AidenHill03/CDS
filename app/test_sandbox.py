@@ -31,7 +31,7 @@ import shiboken6
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QImage, QKeyEvent, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 import cdx
 import app.sandbox as sandbox_module
@@ -2475,6 +2475,26 @@ def main() -> None:
     window.session.map = cdx.RationalMap.mandelbrot()
     window._set_focused_pane(window.pane)
 
+    # ---- add_panel: how research modules attach without app/ importing them ------
+    print("\nadd_panel:")
+
+    class _PanelWithShutdown(QLabel):
+        shut_down = 0
+
+        def shutdown(self) -> None:
+            type(self).shut_down += 1
+
+    n_tabs = window.tabs.count()
+    extra = _PanelWithShutdown("extra")
+    index = window.add_panel(extra, "Extra")
+    check(window.tabs.count() == n_tabs + 1 and index == n_tabs,
+          "add_panel appends exactly one tab, after the built-in ones")
+    check(window.tabs.widget(index) is extra and window.tabs.tabText(index) == "Extra",
+          "the tab holds the given widget under the given title")
+    plain = QLabel("no shutdown method")
+    window.add_panel(plain, "Plain")
+    check(window.tabs.count() == n_tabs + 2, "a panel without shutdown() is accepted too")
+
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded
     # render requests" section above deliberately leaves a stale task's
@@ -2484,6 +2504,7 @@ def main() -> None:
     # down Qt objects, which crashes exactly the way a user closing the
     # real window mid-render would without the same closeEvent handling.
     window.close()
+    check(_PanelWithShutdown.shut_down == 1, "closeEvent calls an added panel's shutdown() once")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

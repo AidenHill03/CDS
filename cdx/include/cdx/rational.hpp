@@ -358,6 +358,14 @@ public:
     // empty term-based map).
     bool is_pq_backed() const { return pq_ != nullptr; }
 
+    // P/Q-backed maps only: the numerator and denominator coefficients,
+    // ASCENDING (index k multiplies z^k), evaluated at parameter `a`.
+    // Returns false (and leaves P, Q untouched) for a term-backed map. Used
+    // by ComposedMap (cdx/composed.hpp) to evaluate a P/Q stage in both
+    // charts of the sphere, which needs the coefficients themselves rather
+    // than CompiledMap's one-chart Horner form.
+    bool pq_coefficients(Cplx a, std::vector<Cplx>& P, std::vector<Cplx>& Q) const;
+
     // The authored source expression this map was built from, if
     // is_pq_backed() -- empty string otherwise. For from_expression, this
     // is the ORIGINAL multi-parameter text (e.g. "b*z^2 + a"), NOT the
@@ -727,6 +735,11 @@ private:
     // purely symbolic (ParamExpr-tree) computation each time otherwise,
     // for information that never changes after construction.
     PolyZ pq_dP_, pq_dQ_;
+    // pole_locations(a) when Q does not reference the active parameter at
+    // all (so the poles are the same for every `a`): solved once in
+    // set_pq_backing and returned as-is. Valid iff pq_poles_constant_.
+    bool pq_poles_constant_ = false;
+    std::vector<Cplx> pq_constant_poles_;
 
     // Authored-form preservation (Stage 3) -- see from_expression's own
     // comment. Defaulted from cr's own source/parameters by set_pq_backing

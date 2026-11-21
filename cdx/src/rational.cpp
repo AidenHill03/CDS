@@ -350,6 +350,25 @@ void RationalMap::set_pq_backing(CanonicalRational cr) {
     pq_active_param_ = pq_param_;
     pq_fixed_params_.clear();
     pq_ = std::make_shared<const CanonicalRational>(std::move(cr));
+
+    // Poles that cannot move: when no coefficient of Q references the active
+    // parameter, Q -- and so pole_locations(a) -- is the same for every `a`.
+    // Solve for them once here instead of on every call. MEASURED (bench/
+    // bench_newton.py, relaxed Newton n=8, Parameter_basin): pole_locations
+    // was 38% of a parameter-plane render, 5-6 Aberth solves per pixel of the
+    // same Q = n z^(n-1), whose (n-1)-fold root at the origin is the slow case
+    // for Aberth. The stored vector is exactly what the solve below returns
+    // for any `a`, so nothing a caller sees changes.
+    pq_poles_constant_ = false;
+    pq_constant_poles_.clear();
+    bool q_constant = true;
+    for (const auto& c : pq_->Q.coeffs) {
+        if (!pq_param_.empty() && references_param(c, pq_param_)) { q_constant = false; break; }
+    }
+    if (q_constant) {
+        pq_constant_poles_ = pole_locations(Cplx(0.0, 0.0));   // flag still false: the real solve
+        pq_poles_constant_ = true;
+    }
 }
 
 RationalMap RationalMap::from_canonical(CanonicalRational cr, std::string name) {
@@ -616,6 +635,14 @@ Cplx RationalMap::deriv(Cplx z, Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
+bool RationalMap::pq_coefficients(Cplx a, std::vector<Cplx>& P, std::vector<Cplx>& Q) const {
+    if (!pq_) return false;
+    const auto params = pq_binding(pq_param_, a);
+    P = eval_coeffs(pq_->P, params);
+    Q = eval_coeffs(pq_->Q, params);
+    return true;
+}
+
 CompiledMap RationalMap::compile(Cplx a) const {
     if (pq_) {
         CompiledMap c;
@@ -710,6 +737,7 @@ bool RationalMap::is_polynomial_structurally() const {
 
 std::vector<Cplx> RationalMap::pole_locations(Cplx a) const {
     if (pq_) {
+        if (pq_poles_constant_) return pq_constant_poles_;   // see set_pq_backing
         const auto params = pq_binding(pq_param_, a);
         const std::vector<Cplx> raw = roots(Polynomial{eval_coeffs(pq_->Q, params)});
         // roots() returns WITH multiplicity (a double pole comes back as

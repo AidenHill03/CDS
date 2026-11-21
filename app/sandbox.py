@@ -2397,6 +2397,7 @@ class SandboxWindow(QMainWindow):
         self.tabs.addTab(self.library_panel, "Library")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(self.tabs)
+        self._extra_panels: list[QWidget] = []   # see add_panel
 
         self._build_settings_dialog()
 
@@ -3107,6 +3108,20 @@ class SandboxWindow(QMainWindow):
         if self.tabs.widget(index) is self.facts_panel:
             self.facts_panel.refresh()
 
+    # ---- extra panels (research modules) ----------------------------------------
+    def add_panel(self, widget: QWidget, title: str) -> int:
+        """Adds `widget` as a tab after the built-in ones and returns its index.
+
+        This is how a research module's UI (modules/<name>/panel.py) appears in
+        the window WITHOUT app/ importing anything from modules/: the
+        composition root (phoenix.py) builds the panel and hands it over here.
+        A plain method, deliberately not a registry (see modules/README.md).
+        If the widget has a shutdown() method it is called from closeEvent, so a
+        panel with background work of its own can cancel and drain it.
+        """
+        self._extra_panels.append(widget)
+        return self.tabs.addTab(widget, title)
+
     # ---- facts tab: clicking a listed point centres the view on it --------------
     def _on_center_view(self, point: complex) -> None:
         pane = self._focused_pane
@@ -3390,12 +3405,22 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             for task in pane.pending_tasks.values():
                 task.cancel.cancel()
+        for panel in self._extra_panels:
+            shutdown = getattr(panel, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
         super().closeEvent(event)
 
 
-def main() -> None:
+def main(extra_panels=()) -> None:
+    """Runs the app. `extra_panels` is a sequence of factories, each called with
+    the window and returning (widget, tab title) -- how the composition root
+    (phoenix.py) attaches research-module panels; app/ itself imports none."""
     app = QApplication(sys.argv)
     window = SandboxWindow()
+    for factory in extra_panels:
+        widget, title = factory(window)
+        window.add_panel(widget, title)
     window.show()
     if os.environ.get("CDX_VERIFY_LAUNCH_SELFTEST"):
         # A packaged build "launching" only means something if a real

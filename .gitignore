@@ -38,3 +38,7 @@ dist/
 *.avi
 *.png
 !docs/**/*.png
+!modules/approximation/test_reference/*.png
+
+# ---- benchmark outputs (bench/*.py --save, A/B engine copies) ----
+bench/out/

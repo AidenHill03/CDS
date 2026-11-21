@@ -31,6 +31,7 @@ std::string to_string(Family f) {
         case Family::McMullen3: return "mcmullen3";
         case Family::Newton3:   return "newton3";
         case Family::Custom:    return "custom";
+        case Family::Composed:  return "composed";
     }
     return "unknown";
 }
@@ -144,6 +145,13 @@ std::optional<Family> recognize_family(const RationalMap& m) {
 // -----------------------------------------------------------------------------
 // Map
 // -----------------------------------------------------------------------------
+Map Map::composed(ComposedMap m) {
+    Map out;
+    out.family_ = Family::Composed;
+    out.composed_ = std::make_shared<const ComposedMap>(std::move(m));
+    return out;
+}
+
 Map Map::custom(RationalMap m, Cplx param) {
     Map out;
     out.family_ = Family::Custom;
@@ -154,6 +162,11 @@ Map Map::custom(RationalMap m, Cplx param) {
 
 int Map::degree() const {
     if (family_ == Family::Custom) return custom_->degree(param_);
+    if (family_ == Family::Composed) {
+        const double d = composed_->degree();
+        return d >= static_cast<double>(std::numeric_limits<int>::max())
+                   ? std::numeric_limits<int>::max() : static_cast<int>(d);
+    }
     switch (family_) {
         case Family::Quadratic: return 2;
         case Family::Cubic:     return 3;
@@ -162,12 +175,17 @@ int Map::degree() const {
         case Family::McMullen3: return 6;   // z^3 + a/z^3 has degree 2n = 6
         case Family::Newton3:   return 3;
         case Family::Custom:    break;      // handled above
+        case Family::Composed:  break;      // handled above
     }
     return 2;
 }
 
 bool Map::escape_certified() const {
     if (family_ == Family::Custom) return polynomial_escape_certified(*custom_);
+    // A composed map always takes the sphere-aware rational paths: a fixed
+    // escape radius is not a certified trap for it in general, and the
+    // classification against caller-supplied Cycles is what it is built for.
+    if (family_ == Family::Composed) return false;
     switch (family_) {
         case Family::Quadratic: return true;    // z^2+a
         case Family::Cubic:     return true;    // z^3+a
@@ -176,6 +194,7 @@ bool Map::escape_certified() const {
         case Family::McMullen3: return false;   // z^3+a/z^3 -- a pole at the origin
         case Family::Newton3:   return false;   // (2/3)z + (1/3)z^-2 -- a pole at the origin
         case Family::Custom:    break;          // handled above
+        case Family::Composed:  break;          // handled above
     }
     return true;
 }
@@ -236,11 +255,16 @@ void Map::step_with(Family f, double pr, double pi, double& zr, double& zi) {
         // since a Custom map's formula lives on the RationalMap instance,
         // not in the enum value. No-op rather than corrupt zr/zi.
         case Family::Custom:
+        case Family::Composed:
             return;
     }
 }
 
 void Map::step(double& zr, double& zi) const {
+    if (family_ == Family::Composed) {
+        composed_->step(zr, zi);
+        return;
+    }
     if (family_ == Family::Custom) {
         const Cplx z = custom_->eval(Cplx(zr, zi), param_);
         zr = z.real();
@@ -273,12 +297,16 @@ Cplx Map::critical_point(Family f, Cplx param) {
         // Unreachable in normal use; see the comment on the Custom case in
         // step_with. Use critical_point_at for a Custom map.
         case Family::Custom:
+        case Family::Composed:
             return {0.0, 0.0};
     }
     return {0.0, 0.0};
 }
 
 Cplx Map::critical_point_at(Cplx p) const {
+    // No critical points are computed for a composed map (see Map::composed);
+    // the parameter-plane modes that would call this return early for it.
+    if (family_ == Family::Composed) return {0.0, 0.0};
     if (family_ == Family::Custom) {
         const std::vector<Cplx> cps = custom_->critical_points(p);
         return cps.empty() ? Cplx(0.0, 0.0) : cps.front();
@@ -287,6 +315,10 @@ Cplx Map::critical_point_at(Cplx p) const {
 }
 
 void Map::step_with_param(Cplx p, double& zr, double& zi) const {
+    if (family_ == Family::Composed) {   // parameters are bound inside the composition
+        composed_->step(zr, zi);
+        return;
+    }
     if (family_ == Family::Custom) {
         const Cplx z = custom_->eval(Cplx(zr, zi), p);
         zr = z.real();
@@ -379,18 +411,26 @@ namespace {
 // the PIXEL, not map_.param(), so its plan has to be resolved per pixel
 // instead of per render -- see its own comment.
 struct StepPlan {
+    const ComposedMap* composed = nullptr;   // non-null for Family::Composed
     bool use_compiled = false;
     Family family = Family::Quadratic;   // valid when !use_compiled
     double pr = 0.0, pi = 0.0;           // valid when !use_compiled
     CompiledMap compiled;                // valid when use_compiled
 
     inline void step(double& zr, double& zi) const {
-        if (use_compiled) compiled.step(zr, zi);
+        if (composed) composed->step(zr, zi);
+        else if (use_compiled) compiled.step(zr, zi);
         else Map::step_with(family, pr, pi, zr, zi);
     }
 };
 
 StepPlan make_step_plan(const Map& m) {
+    if (m.composed_map()) {
+        StepPlan plan;
+        plan.composed = m.composed_map();
+        plan.family = Family::Composed;
+        return plan;
+    }
     const RationalMap* custom = m.custom_map();
     const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
     StepPlan plan;
@@ -913,6 +953,8 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
 // path means.
 Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrategy strategy,
                                  int critical_index) const {
+    // A composed map has no free parameter (see Map::composed): honest zeros.
+    if (map_.family() == Family::Composed) return Image(view_.resolution, view_.resolution);
     if (map_.escape_certified()) return render_parameter_polynomial(cancel);
     return render_parameter_rational(strategy, critical_index, cancel);
 }
@@ -1233,6 +1275,10 @@ Image Renderer::render_parameter_greens_rational(GreensPotential potential, Imag
 
 Image Renderer::render_parameter_greens(const std::atomic<bool>* cancel, GreensPotential potential,
                                         Image* exact) const {
+    if (map_.family() == Family::Composed) {   // no free parameter: honest zeros
+        if (exact) *exact = Image(view_.resolution, view_.resolution);
+        return Image(view_.resolution, view_.resolution);
+    }
     if (map_.escape_certified()) return render_parameter_greens_polynomial(cancel);
     return render_parameter_greens_rational(potential, exact, cancel);
 }
