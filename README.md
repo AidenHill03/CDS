@@ -41,6 +41,17 @@ Unzip the archive and run `Project Phoenix.exe` (Windows) or
 whole extracted folder together (the executable needs the files sitting
 next to it).
 
+## Controls
+
+Drag to pan, Shift-drag to zoom into a box, scroll or pinch to zoom at the
+cursor, and click to seed an orbit (dynamical plane) or set `a` (parameter
+plane). Esc cancels a drag. With a plot focused, arrow keys pan (or nudge
+`a` on the parameter plane), `+`/`-` zoom, and Space steps the orbit.
+
+The **Info** tab (Help ▸ Controls & Shortcuts, F1) lists every control and
+keyboard shortcut, labelled for your platform. It is generated from
+`app/controls.py`, so it always matches what the app does.
+
 ## Building from source
 
 Requires a C++17 compiler, CMake ≥ 3.15, and Python 3.12 with
