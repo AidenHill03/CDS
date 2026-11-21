@@ -65,6 +65,10 @@ class OrbitPanel(QWidget):
         clear_button.clicked.connect(lambda: self.image_view.clear_orbit())
         layout.addWidget(clear_button)
 
+    def run_n(self) -> int:
+        """The current "Run N" count (Shift+Space in a dynamical pane uses it)."""
+        return self._run_n_spin.value()
+
     def set_image_view(self, image_view) -> None:
         """Repoints this panel at a DIFFERENT pane's ImageView -- Stage 2's
         "the orbit strip follows the dynamical pane": SandboxWindow calls

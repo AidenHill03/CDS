@@ -31,11 +31,12 @@ import numpy as np
 import shiboken6
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect,
                             QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
-from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QPushButton, QSpinBox, QSplitter, QTabWidget, QToolBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import (QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
+                           QPolygonF)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+                               QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
 from app.about_dialog import AboutDialog
@@ -71,6 +72,17 @@ ZOOM_FACTOR_PER_NOTCH = 1.15
 # be in the right ballpark, since these events arrive in long smooth
 # streams and the sum is what the user sees.
 PIXEL_DELTA_PER_NOTCH = 120.0
+
+# Keyboard navigation in a pane (controls redesign, Step 2).
+# +/- (and View > Zoom In/Out) zoom about the pane's center by this factor.
+KEY_ZOOM_FACTOR = ZOOM_FACTOR_PER_NOTCH ** 2
+# An arrow press pans by this fraction of the view's half-width...
+KEY_PAN_FRACTION = 0.1
+# ...and, held, repeats after PAN_KEY_REPEAT_DELAY_MS every PAN_KEY_REPEAT_MS
+# (deliberately independent of Settings.param_marker_rate, which paces
+# parameter-marker nudging). The initial delay lets a normal tap pan once.
+PAN_KEY_REPEAT_DELAY_MS = 300
+PAN_KEY_REPEAT_MS = 60
 
 # Restarted on every wheel/pan-move event; a render is only actually
 # started once this settles, so a fast scroll or drag does not queue a
@@ -1032,6 +1044,24 @@ _ARROW_DIRECTIONS: dict[Qt.Key, complex] = {
 }
 
 
+def preferences_shortcuts(platform_bindings: list[QKeySequence] | None = None) -> list[QKeySequence]:
+    """Settings: StandardKey.Preferences (Cmd+, on macOS); that binding is
+    EMPTY on Windows, so fall back to Ctrl+, there."""
+    bindings = (QKeySequence.keyBindings(QKeySequence.StandardKey.Preferences)
+                if platform_bindings is None else platform_bindings)
+    return list(bindings) or [QKeySequence("Ctrl+,")]
+
+
+def text_undo_target(widget: QWidget | None):
+    """The editable text widget whose OWN undo/redo should handle Edit >
+    Undo while `widget` has focus, or None (-> the Equation panel's stack)."""
+    if isinstance(widget, QAbstractSpinBox):
+        widget = widget.findChild(QLineEdit)
+    if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit)) and not widget.isReadOnly():
+        return widget
+    return None
+
+
 class ImageView(QWidget):
     """The single image pane: displays the current render, and owns every
     mouse/wheel/pinch interaction (drag pan, Shift-drag box zoom, scroll/pinch zoom) and,
@@ -1116,6 +1146,9 @@ class ImageView(QWidget):
     # _apply_param_change every other param-setting path already funnels
     # through.
     param_nudged = Signal(complex)
+    # Shift+Space in a dynamical pane: "Run N" with the orbit panel's N, which
+    # only the window knows (see SandboxWindow._on_run_n_requested).
+    run_n_requested = Signal()
 
     def __init__(self, pane: Pane, session: Session, parent: QWidget | None = None):
         super().__init__(parent)
@@ -1142,6 +1175,12 @@ class ImageView(QWidget):
         self._held_arrows: set[complex] = set()
         self._nudge_timer = QTimer(self)
         self._nudge_timer.timeout.connect(self._on_nudge_timer_tick)
+        # Arrow-key PANNING (dynamical plane, or Alt+arrows anywhere) keeps
+        # its own held set and timer -- a different cadence from marker
+        # nudging (PAN_KEY_REPEAT_*), and never driven by param_marker_rate.
+        self._held_pan_arrows: set[complex] = set()
+        self._pan_timer = QTimer(self)
+        self._pan_timer.timeout.connect(self._on_pan_timer_tick)
         self.orbit_tracker = OrbitTracker()
         # Orbit-only -- deliberately independent of _trace_orbits below,
         # which governs the SEPARATE post-critical-point traces (see
@@ -1917,61 +1956,132 @@ class ImageView(QWidget):
                 self._seed_orbit_at(origin)
         # "cancelled": nothing
 
-    # ---- keyboard: arrow-key parameter-marker nudging (Stage 4) -----------------
-    # PARAMETER-plane panes only -- the marker is a parameter-plane concept
-    # (see param_nudged's own comment). In a DYNAMICAL pane, arrows are left
-    # UNBOUND here (fall through to Qt's default handling, e.g. focus
-    # navigation) -- future scope, not this feature's job.
+    # ---- keyboard: plot-scoped keys --------------------------------------------
+    # Arrows: pan (dynamical plane) / nudge the parameter marker (parameter
+    # plane, Stage 4 -- see param_nudged's own comment); Alt+arrows pan on
+    # either. +/-: zoom at center. Space / Shift+Space: step / run the orbit
+    # (dynamical plane). Esc: cancel a drag.
+    @staticmethod
+    def _plain_modifiers(event) -> Qt.KeyboardModifier:
+        # macOS tags arrow keys with KeypadModifier, and the numpad +/- carry
+        # it everywhere -- it says which physical key, not a chord.
+        return event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+
     def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_Escape and self.cancel_gesture():
+        """Plot-scoped keys (controls redesign, Step 2). Handled HERE, with
+        focus scoping, rather than as application shortcuts -- so none of
+        them fire while typing in a text field or activate a focused button.
+        Any chord with Ctrl/Cmd or Meta falls through to Qt (and so to the
+        window's QAction shortcuts)."""
+        key = event.key()
+        mods = self._plain_modifiers(event)
+        if key == Qt.Key.Key_Escape and self.cancel_gesture():
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Shift:
-            self._update_cursor(event.modifiers() | Qt.KeyboardModifier.ShiftModifier)
-        direction = _ARROW_DIRECTIONS.get(event.key())
-        if direction is None or self.pane.render_mode not in PARAMETER_PLANE_MODES:
+        if key == Qt.Key.Key_Shift:
+            self._update_cursor(mods | Qt.KeyboardModifier.ShiftModifier)
+        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
             super().keyPressEvent(event)
             return
-        event.accept()   # so an arrow never also triggers focus navigation
-        if event.isAutoRepeat():
-            return   # our own timer drives held-key cadence, not Qt's OS-level repeat
-        self._held_arrows.add(direction)
-        self._do_nudge()
-        self._nudge_timer.start(self._nudge_interval_ms())
+
+        direction = _ARROW_DIRECTIONS.get(key)
+        if direction is not None:
+            event.accept()   # so an arrow never also triggers focus navigation
+            if event.isAutoRepeat():
+                return   # our own timers drive held-key cadence, not Qt's OS-level repeat
+            # Dynamical plane: arrows pan. Parameter plane: arrows nudge the
+            # marker, Alt/Option+arrows pan. Decided per key press.
+            pans = (self.pane.render_mode not in PARAMETER_PLANE_MODES or
+                    bool(mods & Qt.KeyboardModifier.AltModifier))
+            if pans:
+                self._held_pan_arrows.add(direction)
+                self._do_key_pan()
+                self._pan_timer.start(PAN_KEY_REPEAT_DELAY_MS)
+            else:
+                self._held_arrows.add(direction)
+                self._do_nudge()
+                self._nudge_timer.start(self._nudge_interval_ms())
+            return
+
+        if mods & Qt.KeyboardModifier.AltModifier:
+            super().keyPressEvent(event)
+            return
+        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self.zoom_at_center(KEY_ZOOM_FACTOR)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Minus:
+            self.zoom_at_center(1.0 / KEY_ZOOM_FACTOR)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Space and self.pane.render_mode not in PARAMETER_PLANE_MODES:
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                self.run_n_requested.emit()
+            else:
+                self.step_orbit(1)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Shift:
-            self._update_cursor(event.modifiers() & ~Qt.KeyboardModifier.ShiftModifier)
+            self._update_cursor(self._plain_modifiers(event) & ~Qt.KeyboardModifier.ShiftModifier)
         direction = _ARROW_DIRECTIONS.get(event.key())
         # Only act if this direction is actually tracked as held -- keeps
-        # this symmetric with an unconsumed press (e.g. the render_mode
-        # switched away from PARAMETER_PLANE_MODES while the key was still
-        # down: the press never added it, so the release shouldn't stop a
-        # timer some OTHER held direction may still need) and side-steps
-        # ever needing to re-check render_mode here at all. Checked BEFORE
-        # isAutoRepeat() -- an untracked direction must fall through to
-        # super() regardless of autorepeat, and a TRACKED one must never
-        # reach super() at all once accepted, autorepeat or not (Qt's
-        # C++-typed base implementation rejects a non-QKeyEvent, which an
-        # accepted-then-forwarded autorepeat release would otherwise hit).
-        if direction is None or direction not in self._held_arrows:
+        # this symmetric with an unconsumed press and side-steps re-checking
+        # render_mode here. Checked BEFORE isAutoRepeat() -- an untracked
+        # direction must fall through to super() regardless of autorepeat,
+        # and a TRACKED one must never reach super() at all once accepted
+        # (Qt's C++-typed base implementation rejects a non-QKeyEvent, which
+        # an accepted-then-forwarded autorepeat release would otherwise hit).
+        tracked = direction is not None and (direction in self._held_arrows or
+                                             direction in self._held_pan_arrows)
+        if not tracked:
             super().keyReleaseEvent(event)
             return
         event.accept()
         if event.isAutoRepeat():
             return   # the key is still physically held; only a genuine release stops the timer
         self._held_arrows.discard(direction)
+        self._held_pan_arrows.discard(direction)
         if not self._held_arrows:
             self._nudge_timer.stop()
+        if not self._held_pan_arrows:
+            self._pan_timer.stop()
 
     def focusOutEvent(self, event) -> None:
         # A key can be physically released after focus has already moved
         # elsewhere (or the window itself lost focus) -- Qt does not
         # synthesize a keyReleaseEvent for that, so without this a held
-        # arrow could leave the repeat timer running forever.
+        # arrow could leave a repeat timer running forever.
         self._held_arrows.clear()
         self._nudge_timer.stop()
+        self._held_pan_arrows.clear()
+        self._pan_timer.stop()
         super().focusOutEvent(event)
+
+    # ---- keyboard pan / zoom -------------------------------------------------------
+    def zoom_at_center(self, factor: float) -> None:
+        """Keyboard and View-menu zoom: anchored at the pane's center."""
+        self._zoom_at(QRectF(self._display_rect()).center(), factor)
+
+    def pan_by_fraction(self, direction: complex, fraction: float = KEY_PAN_FRACTION) -> None:
+        """Moves the view by `fraction` of its half-width (viewport.scale) in
+        `direction` (an _ARROW_DIRECTIONS sum: Right = +real, Up = +imag)."""
+        vp = self.pane.viewport
+        new_center = vp.center + direction * fraction * vp.scale
+        self.pane.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
+        self.update()
+        self.viewport_changed.emit()
+
+    def _do_key_pan(self) -> None:
+        direction = sum(self._held_pan_arrows, complex(0.0, 0.0))
+        if direction != 0:   # e.g. Left+Right both held cancel out
+            self.pan_by_fraction(direction)
+
+    def _on_pan_timer_tick(self) -> None:
+        self._do_key_pan()
+        self._pan_timer.setInterval(PAN_KEY_REPEAT_MS)
 
     def _nudge_interval_ms(self) -> int:
         # Read LIVE every time (called on every timer restart AND every
@@ -2446,6 +2556,7 @@ class SandboxWindow(QMainWindow):
             # own comment for why this is a SEPARATE signal/handler from
             # param_changed, not a reuse of it.
             view.param_nudged.connect(self._on_param_nudged)
+            view.run_n_requested.connect(lambda v=view: v.step_orbit(self.orbit_panel.run_n()))
             # Keeps the "Orbit seed z0" field showing the CURRENT z0
             # whenever one is seeded via a dynamical-plane click (P6's
             # "symmetry of input": the click path must populate the
@@ -2590,6 +2701,11 @@ class SandboxWindow(QMainWindow):
         self.save_experiment_action.triggered.connect(self._on_save_experiment)
         self.open_experiment_action = self.file_menu.addAction("Open Experiment...")
         self.open_experiment_action.triggered.connect(self._on_open_experiment)
+        # Shortcuts: StandardKey wherever one exists, so Qt renders and binds
+        # the native sequence per platform ("Ctrl" in a QKeySequence IS
+        # Command on macOS -- never hard-code Cmd).
+        self.save_experiment_action.setShortcuts(QKeySequence.StandardKey.Save)
+        self.open_experiment_action.setShortcuts(QKeySequence.StandardKey.Open)
 
         # File > Export (Stage 4): a rendered PNG at a CHOSEN resolution, or
         # a JSON fact sheet -- both of the FOCUSED pane specifically (see
@@ -2598,6 +2714,7 @@ class SandboxWindow(QMainWindow):
         self.export_menu = self.file_menu.addMenu("Export")
         self.export_image_action = self.export_menu.addAction("Export Image (PNG)...")
         self.export_image_action.triggered.connect(self._on_export_image)
+        self.export_image_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_facts_action = self.export_menu.addAction("Export Facts (JSON)...")
         self.export_facts_action.triggered.connect(self._on_export_facts)
         self.file_menu.addSeparator()
@@ -2611,6 +2728,21 @@ class SandboxWindow(QMainWindow):
         self.settings_action = self.file_menu.addAction("Settings...")
         self.settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         self.settings_action.triggered.connect(self._on_open_settings)
+        self.settings_action.setShortcuts(preferences_shortcuts())
+
+        # ---- Edit menu: Undo/Redo of Equation edits -------------------------------
+        # StandardKey.Undo/Redo: Cmd+Z / Shift+Cmd+Z on macOS; Ctrl+Z and
+        # both Ctrl+Y and Ctrl+Shift+Z on Windows. A focused text field's
+        # own undo wins: QLineEdit/QPlainTextEdit claim these sequences via
+        # ShortcutOverride before the action sees them, and _route_undo
+        # forwards to the field too when the action is chosen from the menu.
+        self.edit_menu = self.menuBar().addMenu("Edit")
+        self.undo_action = self.edit_menu.addAction("Undo")
+        self.undo_action.setShortcuts(QKeySequence.StandardKey.Undo)
+        self.undo_action.triggered.connect(lambda: self._route_undo(redo=False))
+        self.redo_action = self.edit_menu.addAction("Redo")
+        self.redo_action.setShortcuts(QKeySequence.StandardKey.Redo)
+        self.redo_action.triggered.connect(lambda: self._route_undo(redo=True))
 
         # ---- View menu: the SOLE control for every toggle below (Stage 4) -------
         # Same store-on-self reason as file_menu/help_menu -- see help_menu's own
@@ -2628,6 +2760,18 @@ class SandboxWindow(QMainWindow):
         self.view_menu = self.menuBar().addMenu("View")
         self.reset_view_action = self.view_menu.addAction("Reset View")
         self.reset_view_action.triggered.connect(self._reset_view)
+        self.reset_view_action.setShortcut(QKeySequence("Ctrl+0"))
+        # Zoom the FOCUSED pane about its center (the plot's own +/- keys do
+        # the same, focus-scoped; these work from anywhere in the window).
+        self.zoom_in_action = self.view_menu.addAction("Zoom In")
+        self.zoom_in_action.setShortcuts(
+            QKeySequence.keyBindings(QKeySequence.StandardKey.ZoomIn) + [QKeySequence("Ctrl+=")])
+        self.zoom_in_action.triggered.connect(
+            lambda: self._focused_pane.image_view.zoom_at_center(KEY_ZOOM_FACTOR))
+        self.zoom_out_action = self.view_menu.addAction("Zoom Out")
+        self.zoom_out_action.setShortcuts(QKeySequence.StandardKey.ZoomOut)
+        self.zoom_out_action.triggered.connect(
+            lambda: self._focused_pane.image_view.zoom_at_center(1.0 / KEY_ZOOM_FACTOR))
         self.view_menu.addSeparator()
 
         # Coupled (both panes visible) is the natural instrument default --
@@ -2667,6 +2811,13 @@ class SandboxWindow(QMainWindow):
         self.legend_action.setCheckable(True)
         self.legend_action.toggled.connect(self.image_view.set_show_legend)
         self.legend_action.toggled.connect(self.image_view2.set_show_legend)
+        self.view_menu.addSeparator()
+
+        # Ctrl+1..Ctrl+9 jump to the tabs in order -- rebuilt whenever a tab
+        # is added (add_panel), so module tabs get numbers too.
+        self.go_to_tab_menu = self.view_menu.addMenu("Go to Tab")
+        self.tab_actions: list[QAction] = []
+        self._rebuild_tab_actions()
 
         # On macOS, Qt moves a menu titled "Help" (and any action inside
         # named "About <AppName>") into the system application menu
@@ -3259,7 +3410,32 @@ class SandboxWindow(QMainWindow):
         panel with background work of its own can cancel and drain it.
         """
         self._extra_panels.append(widget)
-        return self.tabs.addTab(widget, title)
+        index = self.tabs.addTab(widget, title)
+        self._rebuild_tab_actions()
+        return index
+
+    def _rebuild_tab_actions(self) -> None:
+        self.go_to_tab_menu.clear()
+        self.tab_actions = []
+        for index in range(min(self.tabs.count(), 9)):
+            action = self.go_to_tab_menu.addAction(self.tabs.tabText(index))
+            action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
+            action.triggered.connect(lambda _checked=False, i=index: self.tabs.setCurrentIndex(i))
+            self.tab_actions.append(action)
+
+    # ---- Edit > Undo/Redo ---------------------------------------------------------
+    def _route_undo(self, redo: bool, focus: QWidget | None = None) -> None:
+        """Undo/Redo: a focused, editable text widget's own text undo wins;
+        otherwise the Equation panel's map-edit stack. `focus` is injectable
+        for tests; it defaults to the application's focus widget."""
+        widget = QApplication.focusWidget() if focus is None else focus
+        target = text_undo_target(widget)
+        if target is not None:
+            target.redo() if redo else target.undo()
+        elif redo:
+            self.equation_panel.redo()
+        else:
+            self.equation_panel.undo()
 
     # ---- facts tab: clicking a listed point centres the view on it --------------
     def _on_center_view(self, point: complex) -> None:

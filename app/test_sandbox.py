@@ -29,10 +29,10 @@ from pathlib import Path
 import numpy as np
 import shiboken6
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import (QAction, QImage, QKeyEvent, QNativeGestureEvent, QPainter,
+from PySide6.QtGui import (QAction, QImage, QKeyEvent, QKeySequence, QNativeGestureEvent, QPainter,
                            QPointingDevice, QWheelEvent)
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPlainTextEdit, QSpinBox
 
 import cdx
 import app.sandbox as sandbox_module
@@ -1277,12 +1277,13 @@ def main() -> None:
 
     # ---- View menu: mirrors the toolbar's own controls, bidirectionally (Stage 3) ---
     print("\nView menu:")
-    check(menu_titles == ["File", "View", "Help"],
-          "the menu bar is File, View, Help, in that order")
+    check(menu_titles == ["File", "Edit", "View", "Help"],
+          "the menu bar is File, Edit, View, Help, in that order")
     view_action_texts = [a.text() for a in window.view_menu.actions() if a.text()]
-    check(view_action_texts == ["Reset View", "Coupled View", "Critical Points", "Trace Orbits",
+    check(view_action_texts == ["Reset View", "Zoom In", "Zoom Out", "Coupled View",
+                                "Critical Points", "Trace Orbits",
                                 "Fixed Points", "Attracting Cycles", "Trace Cycle Paths",
-                                "Connect Orbit Points", "Legend"],
+                                "Connect Orbit Points", "Legend", "Go to Tab"],
           "the View menu has the toolbar's own view controls PLUS every registry layer's own "
           "action (and gated trace sub-action), in registry order, PLUS Legend last (blank "
           "entries are separators, filtered out above) -- Fixed Points/Attracting Cycles/"
@@ -2639,6 +2640,184 @@ def main() -> None:
     plain = QLabel("no shutdown method")
     window.add_panel(plain, "Plain")
     check(window.tabs.count() == n_tabs + 2, "a panel without shutdown() is accepted too")
+
+    # ---- controls redesign, Step 2: keyboard ------------------------------------------
+    print("\nkeyboard: plot-scoped keys (ImageView.keyPressEvent):")
+    NOMOD = Qt.KeyboardModifier.NoModifier
+    ALT = Qt.KeyboardModifier.AltModifier
+    KEYPAD = Qt.KeyboardModifier.KeypadModifier
+
+    def _key(key, mods=NOMOD, press=True, text=""):
+        kind = QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease
+        return QKeyEvent(kind, key, mods, text)
+
+    kb_session = Session()
+    kb_session.map = cdx.RationalMap.mandelbrot()
+    kb_pane, kb_view = _pane_view(kb_session, complex(0, 0), 2.0, 400, "julia")
+    kb_view.resize(400, 400)
+
+    def _kb_reset(mode="julia"):
+        kb_pane.set_render_mode(mode)
+        kb_pane.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
+
+    _kb_reset()
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Right))
+    check(close(kb_pane.viewport.center, complex(0.2, 0), 1e-12) and kb_pane.viewport.scale == 2.0,
+          "dynamical plane: Right pans by 10% of the half-width (scale 2.0 -> +0.2 real)")
+    check(kb_view._pan_timer.isActive(), "...and starts the held-key pan repeat timer")
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Up))
+    check(close(kb_pane.viewport.center, complex(0.4, 0.2), 1e-12),
+          "Up pans +imag (screen-up); with Right still held the step is diagonal")
+    kb_view._on_pan_timer_tick()
+    check(close(kb_pane.viewport.center, complex(0.6, 0.4), 1e-12),
+          "a repeat tick with Right+Up held pans diagonally (directions combine)")
+    check(kb_view._pan_timer.interval() == sandbox_module.PAN_KEY_REPEAT_MS,
+          "after the initial delay the pan repeats at PAN_KEY_REPEAT_MS (its own constant)")
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Right, press=False))
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Up, press=False))
+    check(not kb_view._pan_timer.isActive(), "releasing every held arrow stops the pan timer")
+
+    _kb_reset()
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Left, KEYPAD))
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Left, KEYPAD, press=False))
+    check(close(kb_pane.viewport.center, complex(-0.2, 0), 1e-12),
+          "an arrow carrying KeypadModifier (as on macOS) is still a plain arrow")
+
+    nudges = []
+    kb_view.param_nudged.connect(nudges.append)
+    _kb_reset("parameter")
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Right))
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Right, press=False))
+    check(len(nudges) == 1 and kb_pane.viewport.center == 0j,
+          "parameter plane: a plain arrow still nudges the marker and does not pan")
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Right, ALT))
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Right, ALT, press=False))
+    check(len(nudges) == 1 and close(kb_pane.viewport.center, complex(0.2, 0), 1e-12),
+          "parameter plane: Alt/Option+arrow pans instead of nudging")
+    _kb_reset()
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Down, ALT))
+    kb_view.keyReleaseEvent(_key(Qt.Key.Key_Down, ALT, press=False))
+    check(close(kb_pane.viewport.center, complex(0, -0.2), 1e-12),
+          "dynamical plane: Alt+arrow pans the same as a plain arrow")
+
+    K = sandbox_module.KEY_ZOOM_FACTOR
+    for key, mods, factor, label in ((Qt.Key.Key_Plus, NOMOD, K, "+"),
+                                     (Qt.Key.Key_Equal, NOMOD, K, "="),
+                                     (Qt.Key.Key_Plus, KEYPAD, K, "numpad +"),
+                                     (Qt.Key.Key_Minus, NOMOD, 1 / K, "-"),
+                                     (Qt.Key.Key_Minus, KEYPAD, 1 / K, "numpad -")):
+        _kb_reset()
+        kb_pane.viewport = cdx.Viewport(complex(0.3, -0.1), 2.0, 400)
+        kb_view.keyPressEvent(_key(key, mods))
+        check(abs(kb_pane.viewport.scale - 2.0 / factor) < 1e-12
+              and close(kb_pane.viewport.center, complex(0.3, -0.1), 1e-12),
+              f"'{label}' zooms by KEY_ZOOM_FACTOR about the pane's center")
+    _kb_reset()
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier))
+    check(kb_pane.viewport.scale == 2.0,
+          "Ctrl/Cmd+= is NOT handled by the pane (it belongs to View > Zoom In)")
+
+    _kb_reset()
+    kb_view.clear_orbit()
+    kb_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+    kb_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 200)))
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Space, text=" "))
+    check(kb_view.orbit_tracker.state is not None and kb_view.orbit_tracker.state.n == 1,
+          "Space steps the orbit by one in a focused dynamical pane")
+    run_requests = []
+    kb_view.run_n_requested.connect(lambda: run_requests.append(1))
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Space, SHIFT, text=" "))
+    check(run_requests == [1] and kb_view.orbit_tracker.state.n == 1,
+          "Shift+Space asks for Run N (the window supplies N) rather than stepping once")
+    _kb_reset("parameter")
+    kb_view.keyPressEvent(_key(Qt.Key.Key_Space, text=" "))
+    check(run_requests == [1], "Space does nothing on a parameter-plane pane")
+    _kb_reset()
+
+    print("\nkeyboard: application shortcuts (QActions):")
+    SK = QKeySequence.StandardKey
+    check(window.save_experiment_action.shortcuts() == QKeySequence.keyBindings(SK.Save)
+          and window.save_experiment_action.shortcuts(),
+          "Save Experiment uses StandardKey.Save")
+    check(window.open_experiment_action.shortcuts() == QKeySequence.keyBindings(SK.Open),
+          "Open Experiment uses StandardKey.Open")
+    check(window.export_image_action.shortcut() == QKeySequence("Ctrl+E"), "Export Image is Ctrl/Cmd+E")
+    check(window.reset_view_action.shortcut() == QKeySequence("Ctrl+0"), "Reset View is Ctrl/Cmd+0")
+    check(window.settings_action.shortcuts() == sandbox_module.preferences_shortcuts(),
+          "Settings uses the platform Preferences binding")
+    check(sandbox_module.preferences_shortcuts([]) == [QKeySequence("Ctrl+,")],
+          "...falling back to Ctrl+, where the platform has none (Windows)")
+    check(sandbox_module.preferences_shortcuts([QKeySequence("Ctrl+,")]) == [QKeySequence("Ctrl+,")],
+          "...and using the platform's own binding where it has one (macOS)")
+    check(all(seq in window.zoom_in_action.shortcuts() for seq in QKeySequence.keyBindings(SK.ZoomIn))
+          and window.zoom_out_action.shortcuts() == QKeySequence.keyBindings(SK.ZoomOut),
+          "Zoom In/Out use StandardKey.ZoomIn/ZoomOut")
+    check(window.undo_action.shortcuts() == QKeySequence.keyBindings(SK.Undo)
+          and window.redo_action.shortcuts() == QKeySequence.keyBindings(SK.Redo),
+          "Undo/Redo use StandardKey.Undo/Redo (all platform alternatives, e.g. Ctrl+Y on Windows)")
+    menu_titles = [a.text() for a in window.menuBar().actions()]
+    check(menu_titles.index("File") < menu_titles.index("Edit") < menu_titles.index("View"),
+          "an Edit menu sits between File and View")
+
+    focused_view = window._focused_pane.image_view
+    focused_view.pane.viewport = cdx.Viewport(complex(0.1, 0.1), 1.0, focused_view.pane.viewport.resolution)
+    window.zoom_in_action.trigger()
+    check(abs(focused_view.pane.viewport.scale - 1.0 / K) < 1e-12
+          and close(focused_view.pane.viewport.center, complex(0.1, 0.1), 1e-12),
+          "View > Zoom In zooms the focused pane about its center")
+    window.zoom_out_action.trigger()
+    check(abs(focused_view.pane.viewport.scale - 1.0) < 1e-12, "View > Zoom Out undoes it")
+
+    check(len(window.tab_actions) == min(window.tabs.count(), 9)
+          and all(a.shortcut() == QKeySequence(f"Ctrl+{i + 1}") for i, a in enumerate(window.tab_actions))
+          and all(a.text() == window.tabs.tabText(i) for i, a in enumerate(window.tab_actions)),
+          "Ctrl/Cmd+1..N are bound to the tabs in tab order")
+    window.tab_actions[1].trigger()
+    check(window.tabs.currentIndex() == 1, "triggering Ctrl+2's action selects the second tab")
+    window.tab_actions[0].trigger()
+
+    print("\nkeyboard: Undo/Redo routing:")
+    equation_calls = []
+    real_undo, real_redo = window.equation_panel.undo, window.equation_panel.redo
+    window.equation_panel.undo = lambda: equation_calls.append("undo")
+    window.equation_panel.redo = lambda: equation_calls.append("redo")
+    formula_edit = window.equation_panel._formula_edit
+    original_formula = formula_edit.text()
+    formula_edit.end(False)
+    formula_edit.insert("+1")
+    window._route_undo(redo=False, focus=formula_edit)
+    check(formula_edit.text() == original_formula and equation_calls == [],
+          "Undo with the formula field focused undoes the TEXT edit, not the equation stack")
+    window._route_undo(redo=True, focus=formula_edit)
+    check(formula_edit.text() == original_formula + "+1" and equation_calls == [],
+          "...and Redo redoes the text edit")
+    formula_edit.setText(original_formula)
+    window._route_undo(redo=False, focus=window.image_view)
+    window._route_undo(redo=True, focus=window.image_view)
+    check(equation_calls == ["undo", "redo"],
+          "with a non-text widget focused, Undo/Redo go to the Equation panel's stack")
+    read_only = QPlainTextEdit()
+    read_only.setReadOnly(True)
+    check(sandbox_module.text_undo_target(read_only) is None,
+          "a read-only text view does not capture Undo")
+    spin = QSpinBox()
+    check(isinstance(sandbox_module.text_undo_target(spin), QLineEdit),
+          "a focused spin box's own line edit handles Undo")
+
+    # Through the real key path: the line edit claims the Undo sequence via
+    # ShortcutOverride, so the window's Undo action never fires.
+    window.activateWindow()
+    formula_edit.setFocus()
+    formula_edit.end(False)
+    formula_edit.insert("+2")
+    QTest.keySequence(formula_edit, QKeySequence(SK.Undo))
+    check(formula_edit.text() == original_formula and equation_calls == ["undo", "redo"],
+          "the Undo key sequence in the formula field is the field's own undo, not the app's")
+    QTest.keyClick(formula_edit, Qt.Key.Key_Space)
+    check(formula_edit.text() == original_formula + " ",
+          "Space typed in a text field is just text (it is not an application shortcut)")
+    formula_edit.setText(original_formula)
+    window.equation_panel.undo, window.equation_panel.redo = real_undo, real_redo
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded

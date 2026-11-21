@@ -310,6 +310,14 @@ class EquationPanel(QWidget):
             return
         self._notify_edit()
 
+    def undo(self) -> None:
+        """Edit > Undo (when no text field has focus): same as the button."""
+        self._undo()
+
+    def redo(self) -> None:
+        """Edit > Redo: same as the button."""
+        self._redo()
+
     def _undo(self) -> None:
         if not self._undo_stack:
             return
