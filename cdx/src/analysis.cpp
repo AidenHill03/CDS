@@ -802,6 +802,49 @@ bool same_cycle(const SeedOutcome& x, const SeedOutcome& y, double tol) {
     return false;
 }
 
+double polynomial_escape_radius_abs(const double* c, int d, double floor) {
+    if (d < 2 || !(c[d] > 0.0)) return floor;
+    // g(r) = |a_d| r^d - sum_{k<d} |a_k| r^k - r, and g'(r), by Horner.
+    auto g_and_dg = [c, d](double r, double& dg) {
+        double v = c[d], dv = 0.0;
+        for (int k = d - 1; k >= 0; --k) {
+            dv = dv * r + v;
+            v = v * r - c[k];
+        }
+        dg = dv - 1.0;
+        return v - r;
+    };
+    double dg;
+    if (floor > 0.0 && g_and_dg(floor, dg) >= 0.0) return floor;   // rho <= floor
+
+    // Bracket: g(0) = -|a_0| <= 0, g(hi) >= 0 at the closed-form bound.
+    double sum = 1.0;
+    for (int k = 0; k < d; ++k) sum += c[k];
+    double hi = std::max(1.0, sum / c[d]);
+    double lo = 0.0;
+    double r = hi;
+    for (int it = 0; it < 100; ++it) {
+        const double v = g_and_dg(r, dg);
+        if (v >= 0.0) hi = r; else lo = r;
+        if (hi - lo <= 1e-13 * hi) break;
+        double next = (dg > 0.0) ? r - v / dg : 0.5 * (lo + hi);
+        if (!(next > lo && next < hi)) next = 0.5 * (lo + hi);   // safeguard: stay bracketed
+        r = next;
+    }
+    // hi always satisfies g(hi) >= 0: never below the true root.
+    return std::max(floor, hi * (1.0 + 4e-16));
+}
+
+double polynomial_escape_radius(const std::vector<Cplx>& coeffs) {
+    std::vector<Cplx> c = coeffs;
+    while (!c.empty() && c.back() == Cplx(0.0, 0.0)) c.pop_back();
+    const int d = static_cast<int>(c.size()) - 1;
+    if (d < 2) return 0.0;
+    std::vector<double> a(c.size());
+    for (std::size_t k = 0; k < c.size(); ++k) a[k] = std::abs(c[k]);
+    return polynomial_escape_radius_abs(a.data(), d, 0.0);
+}
+
 bool polynomial_escape_certified(const RationalMap& map) {
     // Representation-agnostic (Stage 2 of the P/Q milestone): works
     // identically whether `map` is term-based or P/Q-backed, since it goes

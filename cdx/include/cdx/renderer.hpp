@@ -388,11 +388,15 @@ public:
     // family-aware):
     //
     //   CERTIFIED POLYNOMIAL (no poles, degree >= 2 -- infinity is ALWAYS
-    //   superattracting there, so a fixed |z| > escape_radius test is a
-    //   provably forward-invariant trap): today's escape-time fast path,
-    //   UNCHANGED -- `cycles`/`labels` are ignored entirely. Value is the
-    //   smooth escape count n + 1 - log(log|z|)/log 2, or 0 for orbits
-    //   that never escaped.
+    //   superattracting there): escape-time fast path, `cycles`/`labels`
+    //   ignored. The escape radius is max(rho, settings.escape_radius),
+    //   rho = polynomial_escape_radius of the map's coefficients at its
+    //   parameter -- a PROOF that |z| > rho escapes (see analysis.hpp). A
+    //   bare user radius is not one: 0.1 z^2 has bounded orbits through
+    //   |z| = 5, which an R = 2 cutoff called escaped. Value is the smooth
+    //   escape count n + 2 - log(log|z| + log|a_d|/(d-1))/log 2 (the
+    //   offset is 0 for a monic map, so z^d + a is bit-for-bit unchanged),
+    //   or 0 for orbits that never escaped.
     //
     //   RATIONAL (has poles -- infinity may be repelling, attracting, or
     //   not even fixed; a fixed escape radius is not a validated trap in
@@ -447,7 +451,9 @@ public:
     //   explicitly an artifact of where the cutoff is drawn, the same way
     //   classical Mandelbrot-set escape-time renders always have been.
     //   escape_radius is a legitimate tuning knob for the POLYNOMIAL path
-    //   specifically; the milestone's own escape-radius-invariance
+    //   specifically, but only ABOVE the certified radius: every pixel
+    //   escapes at max(rho(a), escape_radius), rho(a) recomputed per pixel
+    //   from the coefficients at that `a` (see polynomial_escape_radius); the milestone's own escape-radius-invariance
     //   acceptance test applies to Julia/Green's, deliberately not here.
     //
     //   RATIONAL: escape-radius-free and MULTI-critical -- retires the
@@ -672,9 +678,12 @@ public:
     // Green's function (dynamical potential). TWO PATHS, same certification
     // dispatch as render_julia (Map::escape_certified):
     //
-    //   CERTIFIED POLYNOMIAL: UNCHANGED -- G_f(z) = lim_{n->inf} d^-n
-    //   log+|f^n(z)|. When the orbit escapes at iteration n, the result is
-    //   log|z_n| / degree^n; non-escaping pixels are exactly 0. `cycles`/
+    //   CERTIFIED POLYNOMIAL: G_f(z) = lim_{n->inf} d^-n log+|f^n(z)|.
+    //   When the orbit escapes (certified radius, as render_julia) at
+    //   iteration n, the result is (log|z_n| + log|a_d|/(d-1)) / degree^n
+    //   -- the Boettcher offset makes it right for a non-unit leading
+    //   coefficient and is exactly 0 for a monic map; non-escaping pixels
+    //   are exactly 0. `cycles`/
     //   `potential`/`exact` are ignored entirely (PRAGMATIC and CONFORMAL-
     //   Boettcher already coincide exactly at a certified polynomial's own
     //   infinity -- see GreensPotential's own doc comment).

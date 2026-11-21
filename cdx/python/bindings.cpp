@@ -919,6 +919,12 @@ PYBIND11_MODULE(cdx, m) {
           "e.g. mcmullen -- see this function's own C++ doc comment for why).");
 
     py::class_<WadaStats>(m, "WadaStats")
+    m.def("polynomial_escape_radius", &polynomial_escape_radius, py::arg("coeffs"),
+          "Certified escape radius rho of the polynomial with these ASCENDING "
+          "coefficients: the positive root of |a_d| r^d - sum_{k<d} |a_k| r^k - r. "
+          "Any orbit with |z| > rho escapes to infinity. Every polynomial "
+          "escape-time path escapes at max(rho, settings.escape_radius).");
+
         .def(py::init<>())
         .def_readwrite("n_basins",            &WadaStats::n_basins)
         .def_readwrite("unresolved_fraction", &WadaStats::unresolved_fraction)

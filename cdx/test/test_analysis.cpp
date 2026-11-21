@@ -1025,8 +1025,10 @@ int main() {
              Viewport{{-0.5, 0.0}, 1.5, 61}},
             {"z^4+a (typed, critical points constant)", RationalMap::from_expression("z^4+a", "a", {}),
              Viewport{{0.0, 0.0}, 1.5, 41}},
+            // rho(z^2 + a z) = 1 + |a| <= 2 only for |a| <= 1, so this window
+            // stays inside |a| < 1 (outside it the radius, rightly, grows).
             {"z^2+a*z (one MOVING free critical point)", RationalMap::from_expression("z^2+a*z", "a", {}),
-             Viewport{{0.0, 0.0}, 1.0, 41}},
+             Viewport{{0.0, 0.0}, 0.7, 41}},
         };
         const RenderSettings st{100, 2.0, 1e-6, 1};
         for (const PinCase& pc : pins) {
@@ -1045,6 +1047,84 @@ int main() {
                          "single-orbit reference", pc.label);
             check(all_same, msg);
         }
+    }
+
+    // ---- Certified escape radius (B2) -----------------------------------------------
+    std::printf("\nCertified escape radius: rho = root of |a_d| r^d - sum |a_k| r^k - r:\n");
+    {
+        check(std::abs(polynomial_escape_radius({Cplx(-1.0, 0.0), 0.0, 1.0}) -
+                       (1.0 + std::sqrt(5.0)) / 2.0) < 1e-12,
+              "z^2 - 1: rho = (1 + sqrt 5)/2, the closed form (1 + sqrt(1 + 4|a|))/2");
+        check(std::abs(polynomial_escape_radius({Cplx(2.0, 0.0), 0.0, 1.0}) - 2.0) < 1e-12,
+              "z^2 + 2: rho = 2 exactly -- why the default radius 2 is certified for |a| <= 2");
+        // rho <= the simpler closed-form bound R = max(1, (1 + sum|a_k|)/|a_d|),
+        // and g(rho) = 0 (to rounding), on a non-monic example.
+        const std::vector<Cplx> c3{Cplx(5.0, 0.0), Cplx(0.0, 7.0), 0.0, Cplx(3.0, 0.0)};
+        const double rho = polynomial_escape_radius(c3);
+        const double Rcf = std::max(1.0, (1.0 + 5.0 + 7.0) / 3.0);
+        const double g = 3.0 * rho * rho * rho - 7.0 * rho - 5.0 - rho;
+        check(rho > 0.0 && rho <= Rcf && std::abs(g) < 1e-9 * Rcf * Rcf * Rcf,
+              "3z^3 + 7i z + 5: rho is the root of g, and <= (1 + sum|a_k|)/|a_d|");
+        // Escape is genuine above rho: sample |z| = 1.0001 rho on a circle,
+        // every point's modulus grows for 30 steps.
+        bool all_grow = true;
+        for (int k = 0; k < 64; ++k) {
+            Cplx z = std::polar(1.0001 * rho, 2.0 * M_PI * k / 64.0);
+            for (int it = 0; it < 30 && std::abs(z) < 1e100; ++it) {
+                const Cplx w = 3.0 * z * z * z + Cplx(0.0, 7.0) * z + 5.0;
+                if (!(std::abs(w) > std::abs(z))) all_grow = false;
+                z = w;
+            }
+        }
+        check(all_grow, "...and every sampled orbit starting just outside rho grows monotonically");
+
+        // 0.1 z^2 + a: w = 0.1 z conjugates it to w^2 + 0.1 a, so a = -10 has
+        // a bounded (period-2) critical orbit that visits |z| = 10 > 2. An
+        // escape radius of 2 called it "escaped"; the certified one doesn't.
+        const RationalMap small_lead = RationalMap::from_expression("0.1*z^2 + a", "a", {});
+        Renderer pr(Map::custom(small_lead), Viewport{{-10.0, 0.0}, 1e-9, 3},
+                    RenderSettings{200, 2.0, 1e-6, 1});
+        check(pr.render_parameter().at(1, 1) == 0.0,
+              "Parameter, 0.1 z^2 + a at a = -10 (period 2, |z| reaches 10): bounded, not escaped");
+        Renderer pe(Map::custom(small_lead), Viewport{{-25.0, 0.0}, 1e-9, 3},
+                    RenderSettings{200, 2.0, 1e-6, 1});
+        check(pe.render_parameter().at(1, 1) > 0.0,
+              "...while a = -25 (0.1a = -2.5, outside M) still escapes");
+        // Dynamical plane: 0.1 z^2 at a = 0, z0 = 5 -> 2.5 -> 0.625 -> 0.
+        Renderer jr(Map::custom(small_lead, Cplx(0.0, 0.0)), Viewport{{5.0, 0.0}, 1e-9, 3},
+                    RenderSettings{200, 2.0, 1e-6, 1});
+        check(jr.render_julia().at(1, 1) == 0.0,
+              "Julia, 0.1 z^2 at z0 = 5 (orbit 2.5, 0.625, ... -> 0): in the filled Julia set");
+
+        // Green's function with a non-unit leading coefficient. Reference:
+        // iterate until |z_N| ~ 1e60, where (log|z_N| + log|a_d|/(d-1)) / d^N
+        // is G to ~1e-40 relative. At the default radius the render escapes
+        // near |z| ~ 2, where the log|a_d|/(d-1) = log(3)/2 Boettcher offset
+        // is about a third of the whole value -- leaving it out is a gross
+        // error, keeping it leaves only the O(1/|z|^2) truncation.
+        const RationalMap nm = RationalMap::from_expression("3*z^3 + a*z + 5", "a", {});
+        const Cplx a0(0.4, -0.3), z0(0.9, 0.6);
+        double G_ref = 0.0;
+        {
+            Cplx z = z0;
+            int N = 0;
+            while (std::abs(z) < 1e60 && N < 200) { z = nm.eval(z, a0); ++N; }
+            G_ref = (std::log(std::abs(z)) + std::log(3.0) / 2.0) / std::pow(3.0, N);
+        }
+        Renderer g_def(Map::custom(nm, a0), Viewport{z0, 1e-12, 3}, RenderSettings{200, 2.0, 1e-6, 1});
+        const double G_def = g_def.render_greens().at(1, 1);
+        char msg[200];
+        std::snprintf(msg, sizeof msg, "Green's, 3z^3 + az + 5 at the default radius: G = %.6g vs "
+                     "reference %.6g (rel err %.2g, < 5%%)", G_def, G_ref,
+                     std::abs(G_def - G_ref) / G_ref);
+        check(G_ref > 0.0 && std::abs(G_def - G_ref) < 0.05 * G_ref, msg);
+        // ...and the defining identity G(f(z)) = d G(z), at a large radius.
+        const Cplx fz0 = nm.eval(z0, a0);
+        Renderer g1(Map::custom(nm, a0), Viewport{z0, 1e-12, 3}, RenderSettings{200, 1e6, 1e-6, 1});
+        Renderer g2(Map::custom(nm, a0), Viewport{fz0, 1e-12, 3}, RenderSettings{200, 1e6, 1e-6, 1});
+        const double G1 = g1.render_greens().at(1, 1), G2 = g2.render_greens().at(1, 1);
+        check(G1 > 0.0 && std::abs(G2 / G1 - 3.0) < 1e-6 && std::abs(G1 - G_ref) < 1e-9 * G_ref,
+              "...G(f(z)) = 3 G(z), and at R = 1e6 G matches the reference to 1e-9");
     }
 
     // ---- Parameter (Stage 1): a rational family is sphere-aware, multi-critical, escape_radius-free --

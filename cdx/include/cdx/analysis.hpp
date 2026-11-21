@@ -402,6 +402,45 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
 bool polynomial_escape_certified(const RationalMap& map);
 
 // -----------------------------------------------------------------------------
+// The CERTIFIED escape radius of a polynomial -- what "certified" in
+// polynomial_escape_certified actually requires of the radius, which
+// "any large enough R" above leaves open. Every escape-time path for a
+// certified polynomial (render_julia, render_parameter, render_greens,
+// render_parameter_greens) escapes at max(this, settings.escape_radius),
+// per pixel where the coefficients depend on the pixel's parameter.
+//
+// For f(z) = sum_k a_k z^k of degree d >= 2, let
+//     g(r) = |a_d| r^d - sum_{k<d} |a_k| r^k - r.
+// g has exactly one positive root rho (one sign change), g < 0 below it
+// and g > 0 above it. For |z| > rho:
+//     |f(z)| - |z| >= g(|z|) > 0,
+// and g(r)/r is increasing wherever g >= 0, so |f(z)|/|z| stays above
+// 1 + g(|z_0|)/|z_0| > 1 along the orbit: it escapes to infinity. rho is
+// therefore a valid escape radius; this returns it (rounded UP, never
+// below the true root).
+//
+// rho is at most the simpler closed form
+//     R(a) = max(1, (1 + sum_{k<d} |a_k|) / |a_d|)
+// (at r = R(a) >= 1, g(r) >= r^{d-1} (|a_d| r - sum |a_k| - 1) >= 0), and
+// is used instead of it because it is SHARP enough to leave z^d + a
+// unchanged at the default escape radius 2: R(a) = 1 + |a| exceeds 2 for
+// every |a| > 1 (2.9 at the Mandelbrot set's tip, a = -1.9), while
+// rho(z^2 + a) = (1 + sqrt(1 + 4|a|)) / 2 <= 2 exactly when |a| <= 2, and
+// for |a| > 2 the critical orbit's first iterate a already exceeds both 2
+// and rho, so its escape step and smooth value are identical either way.
+//
+// `coeffs` ascending (index k multiplies z^k), coeffs.back() != 0, size
+// >= 3. Returns 0 for a degenerate input (degree < 2 or a zero leading
+// coefficient) -- the caller's own floor then applies unchanged.
+double polynomial_escape_radius(const std::vector<Cplx>& coeffs);
+
+// The same root from |a_k| directly (abs_coeffs[0..d], abs_coeffs[d] > 0),
+// returning max(floor, rho) and skipping the root-find entirely when g(floor)
+// >= 0 already (the common case: rho <= floor). Allocation-free, for the
+// per-pixel hot paths.
+double polynomial_escape_radius_abs(const double* abs_coeffs, int d, double floor);
+
+// -----------------------------------------------------------------------------
 // 2. Wada-boundary diagnostic on a basin label image (Renderer::render_basin's
 // output: 0 = unresolved, k = basin k). Ports matlab-reference/WadaDiagnostic.m.
 //

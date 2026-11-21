@@ -633,6 +633,58 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 }
 }  // namespace
 
+namespace {
+// Per-parameter escape data for a CERTIFIED polynomial (B2): R2 is the
+// squared escape radius max(rho(p), settings.escape_radius)^2 -- rho is
+// polynomial_escape_radius, a proof that |z| > R escapes -- and `offset`
+// is log|a_d| / (d - 1), the Boettcher-coordinate correction that keeps the
+// smooth value and Green's function right for a non-unit leading
+// coefficient (G(z) ~ (log|z_n| + offset) / d^n). Monic maps get offset
+// exactly 0.0, and x + 0.0 == x, so their arithmetic is bit-for-bit
+// unchanged.
+struct PolyEscape {
+    double R2 = 4.0;
+    double offset = 0.0;
+};
+
+PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, Cplx p,
+                       double r_user) {
+    PolyEscape out;
+    const RationalMap* custom = map.custom_map();
+    std::optional<Family> fam = recognized;
+    if (!custom) fam = map.family();
+    if (fam) {   // z^d + p: |coeffs| = [|p|, 0, ..., 0, 1]
+        const int d = Map(*fam, Cplx(0.0, 0.0)).degree();
+        double c[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (d >= 2 && d < 8) {
+            c[0] = std::abs(p);
+            c[d] = 1.0;
+            const double R = polynomial_escape_radius_abs(c, d, r_user);
+            out.R2 = R * R;
+            return out;
+        }
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    std::vector<Cplx> coeffs;
+    if (!custom->polynomial_coefficients(p, coeffs) || coeffs.size() < 3) {
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    const int d = static_cast<int>(coeffs.size()) - 1;
+    double stack[16];
+    std::vector<double> heap;
+    double* c = stack;
+    if (d >= 16) { heap.resize(static_cast<std::size_t>(d) + 1); c = heap.data(); }
+    for (int k = 0; k <= d; ++k) c[k] = std::abs(coeffs[static_cast<std::size_t>(k)]);
+    const double R = polynomial_escape_radius_abs(c, d, r_user);
+    out.R2 = R * R;
+    const double lead = c[d];
+    out.offset = lead == 1.0 ? 0.0 : std::log(lead) / static_cast<double>(d - 1);
+    return out;
+}
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
@@ -645,7 +697,11 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 // just conventional).
 Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
-    const double R2 = settings_.escape_radius * settings_.escape_radius;
+    const RationalMap* jcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, jcustom ? recognize_family(*jcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double R2 = esc.R2;
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
@@ -667,7 +723,7 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
 
                 if (m2 > R2) {                       // per-pixel early exit
                     const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
+                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
                     out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
                     break;
                 }
@@ -763,7 +819,6 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
 Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
-    const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
@@ -799,6 +854,8 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
             double out = 0.0;
 
             const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            const double R2 = esc.R2;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
@@ -812,7 +869,7 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
 
                 if (m2 > R2) {
                     const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
+                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
                     out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
                     break;
                 }
@@ -838,9 +895,10 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
 // the derivative numerator, as render_parameter_rational does), or computed
 // once when they do not move at all (critical_points_constant()).
 //
-// Smooth value: n + 2 - log(log|z_n|) / log d at the first n with
-// |z_n| > R -- the degree-d form of the unicritical path's base-2 formula
-// (continuous across escape bands for every d, not only d = 2).
+// Smooth value: n + 2 - log(log|z_n| + log|a_d|/(d-1)) / log d at the
+// first n with |z_n| > R, R the certified radius (see PolyEscape) -- the
+// degree-d, leading-coefficient-aware form of the unicritical path's
+// base-2 formula (continuous across escape bands for every d).
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_polynomial_multicritical(
     ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
@@ -849,7 +907,6 @@ Image Renderer::render_parameter_polynomial_multicritical(
     Image img(res, res);
     const RationalMap* custom = map_.custom_map();
 
-    const double R2 = settings_.escape_radius * settings_.escape_radius;
     const double inv_log_d = 1.0 / std::log(static_cast<double>(custom->degree(Cplx(0.0, 0.0))));
 
     const bool cp_fixed = custom->critical_points_constant();
@@ -862,7 +919,9 @@ Image Renderer::render_parameter_polynomial_multicritical(
     // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
     // escape value (> 0 by construction: n + 2 - log_d(log|z|) with |z|
     // barely past R is about n + 2).
-    auto escape_value = [&](const CompiledMap& compiled, Cplx c0, bool& escaped) {
+    auto escape_value = [&](const CompiledMap& compiled, const PolyEscape& esc, Cplx c0,
+                            bool& escaped) {
+        const double R2 = esc.R2;
         double zr = c0.real(), zi = c0.imag();
         escaped = false;
         for (int n = 0; n < settings_.max_iter; ++n) {
@@ -871,7 +930,7 @@ Image Renderer::render_parameter_polynomial_multicritical(
             if (m2 > R2) {
                 escaped = true;
                 const double nu = static_cast<double>(n + 2) -
-                                  std::log(std::log(std::sqrt(m2))) * inv_log_d;
+                                  std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log_d;
                 return is_bad(nu) ? static_cast<double>(n + 1) : nu;
             }
             if (is_bad(m2) || m2 > kHuge) { escaped = true; return static_cast<double>(n + 1); }
@@ -902,7 +961,8 @@ Image Renderer::render_parameter_polynomial_multicritical(
                 case ParameterStrategy::Slowest: {
                     double worst = 0.0;
                     for (const Cplx& c0 : crit) {
-                        const double v = escape_value(compiled, c0, escaped);
+                        const double v = escape_value(compiled, esc, c0, escaped);
+            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius);
                         if (!escaped) { worst = 0.0; break; }   // a bounded orbit decides it
                         worst = std::max(worst, v);
                     }
@@ -912,7 +972,7 @@ Image Renderer::render_parameter_polynomial_multicritical(
                 case ParameterStrategy::Fastest: {
                     double best = 0.0;
                     for (const Cplx& c0 : crit) {
-                        const double v = escape_value(compiled, c0, escaped);
+                        const double v = escape_value(compiled, esc, c0, escaped);
                         if (escaped && (best == 0.0 || v < best)) best = v;
                     }
                     out = best;
@@ -920,7 +980,7 @@ Image Renderer::render_parameter_polynomial_multicritical(
                 }
                 case ParameterStrategy::PerCritical: {
                     const int idx = std::clamp(critical_index, 0, static_cast<int>(crit.size()) - 1);
-                    out = escape_value(compiled, crit[static_cast<std::size_t>(idx)], escaped);
+                    out = escape_value(compiled, esc, crit[static_cast<std::size_t>(idx)], escaped);
                     break;
                 }
             }
@@ -1262,7 +1322,6 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
     }
 
     parallel_columns([&](int col) {
-        std::vector<Cplx> prev_ordinary;
         for (int row = 0; row < res; ++row) {
             const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
 
@@ -1338,7 +1397,6 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
 // render_greens_polynomial.
 Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
     Image img(res, res);
 
     // See render_parameter for the three-path critical-point/step
@@ -1385,10 +1443,12 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
                 } else {
                     map_.step_with_param(p, zr, zi);
                 }
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            const double escR = std::sqrt(esc.R2);
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
+                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
                     if (is_bad(g)) g = 0.0;
                     break;
                 }
@@ -1538,7 +1598,11 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations
 // nothing a `potential` selector would even distinguish here.
 Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
+    const RationalMap* gcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, gcustom ? recognize_family(*gcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double escR = std::sqrt(esc.R2);
     const double ddeg = static_cast<double>(map_.degree());
     Image img(res, res);
 
@@ -1576,7 +1640,7 @@ Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const 
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
+                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
                     if (is_bad(g)) g = 0.0;
                     break;
                 }
