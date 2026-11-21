@@ -29,8 +29,8 @@ from typing import Callable
 
 import numpy as np
 import shiboken6
-from PySide6.QtCore import (QBuffer, QIODevice, QObject, QPoint, QPointF, QRect, QRectF,
-                            QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
+from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect,
+                            QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
 from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
@@ -62,6 +62,15 @@ from app.version import PRODUCT_NAME
 # handful of notches gives a noticeable zoom without a single notch jumping
 # too far to feel controllable.
 ZOOM_FACTOR_PER_NOTCH = 1.15
+
+# Wheel events whose angleDelta is 0 but pixelDelta is not (some high-
+# resolution trackpad drivers) are converted to notches at this many
+# logical pixels per notch. 120 matches the angleDelta convention (one
+# classic wheel notch = 120 units) on the common X11/Wayland drivers that
+# report a 15-degree notch as roughly that many pixels; it only needs to
+# be in the right ballpark, since these events arrive in long smooth
+# streams and the sum is what the user sees.
+PIXEL_DELTA_PER_NOTCH = 120.0
 
 # Restarted on every wheel/pan-move event; a render is only actually
 # started once this settles, so a fast scroll or drag does not queue a
@@ -1025,7 +1034,7 @@ _ARROW_DIRECTIONS: dict[Qt.Key, complex] = {
 
 class ImageView(QWidget):
     """The single image pane: displays the current render, and owns every
-    mouse/wheel interaction (scroll zoom, drag rubber-band zoom, pan) and,
+    mouse/wheel/pinch interaction (drag pan, Shift-drag box zoom, scroll/pinch zoom) and,
     in a PARAMETER-plane pane, arrow-key marker nudging (Stage 4 -- see
     keyPressEvent/keyReleaseEvent).
 
@@ -1186,11 +1195,22 @@ class ImageView(QWidget):
         self._layer_point_values: dict[str, list[complex]] = {}
         self._layer_trace_values: dict[str, list[list[complex]] | None] = {}
 
-        self._rubber_band_origin: QPoint | None = None
         self._rubber_band_rect: QRect | None = None
-
-        self._panning = False
         self._pan_anchor_complex: complex | None = None
+
+        # Mouse-gesture state machine (controls redesign, Step 1):
+        #   None        -- no button held
+        #   "pending"   -- left press, not yet moved past the drag threshold;
+        #                  the viewport is NOT touched; a release here is a click
+        #   "pan"       -- left drag past the threshold, or any middle drag
+        #   "box"       -- Shift+left press (Shift is read at PRESS time only)
+        #   "cancelled" -- Esc pressed mid-gesture; everything is ignored
+        #                  until the button that started it is released
+        self._gesture: str | None = None
+        self._gesture_button = Qt.MouseButton.NoButton
+        self._press_pos: QPointF | None = None
+        self._pre_drag_viewport: cdx.Viewport | None = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     # ---- display geometry ----------------------------------------------------
     def _display_rect(self) -> QRect:
@@ -1697,16 +1717,15 @@ class ImageView(QWidget):
             return None
         return pixel
 
-    # ---- scroll zoom, cursor-anchored -------------------------------------------
-    def wheelEvent(self, event) -> None:
-        delta = event.angleDelta().y()
-        if delta == 0:
+    # ---- zoom: one path for wheel, pinch and keyboard --------------------------
+    def _zoom_at(self, pixel: QPoint | QPointF, factor: float) -> None:
+        """Zooms by `factor` (> 1 zooms in) keeping the plane point under
+        `pixel` fixed on screen. The single zoom path: wheel, trackpad
+        scroll, Ctrl+wheel (Windows precision-touchpad pinch), the macOS
+        native pinch gesture and keyboard zoom all come through here."""
+        if not (factor > 0 and math.isfinite(factor)) or factor == 1.0:
             return
-        notches = delta / 120.0
-        factor = ZOOM_FACTOR_PER_NOTCH ** notches
-
-        cursor_pos = event.position().toPoint()
-        w = self._pixel_to_complex(cursor_pos)
+        w = self._pixel_to_complex(pixel)
         vp = self.pane.viewport
         new_center = w - (w - vp.center) / factor
         new_scale = vp.scale / factor
@@ -1717,73 +1736,186 @@ class ImageView(QWidget):
         self.update()
 
         self.viewport_changed.emit()
+
+    # ---- scroll zoom, cursor-anchored -------------------------------------------
+    def wheelEvent(self, event) -> None:
+        # Modifiers are deliberately NOT inspected: a Windows precision-
+        # touchpad pinch arrives as wheel events with ControlModifier set,
+        # and must zoom exactly like a plain wheel/two-finger scroll.
+        # angleDelta is already fractional on smooth trackpads (notches need
+        # not be integers); pixelDelta is only a fallback for drivers that
+        # report nothing else -- see PIXEL_DELTA_PER_NOTCH.
+        delta = event.angleDelta().y()
+        if delta != 0:
+            notches = delta / 120.0
+        else:
+            pixel_delta = event.pixelDelta().y()
+            if pixel_delta == 0:
+                event.accept()
+                return
+            notches = pixel_delta / PIXEL_DELTA_PER_NOTCH
+        self._zoom_at(event.position(), ZOOM_FACTOR_PER_NOTCH ** notches)
         event.accept()
 
-    # ---- drag: rubber-band zoom, or pan -----------------------------------------
+    # ---- macOS trackpad pinch -------------------------------------------------
+    def event(self, event) -> bool:
+        if (event.type() == QEvent.Type.NativeGesture and
+                event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            # value() is the INCREMENTAL scale change since the previous
+            # gesture event (e.g. 0.02 = 2% bigger), not a cumulative scale.
+            self._zoom_at(event.position(), 1.0 + event.value())
+            event.accept()
+            return True
+        return super().event(event)
+
+    # ---- drag: pan (plain), box zoom (Shift), click = seed / set a --------------
+    @staticmethod
+    def drag_threshold() -> int:
+        """Screen-pixel distance a left press must travel before it stops
+        being a click -- the platform's own drag distance (CLAUDE.md:
+        click-vs-drag thresholds belong in screen pixels). Also the minimum
+        box-zoom side."""
+        return QApplication.startDragDistance()
+
+    def _update_cursor(self, modifiers=None) -> None:
+        if self._gesture == "pan":
+            shape = Qt.CursorShape.ClosedHandCursor
+        elif self._gesture == "box":
+            shape = Qt.CursorShape.CrossCursor
+        elif self._gesture is None and modifiers is not None and \
+                modifiers & Qt.KeyboardModifier.ShiftModifier:
+            shape = Qt.CursorShape.CrossCursor
+        else:
+            shape = Qt.CursorShape.OpenHandCursor
+        if self.cursor().shape() != shape:
+            self.setCursor(shape)
+
+    def _begin_pan(self) -> None:
+        self._gesture = "pan"
+        # Anchored at the PRESS position under the PRE-drag viewport: the
+        # first visible move then already includes the threshold distance,
+        # so the image never jumps when the threshold is crossed.
+        self._pan_anchor_complex = self._pixel_to_complex(self._press_pos)
+        self._update_cursor()
+
+    def _end_gesture(self) -> None:
+        self._gesture = None
+        self._gesture_button = Qt.MouseButton.NoButton
+        self._press_pos = None
+        self._pre_drag_viewport = None
+        self._pan_anchor_complex = None
+        self._rubber_band_rect = None
+
+    def gesture_active(self) -> bool:
+        return self._gesture is not None and self._gesture != "cancelled"
+
+    def cancel_gesture(self) -> bool:
+        """Esc mid-gesture: a pan restores the pre-drag viewport, a box
+        zoom discards its rectangle, a pending click is dropped. Returns
+        whether anything was cancelled. The gesture stays 'cancelled' (all
+        moves ignored) until its button is released."""
+        if not self.gesture_active():
+            return False
+        was_pan = self._gesture == "pan"
+        pre = self._pre_drag_viewport
+        self._rubber_band_rect = None
+        self._pan_anchor_complex = None
+        self._gesture = "cancelled"
+        if was_pan and pre is not None:
+            self.pane.viewport = cdx.Viewport(pre.center, pre.scale, pre.resolution)
+            self.viewport_changed.emit()
+        self._update_cursor()
+        self.update()
+        return True
+
     def mousePressEvent(self, event) -> None:
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self.pane_activated.emit()
-        pos = event.position().toPoint()
-        is_pan = (event.button() == Qt.MouseButton.MiddleButton or
-                 (event.button() == Qt.MouseButton.LeftButton and
-                  event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
-        if is_pan:
-            self._panning = True
-            self._pan_anchor_complex = self._pixel_to_complex(pos)
-        elif event.button() == Qt.MouseButton.LeftButton:
-            self._rubber_band_origin = pos
-            self._rubber_band_rect = QRect(pos, QSize())
+        if self._gesture is not None:
+            return   # a second button mid-gesture is ignored
+        button = event.button()
+        if button not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            return
+        self._gesture_button = button
+        self._press_pos = QPointF(event.position())
+        vp = self.pane.viewport
+        self._pre_drag_viewport = cdx.Viewport(vp.center, vp.scale, vp.resolution)
+        if button == Qt.MouseButton.MiddleButton:
+            self._begin_pan()
+        elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self._gesture = "box"
+            self._update_cursor()
+        else:
+            self._gesture = "pending"
         self.update()
 
     def mouseMoveEvent(self, event) -> None:
-        pos = event.position().toPoint()
-        if self._panning:
+        pos_f = QPointF(event.position())
+        pos = pos_f.toPoint()
+        if self._gesture == "pending":
+            if (pos_f - self._press_pos).manhattanLength() > self.drag_threshold():
+                self._begin_pan()
+        if self._gesture == "pan":
             vp = self.pane.viewport
-            current_point = self._pixel_to_complex(pos)
+            current_point = self._pixel_to_complex(pos_f)
             # Shift the center so the point that was under the cursor at
-            # drag start is again under the cursor now -- see the module
+            # press time is again under the cursor now -- see the module
             # test suite for the derivation this formula comes from.
             new_center = vp.center + (self._pan_anchor_complex - current_point)
             self.pane.viewport = cdx.Viewport(new_center, vp.scale, vp.resolution)
             self.update()
-
             self.viewport_changed.emit()
-        elif self._rubber_band_origin is not None:
-            self._rubber_band_rect = QRect(self._rubber_band_origin, pos).normalized()
+        elif self._gesture == "box":
+            self._rubber_band_rect = QRect(self._press_pos.toPoint(), pos).normalized()
             self.update()
+        elif self._gesture is None:
+            self._update_cursor(event.modifiers())
 
         # Live, on every move regardless of panning/dragging -- the cursor
         # coordinate (and, mid-pan, what's still on screen at that point)
         # stays meaningful throughout the gesture, not just once it ends.
         self.cursor_readout_changed.emit(self.cursor_readout_text(pos))
 
+    def enterEvent(self, event) -> None:
+        self._update_cursor(QApplication.queryKeyboardModifiers())
+        super().enterEvent(event)
+
     def leaveEvent(self, event) -> None:
+        if self._gesture is None:
+            self._update_cursor()
         self.cursor_readout_changed.emit("")
 
     def mouseReleaseEvent(self, event) -> None:
-        if self._panning:
-            self._panning = False
-            self._pan_anchor_complex = None
+        if self._gesture is None or event.button() != self._gesture_button:
+            return
+        gesture = self._gesture
+        press_pos = self._press_pos
+        rect = self._rubber_band_rect
+        self._end_gesture()
+        self._update_cursor(event.modifiers())
+        self.update()
+        if gesture == "pan":
             self.viewport_changed.emit()
-        elif self._rubber_band_origin is not None:
-            rect = self._rubber_band_rect
-            origin = self._rubber_band_origin
-            self._rubber_band_origin = None
-            self._rubber_band_rect = None
-            self.update()
-            if rect is not None and rect.width() > 4 and rect.height() > 4:
+        elif gesture == "box":
+            # QRect(p1, p2) is inclusive (width = |dx| + 1); compare the
+            # DRAGGED distance itself against the threshold.
+            threshold = self.drag_threshold()
+            if rect is not None and rect.width() - 1 > threshold and rect.height() - 1 > threshold:
                 self._apply_rubber_band_zoom(rect)
+            # else: too small to be a meaningful box -- discarded, NOT a click
+        elif gesture == "pending":
+            # A genuine CLICK, not a drag -- P6's "symmetry of input":
+            # a click on the DYNAMICAL plane seeds an orbit at z0
+            # (P5c's original "click to seed an orbit"); a click on
+            # the PARAMETER plane sets `a` instead, the gesture that
+            # previously did nothing at all there (_seed_orbit_at's
+            # own early return for PARAMETER_PLANE_MODES).
+            origin = press_pos.toPoint()
+            if self.pane.render_mode in PARAMETER_PLANE_MODES:
+                self._set_param_at(origin)
             else:
-                # A genuine CLICK, not a drag -- P6's "symmetry of input":
-                # a click on the DYNAMICAL plane seeds an orbit at z0
-                # (P5c's original "click to seed an orbit"); a click on
-                # the PARAMETER plane sets `a` instead, the gesture that
-                # previously did nothing at all there (_seed_orbit_at's
-                # own early return for PARAMETER_PLANE_MODES).
-                if self.pane.render_mode in PARAMETER_PLANE_MODES:
-                    self._set_param_at(origin)
-                else:
-                    self._seed_orbit_at(origin)
+                self._seed_orbit_at(origin)
+        # "cancelled": nothing
 
     # ---- keyboard: arrow-key parameter-marker nudging (Stage 4) -----------------
     # PARAMETER-plane panes only -- the marker is a parameter-plane concept
@@ -1791,6 +1923,11 @@ class ImageView(QWidget):
     # UNBOUND here (fall through to Qt's default handling, e.g. focus
     # navigation) -- future scope, not this feature's job.
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.cancel_gesture():
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Shift:
+            self._update_cursor(event.modifiers() | Qt.KeyboardModifier.ShiftModifier)
         direction = _ARROW_DIRECTIONS.get(event.key())
         if direction is None or self.pane.render_mode not in PARAMETER_PLANE_MODES:
             super().keyPressEvent(event)
@@ -1803,6 +1940,8 @@ class ImageView(QWidget):
         self._nudge_timer.start(self._nudge_interval_ms())
 
     def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Shift:
+            self._update_cursor(event.modifiers() & ~Qt.KeyboardModifier.ShiftModifier)
         direction = _ARROW_DIRECTIONS.get(event.key())
         # Only act if this direction is actually tracked as held -- keeps
         # this symmetric with an unconsumed press (e.g. the render_mode

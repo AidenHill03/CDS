@@ -29,7 +29,8 @@ from pathlib import Path
 import numpy as np
 import shiboken6
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QAction, QImage, QKeyEvent, QPainter
+from PySide6.QtGui import (QAction, QImage, QKeyEvent, QNativeGestureEvent, QPainter,
+                           QPointingDevice, QWheelEvent)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 
@@ -710,14 +711,158 @@ def main() -> None:
     check(gesture_view.orbit_tracker.state is not None,
           "a press+release with no movement in between seeds an orbit -- a genuine click")
 
-    gesture_view.clear_orbit()
+    # ---- controls redesign, Step 1: drag pans, Shift-drag box-zooms ------------------
+    print("\nmouse scheme (drag = pan, Shift-drag = box zoom, Esc cancels):")
+    SHIFT = Qt.KeyboardModifier.ShiftModifier
+    threshold = ImageView.drag_threshold()
+    px = 4.0 / 400   # plane units per screen pixel at scale 2.0 over 400 px
+
+    def _reset_gesture_view():
+        gesture_view.clear_orbit()
+        gesture_pane.viewport = cdx.Viewport(complex(0, 0), 2.0, 400)
+
+    _reset_gesture_view()
     gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(50, 50)))
     gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(300, 300)))
     gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300)))   # a real drag
     check(gesture_view.orbit_tracker.state is None,
-          "a real drag (rubber-band zoom) does NOT also seed an orbit at the release point")
-    check(close(gesture_view.pane.viewport.center, complex(0, 0), 0.7),
-          "sanity: the drag actually did rubber-band zoom (viewport changed)")
+          "a real drag (pan) does NOT also seed an orbit at the release point")
+    check(close(gesture_pane.viewport.center, complex(-250 * px, 250 * px), 1e-9),
+          "an unmodified left drag PANS: center moves by exactly -(drag delta) in plane units "
+          "(screen-down = -imag)")
+    check(gesture_pane.viewport.scale == 2.0, "...and a pan never changes the scale")
+
+    # Sub-threshold: a click, viewport untouched even mid-gesture.
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200)))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(200 + threshold, 200)))
+    check(gesture_pane.viewport.center == 0j,
+          f"a move of exactly the drag threshold ({threshold} px) does not move the viewport")
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200 + threshold, 200)))
+    check(gesture_view.orbit_tracker.state is not None,
+          "...and releasing there is a CLICK: it seeds an orbit")
+    check(gesture_pane.viewport.center == 0j and gesture_pane.viewport.scale == 2.0,
+          "...with the viewport unchanged after the click")
+
+    # Crossing the threshold: pan anchored at the PRESS point, so no jump.
+    _reset_gesture_view()
+    press_complex = gesture_view._pixel_to_complex(QPoint(100, 100))
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100)))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(100 + threshold + 1, 100)))
+    check(close(gesture_view._pixel_to_complex(QPoint(100 + threshold + 1, 100)), press_complex, 1e-9),
+          "on crossing the threshold, the point pressed on is exactly under the cursor (no jump)")
+    check(close(gesture_pane.viewport.center, complex(-(threshold + 1) * px, 0), 1e-9),
+          "...so the first visible move already includes the threshold distance")
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(100 + threshold + 1, 100)))
+    check(gesture_view.orbit_tracker.state is None, "...and the click action never fires")
+
+    # Esc mid-pan restores the pre-drag viewport; the release then does nothing.
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100)))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(250, 180)))
+    check(gesture_pane.viewport.center != 0j, "sanity: the pan moved the view before Esc")
+    gesture_view.keyPressEvent(_key_event(Qt.Key.Key_Escape))
+    check(gesture_pane.viewport.center == 0j and gesture_pane.viewport.scale == 2.0,
+          "Esc during a pan restores the pre-drag viewport")
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(300, 300)))
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300)))
+    check(gesture_pane.viewport.center == 0j and gesture_view.orbit_tracker.state is None,
+          "...and after Esc, further moves and the release neither pan nor click")
+
+    # Middle drag pans immediately (no threshold, no click).
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(200, 200), Qt.MouseButton.MiddleButton))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(203, 200), Qt.MouseButton.MiddleButton))
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(203, 200), Qt.MouseButton.MiddleButton))
+    check(close(gesture_pane.viewport.center, complex(-3 * px, 0), 1e-9)
+          and gesture_view.orbit_tracker.state is None,
+          "a middle drag pans (even below the left-click threshold) and never seeds an orbit")
+
+    # Shift+drag box-zooms.
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100), modifiers=SHIFT))
+    check(gesture_view.cursor().shape() == Qt.CursorShape.CrossCursor,
+          "Shift+press shows the crosshair cursor")
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(300, 300), modifiers=SHIFT))
+    check(gesture_pane.viewport.center == 0j, "a box zoom does not move the view mid-drag")
+    # Shift released mid-drag: still a box zoom (Shift is read at press time).
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300)))
+    check(abs(gesture_pane.viewport.scale - 1.0) < 0.02 and close(gesture_pane.viewport.center, 0j, 0.02),
+          "Shift+drag box-zooms to the dragged square (even with Shift released before the button)")
+    check(gesture_view.orbit_tracker.state is None, "...and does not seed an orbit")
+    check(gesture_view.cursor().shape() == Qt.CursorShape.OpenHandCursor,
+          "the open-hand cursor is restored on release")
+
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100), modifiers=SHIFT))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(300, 300), modifiers=SHIFT))
+    gesture_view.keyPressEvent(_key_event(Qt.Key.Key_Escape))
+    check(gesture_view._rubber_band_rect is None, "Esc during a box zoom discards the rectangle")
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(300, 300), modifiers=SHIFT))
+    check(gesture_pane.viewport.scale == 2.0 and gesture_pane.viewport.center == 0j,
+          "...and the release afterwards does not zoom")
+
+    _reset_gesture_view()
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100), modifiers=SHIFT))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(100 + threshold, 300), modifiers=SHIFT))
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(100 + threshold, 300), modifiers=SHIFT))
+    check(gesture_pane.viewport.scale == 2.0 and gesture_view.orbit_tracker.state is None,
+          "a box thinner than the drag threshold is discarded -- neither a zoom nor a click")
+    check(gesture_view.cursor().shape() == Qt.CursorShape.CrossCursor,
+          "with Shift still held after the release, hovering keeps the crosshair")
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(150, 150)))   # hover, Shift up
+
+    # Cursor feedback during a pan.
+    _reset_gesture_view()
+    check(gesture_view.cursor().shape() == Qt.CursorShape.OpenHandCursor,
+          "the idle cursor over a pane is the open hand")
+    gesture_view.mousePressEvent(_FakeMouseEvent(QPoint(100, 100)))
+    gesture_view.mouseMoveEvent(_FakeMouseEvent(QPoint(200, 100)))
+    check(gesture_view.cursor().shape() == Qt.CursorShape.ClosedHandCursor,
+          "the cursor is a closed hand while panning")
+    gesture_view.mouseReleaseEvent(_FakeMouseEvent(QPoint(200, 100)))
+    check(gesture_view.cursor().shape() == Qt.CursorShape.OpenHandCursor,
+          "...and back to the open hand on release")
+
+    # ---- wheel / Ctrl+wheel / pixelDelta / native pinch: one zoom path ---------------
+    print("\nzoom inputs share _zoom_at (cursor-anchored):")
+
+    def _wheel(pos, angle_y, pixel_y=0, modifiers=Qt.KeyboardModifier.NoModifier):
+        return QWheelEvent(QPointF(pos), QPointF(pos), QPoint(0, pixel_y), QPoint(0, angle_y),
+                           Qt.MouseButton.NoButton, modifiers, Qt.ScrollPhase.NoScrollPhase, False)
+
+    cursor_px = QPoint(300, 120)
+    _reset_gesture_view()
+    gesture_view.wheelEvent(_wheel(cursor_px, 120))
+    plain = gesture_pane.viewport
+    _reset_gesture_view()
+    gesture_view.wheelEvent(_wheel(cursor_px, 120, modifiers=Qt.KeyboardModifier.ControlModifier))
+    ctrl = gesture_pane.viewport
+    check(close(plain.center, ctrl.center, 1e-12) and abs(plain.scale - ctrl.scale) < 1e-12
+          and abs(plain.scale - 2.0 / 1.15) < 1e-12,
+          "Ctrl+wheel (Windows precision-touchpad pinch) zooms exactly like a plain wheel notch")
+
+    _reset_gesture_view()
+    gesture_view.wheelEvent(_wheel(cursor_px, 30))
+    check(abs(gesture_pane.viewport.scale - 2.0 / 1.15 ** 0.25) < 1e-12,
+          "a fractional (smooth-trackpad) angleDelta zooms by a fractional notch")
+
+    _reset_gesture_view()
+    gesture_view.wheelEvent(_wheel(cursor_px, 0, pixel_y=int(sandbox_module.PIXEL_DELTA_PER_NOTCH)))
+    check(abs(gesture_pane.viewport.scale - 2.0 / 1.15) < 1e-12,
+          "with angleDelta 0, pixelDelta is converted at PIXEL_DELTA_PER_NOTCH px per notch")
+
+    _reset_gesture_view()
+    under_before = gesture_view._pixel_to_complex(cursor_px)
+    pinch = QNativeGestureEvent(Qt.NativeGestureType.ZoomNativeGesture,
+                                QPointingDevice.primaryPointingDevice(), 2, QPointF(cursor_px),
+                                QPointF(cursor_px), QPointF(cursor_px), 0.25, QPointF(0, 0))
+    check(gesture_view.event(pinch) is True, "a native zoom gesture is consumed by the pane")
+    check(abs(gesture_pane.viewport.scale - 2.0 / 1.25) < 1e-12,
+          "native pinch value 0.25 zooms in by factor 1.25 (factor = 1 + value)")
+    check(close(gesture_view._pixel_to_complex(cursor_px), under_before, 1e-9),
+          "...anchored at the gesture position (the point under the fingers stays put)")
+    _reset_gesture_view()
 
     # ---- orbit trace: drawable_polyline_segments (pure geometry, no painter needed) --
     print("\ndrawable_polyline_segments (segment-break fix, pure geometry):")
