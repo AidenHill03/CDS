@@ -23,7 +23,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QApplication
 
 import cdx
-from app.equation_panel import EquationPanel, _INVALID_STYLE
+from app.equation_panel import EquationPanel
 from app.session import Session
 
 failures = 0
@@ -62,20 +62,20 @@ def main() -> None:
     print("\nlive validation (invalid syntax):")
     before = session.map
     panel._formula_edit.setText("z^2 + sin(a)")   # transcendental -- rejected by the parser
-    check(panel._formula_edit.styleSheet() == _INVALID_STYLE,
+    check(panel._formula_edit.property("invalid") is True,
           "a transcendental function marks the formula field invalid")
     check(panel._error_label.text() != "", "the parser's own error message is shown")
     check(session.map is before, "invalid live input never touches session.map")
 
     panel._formula_edit.setText("z^2 +")   # syntactically incomplete
-    check(panel._formula_edit.styleSheet() == _INVALID_STYLE,
+    check(panel._formula_edit.property("invalid") is True,
           "incomplete syntax also marks the field invalid")
     check(session.map is before, "still untouched")
 
     # ---- live validation: valid syntax clears the error and updates the param UI -------
     print("\nlive validation (valid syntax, new parameter list):")
     panel._formula_edit.setText("z^2 + b/z")
-    check(panel._formula_edit.styleSheet() == "", "valid syntax clears the invalid styling")
+    check(not panel._formula_edit.property("invalid"), "valid syntax clears the invalid styling")
     check(panel._error_label.text() == "", "valid syntax clears the error label")
     check(panel._current_params == ["b"], "the parsed parameter list updates live")
     check(panel._active_combo.count() == 1 and panel._active_combo.currentText() == "b",

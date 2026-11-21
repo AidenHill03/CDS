@@ -1952,7 +1952,7 @@ def main() -> None:
     window.param_field._on_editing_finished()
     check(window.session.param == complex(2, -3),
           "invalid field input leaves session.param at its last valid value, never zeroed")
-    check(window.param_field._line_edit.styleSheet() != "",
+    check(window.param_field._line_edit.property("invalid") is True,
           "invalid input marks the field itself, rather than crashing or silently doing nothing")
     window.param_field._line_edit.setText("2-3i")   # restore a valid value for the next section
     window.param_field._on_editing_finished()

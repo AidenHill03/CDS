@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget)
 
 import cdx
-from app import controls
+from app import controls, theme
 from app.about_dialog import AboutDialog
 from app.color import (color_basin, color_escape_time, color_parameter_basin,
                         color_parameter_period, color_scalar_field)
@@ -3801,6 +3801,7 @@ def main(extra_panels=()) -> None:
     the window and returning (widget, tab title) -- how the composition root
     (phoenix.py) attaches research-module panels; app/ itself imports none."""
     app = QApplication(sys.argv)
+    theme.apply(app)
     window = SandboxWindow()
     for factory in extra_panels:
         widget, title = factory(window)

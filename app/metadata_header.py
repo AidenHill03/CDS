@@ -106,7 +106,7 @@ class MetadataHeader(QWidget):
         layout.setContentsMargins(4, 2, 4, 2)
         self._label = QLabel(self)
         self._label.setWordWrap(True)
-        self._label.setStyleSheet("font-family: monospace; font-weight: bold;")
+        self._label.setProperty("mono", True)
         layout.addWidget(self._label)
 
         self.refresh()

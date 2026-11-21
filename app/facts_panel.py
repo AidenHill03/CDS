@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeade
                                QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 import cdx
+from app import theme
 
 CRITICAL_COLUMNS = ("Point", "Multiplicity")
 FIXED_COLUMNS = ("Point", "Multiplier", "|Multiplier|", "Classification")
@@ -272,12 +273,12 @@ class FactsPanel(QWidget):
         expected = 2 * facts.degree - 2
         actual = len(facts.critical_points)
         if actual == expected:
-            self._rh_label.setStyleSheet("")
+            theme.set_property(self._rh_label, "role", "muted")
             self._rh_label.setText(
                 f"Riemann-Hurwitz: {actual} critical points with multiplicity, "
                 f"matches 2d-2 = {expected} ✓")
         else:
-            self._rh_label.setStyleSheet("color: #cc4444; font-weight: bold;")
+            theme.set_property(self._rh_label, "role", "error")
             self._rh_label.setText(
                 f"Riemann-Hurwitz MISMATCH: {actual} critical points counted, expected "
                 f"2d-2 = {expected} -- critical_points() is incomplete for this map")

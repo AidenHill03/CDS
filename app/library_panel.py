@@ -270,7 +270,7 @@ class LibraryPanel(QWidget):
         detail = QVBoxLayout()
         self._formula_label = QLabel()
         self._formula_label.setWordWrap(True)
-        self._formula_label.setStyleSheet("font-family: monospace; font-weight: bold;")
+        self._formula_label.setProperty("mono", True)
         detail.addWidget(self._formula_label)
         detail.addWidget(QLabel("Notes:"))
         self._notes_edit = QPlainTextEdit()
@@ -281,7 +281,7 @@ class LibraryPanel(QWidget):
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: #cc4444;")
+        self._error_label.setProperty("role", "error")
         layout.addWidget(self._error_label)
 
         row = QHBoxLayout()

@@ -58,9 +58,8 @@ from PySide6.QtWidgets import (QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineE
                                QPushButton, QVBoxLayout, QWidget)
 
 import cdx
+from app import theme
 from app.complex_field import ComplexField
-
-_INVALID_STYLE = "QLineEdit { border: 1px solid #cc4444; background: #fff0f0; }"
 
 
 class EquationPanel(QWidget):
@@ -89,7 +88,7 @@ class EquationPanel(QWidget):
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: #cc4444;")
+        self._error_label.setProperty("role", "error")
         layout.addWidget(self._error_label)
 
         param_box = QGroupBox("Parameters")
@@ -172,7 +171,7 @@ class EquationPanel(QWidget):
         self._formula_edit.blockSignals(True)
         self._formula_edit.setText(self.session.map.to_formula())
         self._formula_edit.blockSignals(False)
-        self._formula_edit.setStyleSheet("")
+        theme.set_invalid(self._formula_edit, False)
 
         if self.session.map.is_pq_backed():
             # Seed from the map's OWN recorded selections, not a fresh
@@ -234,10 +233,10 @@ class EquationPanel(QWidget):
         try:
             params = cdx.parse_rational_parameters(text)
         except ValueError as e:
-            self._formula_edit.setStyleSheet(_INVALID_STYLE)
+            theme.set_invalid(self._formula_edit, True)
             self._error_label.setText(str(e))
             return
-        self._formula_edit.setStyleSheet("")
+        theme.set_invalid(self._formula_edit, False)
         self._error_label.setText("")
         if params == self._current_params:
             return   # no parameter-list change -- nothing in the UI needs to move

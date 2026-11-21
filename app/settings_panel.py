@@ -24,6 +24,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
+from app import theme
 from app.settings import FIELD_SPECS, Settings, slow_render_warning, validate_field
 
 # Which group box each field's row appears in, and in what order -- purely
@@ -46,7 +47,6 @@ _BYTES_PER_MB = 1024 * 1024
 # simpler and plenty responsive for a stat display nobody is timing.
 CACHE_READOUT_REFRESH_MS = 500
 
-_ERROR_STYLE = "border: 1px solid #cc4444;"
 
 
 def _widget_for(name: str) -> QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox:
@@ -193,7 +193,7 @@ class SettingsPanel(QWidget):
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
-        self._error_label.setStyleSheet("color: #cc4444;")
+        self._error_label.setProperty("role", "error")
         layout.addWidget(self._error_label)
 
         apply_row = QHBoxLayout()
@@ -260,11 +260,11 @@ class SettingsPanel(QWidget):
     def _highlight_invalid_fields(self, draft: dict) -> None:
         for name, widget in self._widgets.items():
             ok, _value, _error = validate_field(name, draft[name])
-            widget.setStyleSheet("" if ok else _ERROR_STYLE)
+            theme.set_invalid(widget, not ok)
 
     def _clear_invalid_highlights(self) -> None:
         for widget in self._widgets.values():
-            widget.setStyleSheet("")
+            theme.set_invalid(widget, False)
 
     # ---- cache readout / clear ---------------------------------------------------------
     def _refresh_cache_readout(self) -> None:
