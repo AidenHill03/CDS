@@ -246,6 +246,10 @@ QDockWidget::title {{
     font-family: "{FONT_HEADING}"; font-weight: 600;
 }}
 
+/* ---- planes ---- */
+QWidget[role="paneColumn"] {{ border: 1px solid transparent; border-radius: {RADIUS_FRAME}px; }}
+QWidget[role="paneColumn"][focused="true"] {{ border: 1px solid {c('teal')}; }}
+
 /* ---- text roles ---- */
 QLabel[role="muted"], QLabel[role="caption"] {{ color: {c('muted')}; }}
 QLabel[role="caption"] {{ font-size: {FONT_SIZE_SMALL}px; }}
@@ -318,6 +322,11 @@ QToolButton {{
 }}
 QToolButton:hover {{ background: {c('control_on')}; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
+
+QToolButton[role="icon"] {{ background: transparent; border: 1px solid transparent; }}
+QToolButton[role="icon"]:hover {{ background: {c('control_on')}; }}
+QToolButton[role="icon"]:focus {{ border: 1px solid {c('teal')}; }}
+QToolBar {{ background: {c('surface')}; border: none; padding: 0; spacing: 0; }}
 
 /* map chip (top bar) */
 QPushButton[role="mapChip"] {{

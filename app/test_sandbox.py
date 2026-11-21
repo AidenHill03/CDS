@@ -1200,7 +1200,7 @@ def main() -> None:
     window.image_view2.mouseReleaseEvent(_FakeMouseEvent(QPoint(50, 50)))
     check(window._focused_pane is window.pane2,
           "pressing on pane2's image moves focus to pane2, via ImageView.pane_activated")
-    check(window.pane_column2.styleSheet() != "" and window.pane_column.styleSheet() == "",
+    check(window.pane_column2.property("focused") is True and not window.pane_column.property("focused"),
           "the focus-highlight border moves to the newly-focused pane's column")
 
     window.coupled_view_action.setChecked(False)
@@ -1283,7 +1283,8 @@ def main() -> None:
     check(view_action_texts == ["Reset View", "Zoom In", "Zoom Out", "Coupled View",
                                 "Critical Points", "Trace Orbits",
                                 "Fixed Points", "Attracting Cycles", "Trace Cycle Paths",
-                                "Connect Orbit Points", "Legend", "Go to Tab"],
+                                "Connect Orbit Points", "Legend", "Sidebar", "Equations && Settings",
+                                "Reset Layout", "Go to Tab"],
           "the View menu has the toolbar's own view controls PLUS every registry layer's own "
           "action (and gated trace sub-action), in registry order, PLUS Legend last (blank "
           "entries are separators, filtered out above) -- Fixed Points/Attracting Cycles/"
@@ -1642,17 +1643,22 @@ def main() -> None:
 
     # ---- Settings dialog (Stage 5): menu-opened, not a tab -------------------------
     print("\nsettings dialog:")
-    check(window.tabs.count() == 5 and window.tabs.tabText(0) == "View"
-          and window.tabs.tabText(1) == "Equation" and window.tabs.tabText(2) == "Facts"
-          and window.tabs.tabText(3) == "Library" and window.tabs.tabText(4) == "Info",
-          "the window has View, Equation, Facts, Library and Info tabs, in that order -- Settings is "
-          "no longer one of them")
-    check(window.tabs.widget(1) is window.equation_panel,
+    check([window.sidebar.tab_text(i) for i in range(window.sidebar.count())]
+          == ["Info", "Library", "Facts"],
+          "the sidebar has Info, Library and Facts tabs, in that order")
+    check([window.settings_dock.tab_text(i) for i in range(window.settings_dock.count())]
+          == ["Equation", "Rendering", "Coloring", "Orbit"],
+          "the Equations & Settings dock has Equation, Rendering, Coloring and Orbit tabs")
+    check(window.settings_dock.widget(0) is window.equation_tab
+          and window.equation_panel.parent() is window.equation_tab,
           "the Equation tab holds the actual EquationPanel instance")
-    check(window.tabs.widget(2) is window.facts_panel,
+    check(window.sidebar.widget(2) is window.facts_panel,
           "the Facts tab holds the actual FactsPanel instance")
-    check(window.tabs.widget(3) is window.library_panel,
+    check(window.sidebar.widget(1) is window.library_panel,
           "the Library tab holds the actual LibraryPanel instance")
+    check(window.workspaces.widget(0) is window.explore_workspace
+          and window.centralWidget() is window.workspaces,
+          "the central widget is the workspace stack, Explore first")
 
     check(window.settings_action.isCheckable() is False,
           "'Settings...' is a plain triggerable action, opening a dialog, not a toggle")
@@ -1788,16 +1794,13 @@ def main() -> None:
     # ---- centre-view still switches to the View tab (regression: the View tab's ------
     # ---- widget became a container around image_view, not image_view itself, when ----
     # ---- the orbit-tracking strip was added below it) ---------------------------------
-    print("\ncentre-view switches to the View tab:")
-    check(window.tabs.widget(0) is window.view_container,
-          "the View tab's actual page is the container (image_view + orbit strip), not "
-          "image_view directly")
-    window.tabs.setCurrentIndex(2)   # Facts tab -- anywhere but View
+    print("\ncentre-view keeps the planes in view:")
+    window.sidebar.reveal(window.facts_panel)
     window._on_center_view(complex(0.1, 0.1))
-    check(window.tabs.currentWidget() is window.view_container,
-          "_on_center_view actually switches to the View tab's container -- setCurrentWidget("
-          "self.image_view) would silently no-op now that image_view isn't the tab's own "
-          "page, which is exactly the regression this guards against")
+    check(window.workspaces.currentWidget() is window.explore_workspace
+          and window.sidebar.current_widget() is window.facts_panel,
+          "_on_center_view shows the Explore workspace and leaves the sidebar on Facts "
+          "(the planes are always visible now, so nothing switches tabs)")
 
     # ---- metadata header: reflects mode/map changes live ------------------------------
     print("\nmetadata header:")
@@ -2527,12 +2530,11 @@ def main() -> None:
           "even though the PARAMETER pane (pane2) is the one currently focused")
     check(window.image_view2.orbit_tracker.state is None,
           "...and does NOT seed anything on the parameter-plane pane")
-    check(window.tabs.currentWidget() is window.view_container,
-          "seeding an orbit from the Facts tab switches to the View tab, the same as "
-          "centring on a pole already does")
+    check(window.workspaces.currentWidget() is window.explore_workspace
+          and window.sidebar.current_widget() is window.facts_panel,
+          "seeding an orbit from Facts shows Explore and does not switch the sidebar away")
 
     # Critical-point rows do the same thing.
-    window.tabs.setCurrentIndex(2)   # back to Facts
     window.image_view.clear_orbit()
     critical_points = window.facts_panel._row_points[id(window.facts_panel._critical_table)]
     finite_critical_row = next(i for i, p in enumerate(critical_points)
@@ -2545,7 +2547,6 @@ def main() -> None:
           "clicking a CRITICAL-point row seeds an orbit too, the same as a fixed point")
 
     # Pole rows keep the EXISTING centre-the-view behavior, unchanged.
-    window.tabs.setCurrentIndex(2)
     pane2_center_before = window.pane2.viewport.center
     poles = window.facts_panel._row_points[id(window.facts_panel._pole_table)]
     window.facts_panel._on_row_clicked(window.facts_panel._pole_table, 0)
@@ -2630,18 +2631,42 @@ def main() -> None:
         def shutdown(self) -> None:
             type(self).shut_down += 1
 
-    n_tabs = window.tabs.count()
+    n_tabs = window.sidebar.count()
     extra = _PanelWithShutdown("extra")
     index = window.add_panel(extra, "Extra")
-    check(window.tabs.count() == n_tabs + 1 and index == n_tabs - 1,
-          "add_panel adds exactly one tab, after the built-in ones and before Info")
-    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
-          "Info stays the last tab")
-    check(window.tabs.widget(index) is extra and window.tabs.tabText(index) == "Extra",
+    check(window.sidebar.count() == n_tabs + 1 and index == n_tabs,
+          "add_panel's default placement adds exactly one sidebar tab, after the built-in ones")
+    check(window.sidebar.widget(index) is extra and window.sidebar.tab_text(index) == "Extra",
           "the tab holds the given widget under the given title")
     plain = QLabel("no shutdown method")
     window.add_panel(plain, "Plain")
-    check(window.tabs.count() == n_tabs + 2, "a panel without shutdown() is accepted too")
+    check(window.sidebar.count() == n_tabs + 2, "a panel without shutdown() is accepted too")
+    check(window.top_bar.workspace_switch.isHidden(),
+          "with no workspace registered, the Explore | ... switch stays hidden")
+    n_dock = window.settings_dock.count()
+    docked = QLabel("docked")
+    window.add_panel(docked, "Docked", placement="dock")
+    check(window.settings_dock.count() == n_dock + 1
+          and window.settings_dock.widget(n_dock) is docked,
+          'placement="dock" adds an Equations & Settings tab')
+    ws = QLabel("workspace")
+    window.add_panel(ws, "Bench", placement="workspace")
+    switch = window.top_bar.workspace_switch
+    check(not switch.isHidden() and switch.items() == ["explore", "bench"]
+          and switch.labels() == ["Explore", "Bench"] and switch.current() == "explore",
+          'placement="workspace" adds a workspace and shows the Explore | Bench switch')
+    switch.button("bench").click()
+    check(window.workspaces.currentWidget() is ws and window.current_workspace() == "bench",
+          "clicking the switch shows that workspace")
+    window.show_workspace("explore")
+    check(window.workspaces.currentWidget() is window.explore_workspace
+          and switch.current() == "explore", "and back")
+    bad = False
+    try:
+        window.add_panel(QLabel("x"), "X", placement="floating")
+    except ValueError:
+        bad = True
+    check(bad, "an unknown placement is refused")
 
     # ---- controls redesign, Step 2: keyboard ------------------------------------------
     print("\nkeyboard: plot-scoped keys (ImageView.keyPressEvent):")
@@ -2772,13 +2797,28 @@ def main() -> None:
     window.zoom_out_action.trigger()
     check(abs(focused_view.pane.viewport.scale - 1.0) < 1e-12, "View > Zoom Out undoes it")
 
-    check(len(window.tab_actions) == min(window.tabs.count(), 9)
+    destinations = window.go_to_destinations()
+    check(len(window.tab_actions) == min(len(destinations), 9)
           and all(a.shortcut() == QKeySequence(f"Ctrl+{i + 1}") for i, a in enumerate(window.tab_actions))
-          and all(a.text() == window.tabs.tabText(i) for i, a in enumerate(window.tab_actions)),
-          "Ctrl/Cmd+1..N are bound to the tabs in tab order")
+          and all(a.text() == destinations[i][0] for i, a in enumerate(window.tab_actions))
+          and [d[0] for d in destinations]
+          == [window.sidebar.tab_text(i) for i in range(window.sidebar.count())]
+          + [window.settings_dock.tab_text(i) for i in range(window.settings_dock.count())]
+          + (["Switch Workspace"] if len(window._workspace_keys) > 1 else [])
+          and [d[0] for d in destinations[:3]] == ["Info", "Library", "Facts"],
+          "Ctrl/Cmd+1.. go to the sidebar tabs (Info, Library, Facts, then module tabs), then "
+          "the dock tabs, in order")
     window.tab_actions[1].trigger()
-    check(window.tabs.currentIndex() == 1, "triggering Ctrl+2's action selects the second tab")
-    window.tab_actions[0].trigger()
+    check(window.sidebar.current_widget() is window.library_panel,
+          "triggering Ctrl+2's action selects the Library sidebar tab")
+    window.settings_dock.hide()
+    window.settings_dock.set_collapsed(True)
+    orbit_action = next(a for a in window.tab_actions if a.text() == "Orbit")
+    orbit_action.trigger()
+    check(window.settings_dock.current_widget() is window.orbit_tab
+          and not window.settings_dock.isHidden() and not window.settings_dock.is_collapsed(),
+          "Orbit's Ctrl+N reopens and expands a closed, collapsed dock on the Orbit tab")
+    next(a for a in window.tab_actions if a.text() == "Equation").trigger()
 
     print("\nkeyboard: Undo/Redo routing:")
     equation_calls = []
@@ -3017,17 +3057,18 @@ def main() -> None:
     def agree_tabs():
         first, last = reg.entry("app.go_to_tab").binding.sequences
         return (window.tab_actions[0].shortcut() == QKeySequence(first) and
-                len(window.tab_actions) == min(window.tabs.count(), 9) and
+                len(window.tab_actions) == min(len(window.go_to_destinations()), 9) and
                 all(a.shortcut() == QKeySequence(f"{first[:-1]}{i + 1}")
                     for i, a in enumerate(window.tab_actions)) and
                 QKeySequence(last).toString().startswith(first[:-1]))
 
     def agree_info():
-        window.tabs.setCurrentIndex(0)
+        window.sidebar.set_current_widget(window.library_panel)
+        window.sidebar.set_collapsed(True)
         window.info_action.trigger()
-        ok = window.tabs.currentWidget() is window.info_panel and \
-            agree_action(window.info_action, "app.info")
-        window.tabs.setCurrentIndex(0)
+        ok = window.sidebar.current_widget() is window.info_panel and \
+            not window.sidebar.is_collapsed() and agree_action(window.info_action, "app.info")
+        window.sidebar.set_current_widget(window.library_panel)
         return ok
 
     AGREEMENT = {
@@ -3075,7 +3116,7 @@ def main() -> None:
 
     # ---- Info tab: generated, last, and extended by module panels --------------------
     print("\nInfo tab:")
-    check(window.tabs.tabText(window.tabs.count() - 1) == "Info", "the Info tab is the last tab")
+    check(window.sidebar.tab_text(0) == "Info", "Info is the sidebar's first tab")
     check(window.info_panel.isReadOnly(), "the Info tab is read-only")
     info_text = window.info_panel.toPlainText()
     check(all(c.action in info_text for c in reg.CONTROLS),
@@ -3089,11 +3130,9 @@ def main() -> None:
     check("Demo: zoom the demo view" in window.info_panel.toPlainText() and
           "Demo tab" in window.info_panel.toPlainText(),
           "a panel's own `controls` entries are added to the Info tab by add_panel")
-    check(len(window.tab_actions) == min(window.tabs.count(), 9) and
+    check(len(window.tab_actions) == min(len(window.go_to_destinations()), 9) and
           len(window.tab_actions) >= min(tabs_before + 1, 9),
           "add_panel renumbers the Go to Tab shortcuts")
-    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
-          "...and Info is still last")
 
     # Closes the window, which drains the thread pool (see
     # SandboxWindow.closeEvent) -- required here because the "superseded

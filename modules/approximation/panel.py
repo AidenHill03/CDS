@@ -183,6 +183,8 @@ class ApproximationPanel(QWidget):
     """The Approximation tab."""
 
     controls = APPROXIMATION_CONTROLS
+    # A full-width workspace next to Explore (see SandboxWindow.add_panel).
+    placement = "workspace"
 
     BASIN_RESOLUTION = 512
     # Coarse-first: every basin render shows a pass at 1/4 the resolution per

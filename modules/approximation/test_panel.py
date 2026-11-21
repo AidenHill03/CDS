@@ -120,8 +120,10 @@ def main():
     window = SandboxWindow()
     widget, title = make_panel(window)
     index = window.add_panel(widget, title)
-    check(window.tabs.tabText(index) == "Approximation" and window.tabs.widget(index) is widget,
-          "make_panel + add_panel put the tab in the window")
+    check(window.workspaces.widget(index) is widget and window._workspace_keys.get("approximation") is widget
+          and not window.top_bar.workspace_switch.isHidden()
+          and window.top_bar.workspace_switch.labels() == ["Explore", "Approximation"],
+          "make_panel + add_panel register Approximation as a workspace next to Explore")
     import phoenix
     check(len(phoenix._module_panels()) == 1, "phoenix.py finds the Approximation panel")
 
@@ -130,8 +132,6 @@ def main():
     info = window.info_panel.toPlainText()
     check(all(e.action in info for e in widget.controls) and "Approximation tab" in info,
           "add_panel puts the Approximation tab's controls into the Info tab")
-    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
-          "Info stays the last tab after the Approximation tab is added")
     canvas = widget.basin_canvas
     canvas._interactive = True
     canvas.set_image(QImage(64, 64, QImage.Format.Format_RGB32), (-1.0, 1.0, -1.0, 1.0))

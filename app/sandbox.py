@@ -30,13 +30,15 @@ from typing import Callable
 import numpy as np
 import shiboken6
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect,
-                            QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
+                            QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal,
+                            Slot)
 from PySide6.QtGui import (QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPolygonF)
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                               QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget)
+                               QSplitter, QStackedWidget, QTabWidget, QTextEdit, QToolBar,
+                               QVBoxLayout, QWidget)
 
 import cdx
 from app import controls, theme
@@ -60,6 +62,7 @@ from app.settings import (Settings, library_path, load_settings, preview_path_fo
                           previews_dir, save_settings)
 from app.settings_panel import SettingsPanel
 from app.version import PRODUCT_NAME
+from app.widgets import Segment, TabbedDock, TopBar
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
 # handful of notches gives a noticeable zoom without a single notch jumping
@@ -89,6 +92,26 @@ PAN_KEY_REPEAT_MS = 60
 # How long the status bar's per-pane controls hint stays after the cursor
 # enters a pane (it also clears when the cursor leaves).
 PANE_HINT_MS = 6000
+
+# ---- window layout (UI redesign) -------------------------------------------------------
+MIN_WINDOW_SIZE = QSize(1100, 720)
+DEFAULT_WINDOW_SIZE = QSize(1389, 868)    # a 13" MacBook's usable screen, in logical px
+SIDEBAR_MIN_WIDTH = 260
+SIDEBAR_DEFAULT_WIDTH = 300
+SETTINGS_DOCK_DEFAULT_HEIGHT = 220
+# Below this window width the sidebar collapses to its tab strip (and
+# re-expands above it, unless the user collapsed it by hand).
+SIDEBAR_AUTO_COLLAPSE_WIDTH = 1250
+# Bumped whenever the dock/toolbar arrangement changes shape, so an old
+# saved state is ignored instead of restoring a layout that no longer exists.
+LAYOUT_STATE_VERSION = 1
+
+
+def default_layout_settings() -> QSettings:
+    """Where window geometry and dock state persist: an INI file next to
+    settings.json (see app.settings.config_dir)."""
+    from app.settings import config_dir
+    return QSettings(str(config_dir() / "layout.ini"), QSettings.Format.IniFormat)
 
 # Restarted on every wheel/pan-move event; a render is only actually
 # started once this settles, so a fast scroll or drag does not queue a
@@ -2444,10 +2467,18 @@ class ExportImageDialog(QDialog):
 
 
 class SandboxWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, layout_settings: QSettings | None = None):
+        """`layout_settings`: where window geometry and dock state are restored
+        from and saved to on close (main() passes default_layout_settings();
+        None -- tests, tools -- means start from the default layout and save
+        nothing)."""
         super().__init__()
         self.setWindowTitle(PRODUCT_NAME)   # the product name, not an internal milestone tag
-        self.resize(800, 860)
+        self.setMinimumSize(MIN_WINDOW_SIZE)
+        self.resize(DEFAULT_WINDOW_SIZE)
+        self._layout_settings = layout_settings
+        self._sidebar_auto_collapsed = False
+        self._was_narrow = False
         self._status_base_message = ""
         self._status_cursor_text = ""
 
@@ -2556,9 +2587,15 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane] = timer
 
         self._build_ui()
+        self._apply_default_layout()
+        self._default_layout_state = self.saveState(LAYOUT_STATE_VERSION)
+        if layout_settings is not None:
+            self.restore_layout(layout_settings)
         for pane in self.panes:
             pane.image_view.refresh_layers()
         self._update_status_bar()
+        self._refresh_map_chip()
+        self._refresh_render_status()
         for pane in self.panes:
             self._start_render(pane)
 
@@ -2649,74 +2686,100 @@ class SandboxWindow(QMainWindow):
         self.view_splitter.addWidget(self.pane_column)
         self.view_splitter.addWidget(self.pane_column2)
 
-        # The View tab holds a small container -- the metadata header
-        # above the splitter, the orbit-tracking strip below it -- not the
-        # bare ImageView(s). The header sits directly above what it
-        # describes so a screenshot of just this tab is self-explanatory
-        # (P5c's own reason for building it at all); the orbit panel is
-        # meaningless without the image it overlays and needs to stay
-        # visible while the user clicks an image to seed a new orbit --
-        # see _sync_orbit_panel for which pane it currently overlays.
-        self.view_container = QWidget(self)
-        view_layout = QVBoxLayout(self.view_container)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        view_layout.addWidget(self.metadata_header)
-        view_layout.addWidget(self.view_splitter, 1)
-        view_layout.addWidget(self.orbit_panel)
+        # ---- Explore workspace: the two planes, side by side ----------------------
+        # The metadata header's job moved to the top bar's map chip (and, per
+        # pane, the readout chips): it is kept as an object for its text
+        # (format_metadata_text) but never shown.
+        self.metadata_header.hide()
+        self.explore_workspace = QWidget(self)
+        explore_layout = QVBoxLayout(self.explore_workspace)
+        explore_layout.setContentsMargins(theme.GUTTER, theme.GUTTER, theme.GUTTER, theme.GUTTER)
+        explore_layout.setSpacing(0)
+        self.view_splitter.setHandleWidth(theme.GUTTER)
+        self.view_splitter.setChildrenCollapsible(False)
+        explore_layout.addWidget(self.view_splitter, 1)
+        self.view_container = self.explore_workspace   # compatibility name
 
-        # A QTabWidget as the central widget, not the bare view container --
-        # this is what makes room for Terms/Facts/Library (and whatever tab
-        # comes after them) without redesigning the window. Settings is NOT
-        # one of these tabs (Stage 5) -- see _build_settings_dialog's own
-        # docstring for why it lives in a menu-opened dialog instead. The
-        # toolbar stays a QMainWindow-level toolbar, not per-tab: Reset View
-        # only means anything on the View tab, but QMainWindow toolbars are
-        # independent of which central-widget tab is showing either way.
-        self.tabs = QTabWidget(self)
-        self.tabs.addTab(self.view_container, "View")
-        self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
-        self.tabs.addTab(self.equation_panel, "Equation")
-        self.facts_panel = FactsPanel(self.session, self._on_center_view,
-                                      self._on_seed_orbit_from_facts, self)
-        self.tabs.addTab(self.facts_panel, "Facts")
+        # Central widget: one page per workspace. Explore is always first;
+        # add_panel(placement="workspace") adds more and shows the switch.
+        self.workspaces = QStackedWidget(self)
+        self.workspaces.addWidget(self.explore_workspace)
+        self._workspace_keys: dict[str, QWidget] = {"explore": self.explore_workspace}
+        self._workspace_titles: dict[str, str] = {"explore": "Explore"}
+        self.setCentralWidget(self.workspaces)
+        self._extra_panels: list[QWidget] = []   # see add_panel
+
+        # ---- the two complex fields that left the toolbar ---------------------------
+        # `a` sits on the Equation tab (it is the active parameter's value) and
+        # z0 on the Orbit tab; each stays in sync with clicks in the planes
+        # (see _apply_param_change and _on_orbit_changed).
+        self.param_field = ComplexField("a =", self.session.param, self)
+        self.param_field.committed.connect(self._on_param_field_committed)
+        self.z0_field = ComplexField("z₀ =", complex(0, 0), self)
+        self.z0_field.committed.connect(self._on_z0_field_committed)
+
+        # ---- sidebar (right dock): Info | Library | Facts ----------------------------
+        self.sidebar = TabbedDock("Sidebar", "SidebarDock", "right", self)
+        self.info_panel = InfoPanel(self)
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
                                           self._on_library_changed, self)
-        self.tabs.addTab(self.library_panel, "Library")
-        # Info is always the LAST tab: add_panel inserts module tabs before it.
-        self.info_panel = InfoPanel(self)
-        self.tabs.addTab(self.info_panel, "Info")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.setCentralWidget(self.tabs)
-        self._extra_panels: list[QWidget] = []   # see add_panel
+        self.facts_panel = FactsPanel(self.session, self._on_center_view,
+                                      self._on_seed_orbit_from_facts, self)
+        # Info scrolls itself (a QTextBrowser); the others get a scroll area.
+        self.sidebar.add_tab(self.info_panel, "Info", "Controls and this map", scroll=False)
+        self.sidebar.add_tab(self.library_panel, "Library", "Families: presets and yours")
+        self.sidebar.add_tab(self.facts_panel, "Facts", "Critical points, fixed points, cycles, poles")
+        self.sidebar.set_current_widget(self.library_panel)
+        self.sidebar.currentChanged.connect(self._on_sidebar_tab_changed)
+        # Expanding the sidebar by hand makes it the user's choice again.
+        self.sidebar.collapsedChanged.connect(
+            lambda collapsed: None if collapsed else setattr(self, "_sidebar_auto_collapsed", False))
+        self.sidebar.setMinimumWidth(SIDEBAR_MIN_WIDTH)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar)
+
+        # ---- bottom dock: Equations & Settings ----------------------------------------
+        self.settings_dock = TabbedDock("Equations & Settings", "SettingsDock", "bottom", self,
+                                        heading="Equations & Settings")
+        self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
+        self.equation_tab = QWidget(self)
+        eq_layout = QVBoxLayout(self.equation_tab)
+        eq_layout.setContentsMargins(18, 12, 18, 12)
+        eq_layout.addWidget(self.param_field)
+        eq_layout.addWidget(self.equation_panel, 1)
+        self.rendering_tab = self._placeholder_tab("Rendering settings are still in File ▸ Settings…")
+        self.coloring_tab = self._placeholder_tab("Coloring settings are still in File ▸ Settings…")
+        self.orbit_tab = QWidget(self)
+        orbit_layout = QVBoxLayout(self.orbit_tab)
+        orbit_layout.setContentsMargins(18, 12, 18, 12)
+        orbit_layout.addWidget(self.z0_field)
+        orbit_layout.addWidget(self.orbit_panel)
+        orbit_layout.addStretch(1)
+        self.settings_dock.add_tab(self.equation_tab, "Equation", "The map f(z) and its parameters")
+        self.settings_dock.add_tab(self.rendering_tab, "Rendering", "Resolution, iterations, threads, cache")
+        self.settings_dock.add_tab(self.coloring_tab, "Coloring", "Palette, scaling, Green's function")
+        self.settings_dock.add_tab(self.orbit_tab, "Orbit", "Seed, step and run an orbit")
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.settings_dock)
+        # Bottom dock spans the full width under the planes AND the sidebar.
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
 
         self._build_settings_dialog()
 
-        toolbar = QToolBar("Controls", self)
-        toolbar.setMovable(False)
-
-        # Two always-visible complex-number fields -- NOT buried in the
-        # Terms tab -- the typed half of P6's "symmetry of input": a and
-        # z0 are each settable by typing here OR by clicking a plane (see
-        # ImageView.mouseReleaseEvent/param_changed and _on_orbit_changed),
-        # and the two methods stay in sync through _apply_param_change and
-        # _on_z0_field_committed respectively, never diverging.
-        self.param_field = ComplexField("a =", self.session.param, self)
-        self.param_field.committed.connect(self._on_param_field_committed)
-        toolbar.addWidget(self.param_field)
-        # 0+0j is just a neutral starting DISPLAY -- it does NOT mean an
-        # orbit is seeded there; nothing is seeded until the user commits
-        # this field or clicks the dynamical plane (see _on_orbit_changed,
-        # which is what actually keeps this field truthful once a real
-        # orbit exists).
-        self.z0_field = ComplexField("z0 =", complex(0, 0), self)
-        self.z0_field.committed.connect(self._on_z0_field_committed)
-        toolbar.addWidget(self.z0_field)
-
-        reset_button = QPushButton("Reset View", self)
-        reset_button.clicked.connect(self._reset_view)
-        toolbar.addWidget(reset_button)
-
-        self.addToolBar(toolbar)
+        # ---- top bar (replaces the old toolbar) ---------------------------------------
+        self.top_bar = TopBar(self)
+        self.top_bar_toolbar = QToolBar("Top bar", self)
+        self.top_bar_toolbar.setObjectName("TopBarToolbar")
+        self.top_bar_toolbar.setMovable(False)
+        self.top_bar_toolbar.setFloatable(False)
+        self.top_bar_toolbar.toggleViewAction().setVisible(False)
+        self.top_bar_toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        self.top_bar_toolbar.addWidget(self.top_bar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_bar_toolbar)
+        self.top_bar.map_chip.clicked.connect(lambda: self.sidebar.reveal(self.library_panel))
+        self.top_bar.reset_button.clicked.connect(self._reset_view)
+        self.top_bar.export_button.clicked.connect(self._on_export_image)
+        self.top_bar.workspace_switch.selected.connect(self.show_workspace)
+        self._render_stage: dict[Pane, str | None] = {pane: None for pane in self.panes}
 
         # Coupled view / Critical Points / Trace Orbits / Connect Orbit
         # Points used to be toolbar checkboxes here too (Stage 1-3 kept them
@@ -2820,6 +2883,11 @@ class SandboxWindow(QMainWindow):
         self.coupled_view_action.setCheckable(True)
         self.coupled_view_action.setChecked(True)
         self.coupled_view_action.toggled.connect(lambda _checked: self._relayout_panes())
+        # The top bar's Coupled | Single control and this menu item are one
+        # setting: each drives the other.
+        self.coupled_view_action.toggled.connect(self.top_bar.view_switch.set_current)
+        self.top_bar.view_switch.selected.connect(
+            lambda coupled: self.coupled_view_action.setChecked(bool(coupled)))
         self.view_menu.addSeparator()
 
         # ---- overlay-layer actions: built FROM the registry (Stage 1), not
@@ -2854,6 +2922,18 @@ class SandboxWindow(QMainWindow):
 
         # Ctrl+1..Ctrl+9 jump to the tabs in order -- rebuilt whenever a tab
         # is added (add_panel), so module tabs get numbers too.
+        # Docks: toggleViewAction() reopens a closed dock; Reset Layout puts
+        # every dock back where a fresh install has it.
+        self.sidebar_action = self.sidebar.toggleViewAction()
+        self.sidebar_action.setText("Sidebar")
+        self.view_menu.addAction(self.sidebar_action)
+        self.settings_dock_action = self.settings_dock.toggleViewAction()
+        self.settings_dock_action.setText("Equations && Settings")
+        self.view_menu.addAction(self.settings_dock_action)
+        self.reset_layout_action = self.view_menu.addAction("Reset Layout")
+        self.reset_layout_action.triggered.connect(self.reset_layout)
+        self.view_menu.addSeparator()
+
         self.go_to_tab_menu = self.view_menu.addMenu("Go to Tab")
         self.tab_actions: list[QAction] = []
         self._rebuild_tab_actions()
@@ -2878,7 +2958,7 @@ class SandboxWindow(QMainWindow):
         # everywhere -- see the registry's app.info entry.
         self.info_action = self.help_menu.addAction("Controls && Shortcuts")
         self.info_action.setShortcuts(controls.key_sequences("app.info"))
-        self.info_action.triggered.connect(lambda: self.tabs.setCurrentWidget(self.info_panel))
+        self.info_action.triggered.connect(lambda: self.sidebar.reveal(self.info_panel))
 
         self.statusBar().showMessage("")
         # Transient controls hint for the pane under the cursor: its OWN
@@ -2971,6 +3051,8 @@ class SandboxWindow(QMainWindow):
         its ImageView -- what actually goes side by side in the splitter.
         """
         column = QWidget(self)
+        column.setProperty("role", "paneColumn")
+        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
@@ -2991,7 +3073,7 @@ class SandboxWindow(QMainWindow):
             return
         self._focused_pane = pane
         self.metadata_header.pane = pane
-        self.metadata_header.refresh()
+        self._refresh_header()
         self._update_status_bar()
         self._update_pane_focus_styling()
         if not self.coupled_view_action.isChecked():
@@ -3002,8 +3084,7 @@ class SandboxWindow(QMainWindow):
         # user can actually SEE which pane Reset View/typed-field actions
         # (still self.pane-directed until Stage 3) are about to act on.
         for pane, column in self._pane_columns.items():
-            column.setStyleSheet(
-                "border: 2px solid palette(highlight);" if pane is self._focused_pane else "")
+            theme.set_property(column, "focused", pane is self._focused_pane)
 
     def _relayout_panes(self) -> None:
         # Coupled: both panes visible, side by side. Single: only the
@@ -3013,6 +3094,7 @@ class SandboxWindow(QMainWindow):
         coupled = self.coupled_view_action.isChecked()
         for pane, column in self._pane_columns.items():
             column.setVisible(coupled or pane is self._focused_pane)
+        self._refresh_render_status()
 
     # ---- orbit strip: follows whichever pane is currently dynamical -------------
     def _current_dynamical_pane(self) -> Pane | None:
@@ -3145,7 +3227,7 @@ class SandboxWindow(QMainWindow):
         # same treatment, not a partial refresh.
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.metadata_header.refresh()
+        self._refresh_header()
         for pane in self.panes:
             pane.image_view.refresh_layers()
             if pane is self._focused_pane:
@@ -3259,7 +3341,7 @@ class SandboxWindow(QMainWindow):
             self.session.param = a
             self.param_field.set_value(a)
             self.facts_panel.refresh()
-            self.metadata_header.refresh()
+            self._refresh_header()
             if clicked_pane.render_mode in PARAMETER_PLANE_MODES:
                 # Triggers _on_mode_changed, which itself renders -- so
                 # this does NOT also call _start_render below; doing both
@@ -3321,7 +3403,7 @@ class SandboxWindow(QMainWindow):
         self.session.param = a
         self.param_field.set_value(a)
         self.facts_panel.refresh()
-        self.metadata_header.refresh()
+        self._refresh_header()
         for pane in self.panes:
             if pane.render_mode in PARAMETER_PLANE_MODES:
                 pane.image_view.update()   # move its marker; nothing else about it changed
@@ -3382,7 +3464,7 @@ class SandboxWindow(QMainWindow):
     def _on_mode_changed(self, pane: Pane, mode: str) -> None:
         pane.set_render_mode(mode)
         if pane is self._focused_pane:
-            self.metadata_header.refresh()   # domain/mode text depends on the mode itself
+            self._refresh_header()   # domain/mode text depends on the mode itself
             self._update_status_bar()
         self._sync_orbit_panel()   # this pane may have just become (or stopped being) dynamical
         self._debounce_timers[pane].stop()
@@ -3432,7 +3514,7 @@ class SandboxWindow(QMainWindow):
         # _apply_param_change's own cache-asymmetry docstring) -- so this
         # debounces BOTH panes, not just the focused one.
         self._update_status_bar()
-        self.metadata_header.refresh()   # name/formula depend directly on the edited map
+        self._refresh_header()   # name/formula depend directly on the edited map
         # Cheap: refresh() only recomputes when (map, param) actually
         # changed since its last call, so this stays fresh for whenever the
         # user next looks at the Facts tab without paying for a recompute
@@ -3447,40 +3529,112 @@ class SandboxWindow(QMainWindow):
             # docstring.
             pane.image_view.refresh_orbit_staleness()
 
-    # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
-    def _on_tab_changed(self, index: int) -> None:
-        if self.tabs.widget(index) is self.facts_panel:
+    # ---- facts: recompute lazily, and re-check on becoming visible -----------------
+    def _on_sidebar_tab_changed(self, index: int) -> None:
+        if self.sidebar.widget(index) is self.facts_panel:
             self.facts_panel.refresh()
 
-    # ---- extra panels (research modules) ----------------------------------------
-    def add_panel(self, widget: QWidget, title: str) -> int:
-        """Adds `widget` as a tab after the built-in ones (before Info, which
-        stays last) and returns its index.
+    def _placeholder_tab(self, text: str) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        label = QLabel(text, page)
+        label.setProperty("role", "empty")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        return page
 
-        This is how a research module's UI (modules/<name>/panel.py) appears in
-        the window WITHOUT app/ importing anything from modules/: the
-        composition root (phoenix.py) builds the panel and hands it over here.
-        A plain method, deliberately not a registry (see modules/README.md).
-        If the widget has a shutdown() method it is called from closeEvent, so a
-        panel with background work of its own can cancel and drain it.
+    # ---- workspaces -------------------------------------------------------------------
+    def show_workspace(self, key: str) -> None:
+        widget = self._workspace_keys.get(key)
+        if widget is None:
+            return
+        self.workspaces.setCurrentWidget(widget)
+        self.top_bar.workspace_switch.set_current(key)
+        self._on_workspace_changed(key)
+
+    def current_workspace(self) -> str:
+        current = self.workspaces.currentWidget()
+        return next(k for k, w in self._workspace_keys.items() if w is current)
+
+    def _on_workspace_changed(self, key: str) -> None:
+        """Explore-only controls hide while another workspace shows (the
+        Equation tab stays: a module may use the map)."""
+        explore = key == "explore"
+        self.top_bar.view_switch.setVisible(explore)
+        for widget in (self.rendering_tab, self.coloring_tab, self.orbit_tab):
+            self.settings_dock.set_tab_visible(self.settings_dock.index_of(widget), explore)
+        if not explore and self.settings_dock.current_widget() is not self.equation_tab \
+                and self.settings_dock.index_of(self.settings_dock.current_widget()) in (
+                    self.settings_dock.index_of(w) for w in (self.rendering_tab, self.coloring_tab,
+                                                            self.orbit_tab)):
+            self.settings_dock.set_current_widget(self.equation_tab)
+
+    # ---- extra panels (research modules) ----------------------------------------
+    def add_panel(self, widget: QWidget, title: str, placement: str | None = None) -> int:
+        """Adds a research module's panel and returns its index within the
+        place it went:
+
+          "workspace"  a page of the central stack, next to Explore; the
+                       top bar's Explore | ... switch appears
+          "sidebar"    a sidebar tab, after the built-in ones (the default)
+          "dock"       a tab of the Equations & Settings dock
+
+        `placement` defaults to the widget's own `placement` attribute, then
+        "sidebar". This is how a module's UI (modules/<name>/panel.py)
+        appears WITHOUT app/ importing anything from modules/: the
+        composition root (phoenix.py) builds the panel and hands it over.
+        If the widget has a shutdown() method it is called from closeEvent,
+        so a panel with background work of its own can cancel and drain it.
         """
+        placement = placement or getattr(widget, "placement", None) or "sidebar"
+        if placement not in ("workspace", "sidebar", "dock"):
+            raise ValueError(f"unknown placement {placement!r}")
         self._extra_panels.append(widget)
-        index = self.tabs.insertTab(self.tabs.indexOf(self.info_panel), widget, title)
+        if placement == "workspace":
+            key = title.lower()
+            self._workspace_keys[key] = widget
+            self._workspace_titles[key] = title
+            index = self.workspaces.addWidget(widget)
+            switch = self.top_bar.workspace_switch
+            switch.set_segments([[Segment(k, self._workspace_titles[k])
+                                  for k in self._workspace_keys]])
+            switch.set_current(self.current_workspace())
+            switch.show()
+        elif placement == "sidebar":
+            index = self.sidebar.add_tab(widget, title)
+        else:
+            index = self.settings_dock.add_tab(widget, title)
         # A panel documents its own controls by carrying a `controls`
         # sequence of app.controls.ControlEntry (see modules/approximation).
         self.info_panel.add_entries(getattr(widget, "controls", ()))
         self._rebuild_tab_actions()
         return index
 
+    def go_to_destinations(self) -> list[tuple[str, Callable[[], None]]]:
+        """What Ctrl+1..9 jump to, in order: the sidebar's tabs, then the
+        dock's tabs, then (when a module registered one) the next workspace."""
+        out: list[tuple[str, Callable[[], None]]] = []
+        for dock in (self.sidebar, self.settings_dock):
+            for i in range(dock.count()):
+                widget = dock.widget(i)
+                out.append((dock.tab_text(i), lambda d=dock, w=widget: d.reveal(w)))
+        if len(self._workspace_keys) > 1:
+            out.append(("Switch Workspace", self.cycle_workspace))
+        return out
+
+    def cycle_workspace(self) -> None:
+        keys = list(self._workspace_keys)
+        self.show_workspace(keys[(keys.index(self.current_workspace()) + 1) % len(keys)])
+
     def _rebuild_tab_actions(self) -> None:
         self.go_to_tab_menu.clear()
         self.tab_actions = []
         first, last = controls.entry("app.go_to_tab").binding.sequences   # "Ctrl+1", "Ctrl+9"
         prefix, start, stop = first[:-1], int(first[-1]), int(last[-1])
-        for index in range(min(self.tabs.count(), stop - start + 1)):
-            action = self.go_to_tab_menu.addAction(self.tabs.tabText(index))
+        for index, (title, go) in enumerate(self.go_to_destinations()[:stop - start + 1]):
+            action = self.go_to_tab_menu.addAction(title)
             action.setShortcut(QKeySequence(f"{prefix}{start + index}"))
-            action.triggered.connect(lambda _checked=False, i=index: self.tabs.setCurrentIndex(i))
+            action.triggered.connect(lambda _checked=False, g=go: g())
             self.tab_actions.append(action)
 
     # ---- Edit > Undo/Redo ---------------------------------------------------------
@@ -3502,7 +3656,7 @@ class SandboxWindow(QMainWindow):
         pane = self._focused_pane
         vp = pane.viewport
         pane.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
-        self.tabs.setCurrentWidget(self.view_container)
+        self.show_workspace("explore")
         self._update_status_bar()
         self._debounce_timers[pane].stop()
         self._start_render(pane)
@@ -3524,7 +3678,7 @@ class SandboxWindow(QMainWindow):
         if dynamical_pane is None:
             return   # no pane is dynamical (both parameter-plane) -- orbit seeding is a no-op
         dynamical_pane.image_view.seed_orbit(point)
-        self.tabs.setCurrentWidget(self.view_container)
+        self.show_workspace("explore")
 
     # ---- library tab: loading a family replaces session.map wholesale -----------
     def _on_family_loaded(self) -> None:
@@ -3546,7 +3700,7 @@ class SandboxWindow(QMainWindow):
         # contrast with a plain param change).
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.metadata_header.refresh()   # name/formula/param all just changed wholesale
+        self._refresh_header()   # name/formula/param all just changed wholesale
         for pane in self.panes:
             center, scale = default_view_for_mode(self.session.map, self.session.param,
                                                   pane.render_mode)
@@ -3685,6 +3839,7 @@ class SandboxWindow(QMainWindow):
         task.signals.failed.connect(self._on_render_failed)
         pane.pending_tasks[request_id] = task
         self._thread_pool.start(_Runnable(task))
+        self._set_render_stage(pane, "preview")
 
     def _on_partial_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
         pane = self._pane_for_render_id(request_id)
@@ -3695,6 +3850,7 @@ class SandboxWindow(QMainWindow):
         if not shiboken6.isValid(pane.image_view):
             return   # this pane's widget is already torn down (e.g. window closing)
         pane.image_view.set_image(payload, buffer_viewport)
+        self._set_render_stage(pane, "full")
         self._update_status_bar()
 
     def _on_full_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
@@ -3714,6 +3870,7 @@ class SandboxWindow(QMainWindow):
         if not shiboken6.isValid(pane.image_view):
             return
         pane.image_view.set_image(payload, buffer_viewport)
+        self._set_render_stage(pane, None)
         self._update_status_bar()
 
     def _on_render_failed(self, request_id: int, message: str) -> None:
@@ -3727,7 +3884,135 @@ class SandboxWindow(QMainWindow):
             return
         if not shiboken6.isValid(self):
             return   # the window itself is already torn down
+        self._set_render_stage(pane, None)
         self.statusBar().showMessage(f"render failed: {message}")
+
+    # ---- top bar: map chip and render status ----------------------------------------
+    def _refresh_header(self) -> None:
+        self.metadata_header.refresh()
+        self._refresh_map_chip()
+
+    def map_display_name(self) -> str:
+        """The family name while the map is still exactly a library entry,
+        "custom" once its formula has been edited away from it."""
+        m = self.session.map
+        entry = self.session.library.find(m.name) if m.name else None
+        if entry is not None and entry.to_formula() == m.to_formula():
+            return m.name
+        return "custom"
+
+    def _refresh_map_chip(self) -> None:
+        if not hasattr(self, "top_bar"):
+            return
+        chip = self.top_bar.map_chip
+        chip.set_map(self.map_display_name(), self.session.map.to_formula())
+        chip.setToolTip(f"{self.session.map.name}: {self.session.map.to_formula()}\n"
+                        f"a: {describe_parameter_role(self.session.map)}\n"
+                        "Click to open the Library")
+
+    def _set_render_stage(self, pane: Pane, stage: str | None) -> None:
+        if not hasattr(self, "_render_stage"):
+            return
+        self._render_stage[pane] = stage
+        self._refresh_render_status()
+
+    def render_status(self) -> tuple[str, bool]:
+        """(text, busy) for the top bar: which plane(s) are rendering and at
+        which stage (preview -> full). There are no percentages to show: cdx's
+        render calls report no fractional progress."""
+        busy = [(p, st) for p, st in self._render_stage.items()
+                if st is not None and (self.coupled_view_action.isChecked() or p is self._focused_pane)]
+        if not busy:
+            return "Ready", False
+        names = {("parameter plane" if p.render_mode in PARAMETER_PLANE_MODES else "dynamical plane")
+                 for p, _ in busy}
+        what = names.pop() if len(names) == 1 else "both planes"
+        stage = "preview" if any(st == "preview" for _, st in busy) else "full"
+        return f"Rendering {what} · {stage}", True
+
+    def _refresh_render_status(self) -> None:
+        if hasattr(self, "top_bar"):
+            self.top_bar.set_render_status(*self.render_status())
+
+    # ---- window layout: docks, collapse, save/restore ---------------------------------
+    def _apply_default_layout(self) -> None:
+        self.sidebar.show()
+        self.settings_dock.show()
+        self.sidebar.set_collapsed(False)
+        self.settings_dock.set_collapsed(False)
+        self._apply_default_dock_sizes()
+        # Dock sizes only stick once the window has been laid out; a window
+        # not shown yet gets them again from its first showEvent.
+        self._default_sizes_pending = not self.isVisible()
+
+    def _apply_default_dock_sizes(self) -> None:
+        self.resizeDocks([self.sidebar], [SIDEBAR_DEFAULT_WIDTH], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.settings_dock], [SETTINGS_DOCK_DEFAULT_HEIGHT], Qt.Orientation.Vertical)
+        half = max(1, self.view_splitter.width() // 2)
+        self.view_splitter.setSizes([half, half])
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if getattr(self, "_default_sizes_pending", False):
+            self._default_sizes_pending = False
+            self._apply_default_dock_sizes()
+
+    def reset_layout(self) -> None:
+        """View > Reset Layout: docks back in place, open, expanded, default sizes."""
+        self.restoreState(self._default_layout_state, LAYOUT_STATE_VERSION)
+        self._sidebar_auto_collapsed = False
+        self._was_narrow = False
+        self._apply_default_layout()
+        self._auto_collapse_sidebar()
+
+    def save_layout(self, settings: QSettings) -> None:
+        settings.setValue("window/geometry", self.saveGeometry())
+        settings.setValue("window/state", self.saveState(LAYOUT_STATE_VERSION))
+        settings.setValue("sidebar/collapsed", self.sidebar.is_collapsed()
+                          and not self._sidebar_auto_collapsed)
+        settings.setValue("sidebar/tab", self.sidebar.tab_text(self.sidebar.current_index()))
+        settings.setValue("dock/collapsed", self.settings_dock.is_collapsed())
+        settings.setValue("dock/tab", self.settings_dock.tab_text(self.settings_dock.current_index()))
+        settings.setValue("splitter", self.view_splitter.saveState())
+        settings.sync()
+
+    def restore_layout(self, settings: QSettings) -> None:
+        geometry = settings.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = settings.value("window/state")
+        if state is not None and self.restoreState(state, LAYOUT_STATE_VERSION):
+            self._default_sizes_pending = False   # the saved sizes win
+        splitter = settings.value("splitter")
+        if splitter is not None:
+            self.view_splitter.restoreState(splitter)
+        for dock, key in ((self.sidebar, "sidebar"), (self.settings_dock, "dock")):
+            tab = settings.value(f"{key}/tab")
+            for i in range(dock.count()):
+                if dock.tab_text(i) == tab:
+                    dock.set_current_index(i)
+            dock.set_collapsed(str(settings.value(f"{key}/collapsed", "false")).lower() == "true")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._auto_collapse_sidebar()
+
+    def _auto_collapse_sidebar(self) -> None:
+        """Narrow window: the sidebar becomes its tab strip so both planes
+        keep their room; widening again restores it (only if it was this,
+        not the user, that collapsed it)."""
+        if not hasattr(self, "sidebar"):
+            return
+        narrow = self.width() < SIDEBAR_AUTO_COLLAPSE_WIDTH
+        if narrow == self._was_narrow:
+            return   # only crossing the threshold acts; a hand-made choice in between stands
+        self._was_narrow = narrow
+        if narrow and not self.sidebar.is_collapsed():
+            self.sidebar.set_collapsed(True)
+            self._sidebar_auto_collapsed = True
+        elif not narrow and self._sidebar_auto_collapsed:
+            self._sidebar_auto_collapsed = False
+            self.sidebar.set_collapsed(False)
 
     # ---- status bar: scale + precision-floor warning ----------------------------
     def _update_status_bar(self) -> None:
@@ -3793,6 +4078,8 @@ class SandboxWindow(QMainWindow):
             shutdown = getattr(panel, "shutdown", None)
             if callable(shutdown):
                 shutdown()
+        if self._layout_settings is not None:
+            self.save_layout(self._layout_settings)
         super().closeEvent(event)
 
 
@@ -3802,10 +4089,10 @@ def main(extra_panels=()) -> None:
     (phoenix.py) attaches research-module panels; app/ itself imports none."""
     app = QApplication(sys.argv)
     theme.apply(app)
-    window = SandboxWindow()
+    window = SandboxWindow(layout_settings=default_layout_settings())
     for factory in extra_panels:
         widget, title = factory(window)
-        window.add_panel(widget, title)
+        window.add_panel(widget, title)   # placement: the widget's own `placement`, else sidebar
     window.show()
     if os.environ.get("CDX_VERIFY_LAUNCH_SELFTEST"):
         # A packaged build "launching" only means something if a real
