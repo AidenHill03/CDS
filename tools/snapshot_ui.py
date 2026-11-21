@@ -4,7 +4,7 @@ Builds the full app (with any research-module panels that are built)
 offscreen at 1389x868 (a 13" MacBook's usable screen) and 1100x720 (the
 minimum window size), waits for the renders to finish, and saves
 QWidget.grab() images of: both workspaces, each sidebar tab, each dock tab,
-and the collapsed sidebar.
+Single view, and the collapsed sidebar.
 
     PYTHONPATH=cdx/build python tools/snapshot_ui.py [--out DIR]
 
@@ -106,6 +106,9 @@ def main() -> None:
             slug = window.settings_dock.tab_text(i).lower().replace(" ", "-")
             grab(f"{tag}-explore-dock-{slug}")
         window.settings_dock.set_current_widget(default_dock)
+        window.coupled_view_action.setChecked(False)
+        grab(f"{tag}-explore-single")
+        window.coupled_view_action.setChecked(True)
         for key in list(window._workspace_keys):
             if key != "explore":
                 window.show_workspace(key)

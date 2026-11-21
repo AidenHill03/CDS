@@ -2843,10 +2843,13 @@ def main() -> None:
     check(formula_edit.text() == original_formula + "+1" and equation_calls == [],
           "...and Redo redoes the text edit")
     formula_edit.setText(original_formula)
+    window._param_undo.clear()   # a plane with no history of a: Undo falls through
+    window._param_redo.clear()
     window._route_undo(redo=False, focus=window.image_view)
     window._route_undo(redo=True, focus=window.image_view)
     check(equation_calls == ["undo", "redo"],
-          "with a non-text widget focused, Undo/Redo go to the Equation panel's stack")
+          "with a non-text widget focused (and no change of a to undo), Undo/Redo go to the "
+          "Equation panel's stack")
     read_only = QPlainTextEdit()
     read_only.setReadOnly(True)
     check(sandbox_module.text_undo_target(read_only) is None,
@@ -3362,6 +3365,84 @@ def main() -> None:
     check(not window.orbit_connect_lines_action.isChecked(), "Connect orbit points: the checkbox drives the menu item")
     window.orbit_connect_lines_action.setChecked(True)
     check(window.connect_lines_checkbox.isChecked(), "...and the menu item drives the checkbox")
+
+    # ---- UI redesign, Step 7: undo history of a; layout persistence ----------------------
+    print("\nundo history of a (Cmd/Ctrl+Z in a plane):")
+    window.coupled_view_action.setChecked(True)
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+    window._param_undo.clear()
+    window._param_redo.clear()
+    a0 = window.session.param
+    target = window.image_view._complex_to_display_pixel(a0 + complex(0.05, 0.05)).toPoint()
+    window.image_view.mousePressEvent(_FakeMouseEvent(target))
+    window.image_view.mouseReleaseEvent(_FakeMouseEvent(target))
+    a1 = window.session.param
+    window.image_view._held_arrows = {1 + 0j}
+    for _ in range(4):
+        window.image_view._do_nudge()
+    window.image_view._held_arrows = set()
+    a2 = window.session.param
+    check(a0 != a1 != a2 and len(window._param_undo) == 2,
+          "a click and a burst of nudges are two undo steps (the held nudge coalesces)")
+    window._route_undo(redo=False, focus=window.image_view)
+    check(window.session.param == a1 and window.param_field.value == a1,
+          "Undo in a plane goes back to a before the nudges (field follows)")
+    window._route_undo(redo=False, focus=window.image_view)
+    check(window.session.param == a0, "...and again to a before the click")
+    window._route_undo(redo=True, focus=window.image_view)
+    check(window.session.param == a1, "Redo in a plane re-applies it")
+    eq_calls = []
+    real_eq_undo = window.equation_panel.undo
+    window.equation_panel.undo = lambda: eq_calls.append(1)
+    window._route_undo(redo=False, focus=window.equation_tab)
+    window.equation_panel.undo = real_eq_undo
+    check(eq_calls == [1] and window.session.param == a1,
+          "outside a plane, Undo is still the Equation's (a is untouched)")
+
+    print("\nlayout: docks and sidebar round-trip through QSettings:")
+    from PySide6.QtCore import QSettings
+    layout_dir = tempfile.mkdtemp()
+    layout_ini = os.path.join(layout_dir, "layout.ini")
+    store = QSettings(layout_ini, QSettings.Format.IniFormat)
+    window.reset_layout()
+    window.resize(1389, 868)
+    window.sidebar.reveal(window.facts_panel)
+    window.settings_dock.reveal(window.coloring_tab)
+    window.settings_dock.set_collapsed(True)
+    window.save_layout(store)
+    other = sandbox_module.SandboxWindow(layout_settings=QSettings(layout_ini, QSettings.Format.IniFormat))
+    check(other.sidebar.current_widget() is other.facts_panel
+          and other.settings_dock.current_widget() is other.coloring_tab
+          and other.settings_dock.is_collapsed() and not other.sidebar.is_collapsed(),
+          "sidebar tab, dock tab and the dock's collapsed state are restored")
+    window.settings_dock.set_collapsed(False)
+    window.sidebar.hide()
+    window.save_layout(store)
+    third = sandbox_module.SandboxWindow(layout_settings=QSettings(layout_ini, QSettings.Format.IniFormat))
+    third.show()
+    QApplication.processEvents()
+    check(third.sidebar.isHidden() and not third.settings_dock.is_collapsed(),
+          "a closed sidebar stays closed (saveState/restoreState)")
+    third.sidebar_action.trigger()
+    check(not third.sidebar.isHidden(), "View > Sidebar reopens it")
+    third.reset_layout()
+    check(not third.sidebar.isHidden() and not third.settings_dock.isHidden()
+          and not third.settings_dock.is_collapsed(), "View > Reset Layout restores both docks")
+    window.sidebar.show()
+    for w in (other, third):
+        w.close()
+    window.resize(1100, 720)
+    QApplication.processEvents()
+    check(window.sidebar.is_collapsed(), "below 1250 px wide the sidebar collapses to its tab strip")
+    window.sidebar.set_collapsed(False)
+    window.resize(1120, 720)
+    QApplication.processEvents()
+    check(not window.sidebar.is_collapsed(), "expanding it by hand while narrow sticks")
+    window.resize(1389, 868)
+    QApplication.processEvents()
+    check(window.minimumSize().width() == 1100 and window.minimumSize().height() == 720,
+          "the minimum window size is 1100 x 720")
 
     # ---- Info tab: generated, last, and extended by module panels --------------------
     print("\nInfo tab:")

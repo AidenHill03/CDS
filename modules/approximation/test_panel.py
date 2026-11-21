@@ -131,7 +131,7 @@ def main():
     # Controls registry: the tab documents its own controls in the Info tab,
     # and each documented gesture does what it says on the Basins canvas.
     info = window.info_panel.toPlainText()
-    check(all(e.action in info for e in widget.controls) and "Approximation tab" in info,
+    check(all(e.action in info for e in widget.controls) and "Approximation workspace" in info,
           "add_panel puts the Approximation tab's controls into the Info tab")
     from modules.approximation.panel import EMPTY_BASINS, EMPTY_CERTIFIED, EMPTY_TARGET
     check(widget.target_canvas._message == EMPTY_TARGET and widget.basin_canvas._message == EMPTY_BASINS

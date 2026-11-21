@@ -150,38 +150,52 @@ CONTROLS: tuple[ControlEntry, ...] = (
                  "Pan by 10% of the view per press (on the dynamical plane too)", PARAMETER,
                  PlotKey(_ARROWS, modifiers=("alt",)), hint="pan"),
     ControlEntry("note.coupled_off", PLOT,
-                 "With View ▸ Coupled View off, clicking the parameter plane also switches "
-                 "that pane to the dynamical plane (julia) for the new a.", PARAMETER),
+                 "In Single view, clicking the parameter plane also switches that pane to "
+                 "the dynamical plane (Escape) for the new a.", PARAMETER),
+    ControlEntry("note.undo_a", PLOT,
+                 "Undo / Redo with a plane focused step back and forth through the changes "
+                 "to a (clicks, typed values; a held arrow nudge is one step).", PARAMETER),
+    ControlEntry("note.offscreen_marker", PLOT,
+                 "When the marker is outside the view, an arrow on the edge points to it; "
+                 "click the arrow to re-center on it.", PARAMETER),
 
     # Orbits (dynamical plane)
     ControlEntry("plot.space_step", ORBITS, "Step the orbit once", DYNAMICAL,
                  PlotKey((Qt.Key.Key_Space,)), hint="step orbit"),
     ControlEntry("plot.shift_space_run", ORBITS,
-                 "Run N steps (N is the number next to Run N below the plot)", DYNAMICAL,
+                 "Run N steps (N is the number next to Run N on the Orbit tab)", DYNAMICAL,
                  PlotKey((Qt.Key.Key_Space,), modifiers=("shift",))),
     ControlEntry("note.orbit_strip", ORBITS,
-                 "The strip below the plot shows the orbit's n, z and fate, with Step, Run N "
-                 "and Clear buttons. Typing a value into z0 = in the toolbar seeds an orbit "
-                 "too.", DYNAMICAL),
+                 "The chips on the image show z₀, n and the orbit's fate; the Orbit tab "
+                 "(Equations & Settings) has Step, Run N and Clear, and typing a value into "
+                 "z₀ there seeds an orbit too.", DYNAMICAL),
 
     # Panels (one or two lines per tab)
     ControlEntry("note.view_tab", PANELS,
-                 "The plot panes, each with its own Mode menu; a = and z0 = in the toolbar; "
-                 "Reset View. Click a pane to make it the focused one.", "View tab"),
+                 "Each plane has its mode buttons in its header and overlay chips under it; "
+                 "Coupled | Single, Reset view and Export are in the top bar. Click a plane to "
+                 "make it the focused one.", "Planes"),
     ControlEntry("note.equation_tab", PANELS,
-                 "Type a formula and press Apply; pick the active parameter; Add Pole / Add "
-                 "Zero; Undo / Redo (also in the Edit menu).", "Equation tab"),
+                 "Type a formula and press Return; the 'on plane' radio picks the parameter "
+                 "the parameter plane sweeps; Add pole / Add zero; Undo / Redo (also in the "
+                 "Edit menu).", "Equation tab"),
+    ControlEntry("note.settings_tabs", PANELS,
+                 "Rendering and Coloring apply as you edit, after a short pause; an invalid "
+                 "value shows its error under the field and is not applied.",
+                 "Rendering & Coloring tabs"),
     ControlEntry("panel.facts_seed", PANELS,
                  "Critical- or fixed-point row: seed an orbit there", "Facts tab",
                  MouseBinding("click", target="row")),
     ControlEntry("panel.facts_center", PANELS,
                  "Attracting-cycle or pole row: center the view there", "Facts tab",
                  MouseBinding("click", target="row")),
-    ControlEntry("panel.library_load", PANELS, "Load that family (same as Load)", "Library tab",
+    ControlEntry("panel.library_load", PANELS, "Load that family (or select it and press Return)",
+                 "Library tab",
                  MouseBinding("double-click", target="entry")),
     ControlEntry("note.library_tab", PANELS,
-                 "Save Current As… / Rename… / Delete manage your own entries; presets are "
-                 "read-only. Notes are saved as you type.", "Library tab"),
+                 "Search by name or formula. Each entry's ⋯ menu has Load (and, for your own "
+                 "entries, Rename / Delete); Save current as… adds the current map. Presets "
+                 "are read-only; notes are saved as you type.", "Library tab"),
 
     # Keyboard shortcuts (application-wide QActions)
     ControlEntry("app.save", SHORTCUTS, "Save Experiment…", ANYWHERE,
@@ -190,15 +204,19 @@ CONTROLS: tuple[ControlEntry, ...] = (
                  KeyBinding(QKeySequence.StandardKey.Open)),
     ControlEntry("app.export_image", SHORTCUTS, "Export Image (PNG)…", ANYWHERE,
                  KeyBinding(sequences=("Ctrl+E",))),
-    ControlEntry("app.settings", SHORTCUTS, "Settings…", ANYWHERE,
+    ControlEntry("app.settings", SHORTCUTS, "Settings… (the Rendering tab)", ANYWHERE,
                  KeyBinding(QKeySequence.StandardKey.Preferences, fallback=("Ctrl+,",))),
     ControlEntry("app.undo", SHORTCUTS,
-                 "Undo an Equation edit (in a text field: undo typing)", ANYWHERE,
+                 "Undo an Equation edit; in a plane, the last change to a (in a text field: "
+                 "undo typing)", ANYWHERE,
                  KeyBinding(QKeySequence.StandardKey.Undo)),
     ControlEntry("app.redo", SHORTCUTS,
-                 "Redo an Equation edit (in a text field: redo typing)", ANYWHERE,
+                 "Redo an Equation edit; in a plane, a change to a (in a text field: redo "
+                 "typing)", ANYWHERE,
                  KeyBinding(QKeySequence.StandardKey.Redo)),
-    ControlEntry("app.go_to_tab", SHORTCUTS, "Go to tab 1 … 9, in tab order", ANYWHERE,
+    ControlEntry("app.go_to_tab", SHORTCUTS,
+                 "Go to a tab: Info, Library, Facts, then Equation, Rendering, Coloring, Orbit "
+                 "(then any module tabs, and the next workspace)", ANYWHERE,
                  KeyBinding(sequences=("Ctrl+1", "Ctrl+9"), is_range=True)),
     ControlEntry("app.info", SHORTCUTS, "Open this Info tab", ANYWHERE,
                  KeyBinding(QKeySequence.StandardKey.HelpContents, sequences=("F1",))),

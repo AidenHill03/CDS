@@ -25,6 +25,9 @@ REPO = Path(__file__).resolve().parent.parent
 # Hex color literals ("#abc", "#a1b2c3", "#aa112233") and CSS color functions.
 _HEX = re.compile(r"#[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{2})?)?\b")
 _CSS_FN = re.compile(r"(?<![\w.])rgba?\(")
+# Literal QColor(r, g, b) and named Qt colors (transparent is not a color choice).
+_QCOLOR_LITERAL = re.compile(r"QColor\(\s*\d")
+_NAMED_COLOR = re.compile(r"GlobalColor\.(?!transparent\b)\w+")
 
 
 def check(cond: bool, what: str) -> None:
@@ -126,11 +129,13 @@ def main() -> None:
     for path in ui_sources():
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#", 1)[0] if line.lstrip().startswith("#") else line
-            if _HEX.search(code) or _CSS_FN.search(code):
+            if _HEX.search(code) or _CSS_FN.search(code) or _QCOLOR_LITERAL.search(code) \
+                    or _NAMED_COLOR.search(code):
                 offenders.append(f"{path.relative_to(REPO)}:{lineno}: {line.strip()}")
     for o in offenders:
         print(f"      {o}")
-    check(not offenders, f"no hex/rgb() color literals in {len(ui_sources())} UI source files")
+    check(not offenders, f"no hex / rgb() / QColor(r, g, b) / named colors in "
+                         f"{len(ui_sources())} UI source files")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

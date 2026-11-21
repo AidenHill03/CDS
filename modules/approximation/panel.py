@@ -40,7 +40,7 @@ from . import construction, scoring
 from app import theme
 from app.controls import PANELS, ControlEntry, MouseBinding
 
-_TAB = "Approximation tab"
+_TAB = "Approximation workspace"
 
 # This tab's controls, for the Info tab (SandboxWindow.add_panel reads the
 # panel's `controls` attribute). app/ never imports this module.

@@ -26,6 +26,7 @@ import json
 import math
 import os
 import sys
+import time
 from typing import Callable
 
 import numpy as np
@@ -98,6 +99,10 @@ PAN_KEY_REPEAT_MS = 60
 # enters a pane (it also clears when the cursor leaves).
 PANE_HINT_MS = 6000
 STATUS_FLASH_MS = 4000
+# Undo history of the parameter a (plane clicks, nudges, typed values).
+PARAM_HISTORY_LIMIT = 200
+# A held/repeated arrow nudge is ONE undo step, not one per tick.
+NUDGE_HISTORY_COALESCE_S = 0.7
 
 # Preset thumbnails (render_thumbnail), shared by every window of the process.
 _PRESET_THUMBNAIL_CACHE: dict[tuple, "QIcon"] = {}
@@ -2815,6 +2820,9 @@ class SandboxWindow(QMainWindow):
         self.setMinimumSize(MIN_WINDOW_SIZE)
         self.resize(DEFAULT_WINDOW_SIZE)
         self._layout_settings = layout_settings
+        self._param_undo: list[complex] = []
+        self._param_redo: list[complex] = []
+        self._last_nudge_time: float | None = None
         self._sidebar_auto_collapsed = False
         self._was_narrow = False
         self._status_base_message = ""
@@ -3694,9 +3702,45 @@ class SandboxWindow(QMainWindow):
         # parameter-plane pane's own plane/viewport alone, exactly the
         # field-commit behavior Stage 1/2 already had, just no longer
         # limited to the single (then-only) pane.
+        self._record_param_history()
         self._apply_param_change(a)
 
+    # ---- undo history of a: Cmd/Ctrl+Z in a plane --------------------------------
+    def _record_param_history(self, coalesce: bool = False) -> None:
+        """Remembers the CURRENT a before a user change. `coalesce`: a nudge
+        within NUDGE_HISTORY_COALESCE_S of the last one joins its step."""
+        now = time.monotonic()
+        if coalesce and self._last_nudge_time is not None and \
+                now - self._last_nudge_time < NUDGE_HISTORY_COALESCE_S:
+            self._last_nudge_time = now
+            return
+        self._param_undo.append(self.session.param)
+        del self._param_undo[:-PARAM_HISTORY_LIMIT]
+        self._param_redo.clear()
+        self._last_nudge_time = now if coalesce else None
+
+    def undo_param(self) -> bool:
+        """Back to the previous a; False if there is none."""
+        if not self._param_undo:
+            return False
+        self._param_redo.append(self.session.param)
+        self._last_nudge_time = None
+        self._apply_param_change(self._param_undo.pop())
+        return True
+
+    def redo_param(self) -> bool:
+        if not self._param_redo:
+            return False
+        self._param_undo.append(self.session.param)
+        self._last_nudge_time = None
+        self._apply_param_change(self._param_redo.pop())
+        return True
+
     def _on_param_changed_by_click(self, a: complex) -> None:
+        self._record_param_history()
+        self._on_param_changed_by_click_inner(a)
+
+    def _on_param_changed_by_click_inner(self, a: complex) -> None:
         # mousePressEvent already emitted pane_activated before this can
         # ever fire (see _build_ui's own comment), so self._focused_pane
         # is the CLICKED pane.
@@ -3799,6 +3843,7 @@ class SandboxWindow(QMainWindow):
         any pane's plane/mode either, coupled or single-view: nudging the
         marker is not a request to stop looking at the parameter plane.
         """
+        self._record_param_history(coalesce=True)
         self._apply_param_change(a, reset_dynamical_viewport=False)
 
     # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
@@ -4033,6 +4078,8 @@ class SandboxWindow(QMainWindow):
         target = text_undo_target(widget)
         if target is not None:
             target.redo() if redo else target.undo()
+        elif isinstance(widget, ImageView) and (self.redo_param() if redo else self.undo_param()):
+            pass   # in a plane: the last change to a (when there is one)
         elif redo:
             self.equation_panel.redo()
         else:
