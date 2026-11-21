@@ -2655,9 +2655,19 @@ def main() -> None:
     check(window.workspace_widget("bench") is ws and window.current_workspace() == "bench"
           and window.workspaces.currentWidget() is window._workspace_keys["bench"],
           "clicking the switch shows that workspace")
+    dock = window.settings_dock
+    tab_shown = lambda w: dock.tab_bar.isTabVisible(dock.index_of(w))
+    check(tab_shown(window.equation_tab) and not tab_shown(window.rendering_tab)
+          and not tab_shown(window.coloring_tab) and not tab_shown(window.orbit_tab),
+          "in a module workspace the plane-specific dock tabs hide; Equation stays")
+    check(window.top_bar.view_switch.isHidden() and window.plane_frame.chip_row.isHidden(),
+          "...and so do Coupled | Single and the overlay chips")
     window.show_workspace("explore")
     check(window.workspaces.currentWidget() is window.explore_workspace
           and switch.current() == "explore", "and back")
+    check(tab_shown(window.rendering_tab) and tab_shown(window.orbit_tab)
+          and not window.top_bar.view_switch.isHidden() and not window.plane_frame.chip_row.isHidden(),
+          "back in Explore, they all return")
     bad = False
     try:
         window.add_panel(QLabel("x"), "X", placement="floating")

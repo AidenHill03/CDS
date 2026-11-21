@@ -3938,17 +3938,17 @@ class SandboxWindow(QMainWindow):
         return next(k for k, w in self._workspace_keys.items() if w is current)
 
     def _on_workspace_changed(self, key: str) -> None:
-        """Explore-only controls hide while another workspace shows (the
+        """Explore-only controls hide while another workspace shows: Coupled |
+        Single, the overlay chips, and the plane-specific dock tabs (the
         Equation tab stays: a module may use the map)."""
         explore = key == "explore"
         self.top_bar.view_switch.setVisible(explore)
-        for widget in (self.rendering_tab, self.coloring_tab, self.orbit_tab):
-            self.settings_dock.set_tab_visible(self.settings_dock.index_of(widget), explore)
-        if not explore and self.settings_dock.current_widget() is not self.equation_tab \
-                and self.settings_dock.index_of(self.settings_dock.current_widget()) in (
-                    self.settings_dock.index_of(w) for w in (self.rendering_tab, self.coloring_tab,
-                                                            self.orbit_tab)):
+        plane_tabs = (self.rendering_tab, self.coloring_tab, self.orbit_tab)
+        if not explore and self.settings_dock.current_widget() in plane_tabs:
             self.settings_dock.set_current_widget(self.equation_tab)
+        for widget in plane_tabs:
+            self.settings_dock.set_tab_visible(self.settings_dock.index_of(widget), explore)
+        self._sync_mode_controls()
 
     # ---- extra panels (research modules) ----------------------------------------
     def add_panel(self, widget: QWidget, title: str, placement: str | None = None) -> int:

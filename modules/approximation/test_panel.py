@@ -133,6 +133,16 @@ def main():
     info = window.info_panel.toPlainText()
     check(all(e.action in info for e in widget.controls) and "Approximation tab" in info,
           "add_panel puts the Approximation tab's controls into the Info tab")
+    from modules.approximation.panel import EMPTY_BASINS, EMPTY_CERTIFIED, EMPTY_TARGET
+    check(widget.target_canvas._message == EMPTY_TARGET and widget.basin_canvas._message == EMPTY_BASINS
+          and widget.certified_canvas._message == EMPTY_CERTIFIED
+          and all("\n" not in m for m in (EMPTY_TARGET, EMPTY_BASINS, EMPTY_CERTIFIED))
+          and widget.report_text.placeholderText(),
+          "each empty view shows one centered line saying what to do")
+    from app import theme as _theme
+    widget.target_canvas.resize(120, 120)
+    corner = widget.target_canvas.grab().toImage().pixelColor(2, 2)
+    check(corner == _theme.color("bg"), "empty canvases use the theme background, not white")
     canvas = widget.basin_canvas
     canvas._interactive = True
     canvas.set_image(QImage(64, 64, QImage.Format.Format_RGB32), (-1.0, 1.0, -1.0, 1.0))
