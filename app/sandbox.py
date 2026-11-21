@@ -62,6 +62,7 @@ from app.settings import (Settings, library_path, load_settings, preview_path_fo
                           previews_dir, save_settings)
 from app.settings_panel import SettingsPanel
 from app.version import PRODUCT_NAME
+from app.plane_frame import PlaneFrame
 from app.widgets import Segment, TabbedDock, TopBar
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
@@ -92,6 +93,53 @@ PAN_KEY_REPEAT_MS = 60
 # How long the status bar's per-pane controls hint stays after the cursor
 # enters a pane (it also clears when the cursor leaves).
 PANE_HINT_MS = 6000
+
+# ---- render modes as the UI shows them ------------------------------------------------------
+# RENDER_MODES ids stay data; the segmented controls show these labels, and
+# the tooltips give the full names.
+MODE_LABELS: dict[str, tuple[str, str]] = {
+    "parameter": ("Escape", "Escape time of the critical orbit, for each parameter a"),
+    "parameter_greens": ("Green's", "Green's function (escape-rate potential) of the critical "
+                                    "orbit, for each parameter a"),
+    "parameter_basin": ("Cycles", "Number of attracting cycles, for each parameter a"),
+    "parameter_period": ("Period", "Period of the attracting cycle, for each parameter a"),
+    "julia": ("Escape", "Escape time of each starting point z"),
+    "basin": ("Basins", "Basins of attraction, colored by attractor (infinity included)"),
+    "greens": ("Green's", "Green's function (escape-rate potential) of each starting point z"),
+}
+PARAMETER_MODE_ORDER = ["parameter", "parameter_greens", "parameter_basin", "parameter_period"]
+DYNAMICAL_MODE_ORDER = ["julia", "basin", "greens"]
+assert set(MODE_LABELS) == set(RENDER_MODES) == set(PARAMETER_MODE_ORDER + DYNAMICAL_MODE_ORDER)
+assert set(PARAMETER_MODE_ORDER) == set(PARAMETER_PLANE_MODES)
+
+
+def _mode_segment(mode: str) -> Segment:
+    label, tooltip = MODE_LABELS[mode]
+    return Segment(mode, label, tooltip)
+
+
+class ModeSelector:
+    """Compatibility shim with the old per-pane mode QComboBox's API
+    (setCurrentText/currentText/count/itemText) over the segmented control:
+    setCurrentText(mode) switches the pane exactly as clicking that segment
+    does. Kept so existing call sites and tests still read naturally."""
+
+    def __init__(self, window: "SandboxWindow", pane: Pane):
+        self._window = window
+        self._pane = pane
+
+    def setCurrentText(self, mode: str) -> None:
+        self._window._on_mode_changed(self._pane, mode)
+
+    def currentText(self) -> str:
+        return self._pane.render_mode
+
+    def count(self) -> int:
+        return len(RENDER_MODES)
+
+    def itemText(self, index: int) -> str:
+        return RENDER_MODES[index]
+
 
 # ---- window layout (UI redesign) -------------------------------------------------------
 MIN_WINDOW_SIZE = QSize(1100, 720)
@@ -227,6 +275,8 @@ class OverlayTrace:
     # e.g. "Traced orbits" reads better there than the menu action's own
     # "Trace Orbits". Empty means: use `label` as-is (see build_legend_entries).
     legend_label: str = ""
+    # The overlay chip's (shorter, sentence-case) text; empty means `label`.
+    chip_label: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -254,6 +304,8 @@ class OverlayLayer:
     legend_label: str = ""
     legend_swatches: tuple[OverlayColor, ...] = ()
     trace: OverlayTrace | None = None
+    chip_label: str = ""      # the overlay chip's text; empty means `label`
+    tooltip: str = ""
 
     def is_visible_for(self, render_mode: str) -> bool:
         if self.gate == "always":
@@ -265,8 +317,8 @@ class OverlayLayer:
 CRITICAL_POINTS_LAYER_KEY = "critical_points"
 CRITICAL_TRACE_KEY = "trace_orbits"
 CRITICAL_POINT_MARKER_RADIUS = 5.0
-CRITICAL_POINT_FILL_COLOR: OverlayColor = (255, 255, 255, 255)   # white -- matches the pre-Stage-1 flat brush
-CRITICAL_TRACE_COLOR: OverlayColor = (255, 255, 255, 160)        # translucent white -- matches the old trace_pen
+CRITICAL_POINT_FILL_COLOR: OverlayColor = theme.rgba("mark_point")
+CRITICAL_TRACE_COLOR: OverlayColor = theme.rgba("mark_trace")
 
 
 def _critical_points_provider(rational_map: cdx.RationalMap, param: complex,
@@ -299,10 +351,10 @@ FIXED_POINT_MARKER_RADIUS = 5.0
 # green / red / yellow -- clear, distinguishable, and conventional for
 # attracting/repelling/neutral without relying on a legend to be readable.
 _FIXED_POINT_CLASSIFICATION_COLORS: dict[str, OverlayColor] = {
-    "attracting": (60, 200, 60, 255),
-    "superattracting": (60, 200, 60, 255),
-    "repelling": (220, 60, 60, 255),
-    "neutral": (230, 200, 40, 255),
+    "attracting": theme.rgba("fixed_attracting"),
+    "superattracting": theme.rgba("fixed_attracting"),
+    "repelling": theme.rgba("fixed_repelling"),
+    "neutral": theme.rgba("fixed_neutral"),
 }
 
 
@@ -325,8 +377,8 @@ def _fixed_points_provider(rational_map: cdx.RationalMap, param: complex,
 ATTRACTING_CYCLES_LAYER_KEY = "attracting_cycles"
 CYCLE_TRACE_KEY = "trace_cycle_paths"
 CYCLE_MARKER_RADIUS = 5.0
-_CYCLE_STRONG_COLOR: OverlayColor = (255, 0, 255, 255)    # magenta -- superattracting (|multiplier| = 0)
-_CYCLE_WEAK_COLOR: OverlayColor = (140, 140, 255, 255)    # pale blue -- |multiplier| approaching 1
+_CYCLE_STRONG_COLOR: OverlayColor = theme.rgba("cycle_strong")   # superattracting (|multiplier| = 0)
+_CYCLE_WEAK_COLOR: OverlayColor = theme.rgba("cycle_weak")       # |multiplier| approaching 1
 
 
 def _cycle_color(multiplier: complex) -> OverlayColor:
@@ -373,7 +425,9 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         marker_style="circle", legend_swatches=(CRITICAL_POINT_FILL_COLOR,),
         trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
                            path_provider=_critical_trace_provider,
-                           legend_label="Traced orbits"),
+                           legend_label="Traced orbits", chip_label="Trace orbits"),
+        chip_label="Critical points",
+        tooltip="Mark the critical points of f (their orbits decide the dynamics)",
     ),
     OverlayLayer(
         key=FIXED_POINTS_LAYER_KEY, label="Fixed Points", gate="dynamical",
@@ -383,6 +437,8 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         legend_swatches=(_FIXED_POINT_CLASSIFICATION_COLORS["attracting"],
                          _FIXED_POINT_CLASSIFICATION_COLORS["repelling"],
                          _FIXED_POINT_CLASSIFICATION_COLORS["neutral"]),
+        chip_label="Fixed points",
+        tooltip="Mark the fixed points: green attracting, red repelling, yellow neutral",
     ),
     OverlayLayer(
         key=ATTRACTING_CYCLES_LAYER_KEY, label="Attracting Cycles", gate="dynamical",
@@ -392,11 +448,81 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         legend_swatches=(_CYCLE_STRONG_COLOR, _CYCLE_WEAK_COLOR),
         trace=OverlayTrace(key=CYCLE_TRACE_KEY, label="Trace Cycle Paths",
                            path_provider=_attracting_cycles_trace_provider,
-                           legend_label="Cycle paths"),
+                           legend_label="Cycle paths", chip_label="Trace cycles"),
+        chip_label="Cycles",
+        tooltip="Mark the attracting cycles, colored by how strongly they attract",
     ),
 ]
 
 _OVERLAY_LAYERS_BY_KEY: dict[str, OverlayLayer] = {layer.key: layer for layer in OVERLAY_LAYERS}
+
+
+# ---- overlay toggles: the on/off switches the chips and View menu share ----------
+# The registry layers above, plus three overlays that are drawn by
+# paint_overlays itself rather than from a points provider: the seeded orbit,
+# the parameter marker, and its crosshair. overlay_toggles() is the ONE list
+# both the overlay chips (under each plane) and the View menu are built from.
+ORBIT_TOGGLE_KEY = "seeded_orbit"
+PARAM_MARKER_TOGGLE_KEY = "param_marker"
+CROSSHAIR_TOGGLE_KEY = "crosshair"
+
+
+@dataclasses.dataclass(frozen=True)
+class OverlayToggle:
+    key: str
+    menu_label: str
+    chip_label: str
+    gate: str                        # "dynamical" | "parameter"
+    swatch: OverlayColor | None      # the chip's legend swatch (None: no dot)
+    default: bool = False
+    parent: str | None = None        # a trace: only meaningful while its layer is on
+    tooltip: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class BuiltinOverlay:
+    toggle: OverlayToggle
+    after: str | None                # placed right after this toggle key (None: first)
+
+
+BUILTIN_OVERLAYS: list[BuiltinOverlay] = [
+    BuiltinOverlay(OverlayToggle(ORBIT_TOGGLE_KEY, "Seeded Orbit", "Orbit", "dynamical",
+                                 theme.rgba("mark_orbit"), default=True,
+                                 tooltip="Show the orbit seeded by clicking the dynamical plane"),
+                   after=CRITICAL_TRACE_KEY),
+    BuiltinOverlay(OverlayToggle(PARAM_MARKER_TOGGLE_KEY, "Parameter Marker", "Marker", "parameter",
+                                 theme.rgba("mark_param"), default=True,
+                                 tooltip="Mark the current parameter a"),
+                   after=CYCLE_TRACE_KEY),
+    BuiltinOverlay(OverlayToggle(CROSSHAIR_TOGGLE_KEY, "Crosshair", "Crosshair", "parameter",
+                                 None, default=False,
+                                 tooltip="Thin lines through the parameter marker"),
+                   after=PARAM_MARKER_TOGGLE_KEY),
+]
+
+
+def overlay_toggles() -> list[OverlayToggle]:
+    """Every overlay switch, in display order: the registry layers (each
+    followed by its trace) with the built-in overlays slotted in."""
+    toggles: list[OverlayToggle] = []
+    for layer in OVERLAY_LAYERS:
+        toggles.append(OverlayToggle(
+            layer.key, layer.label, layer.chip_label or layer.label, layer.gate,
+            layer.legend_swatches[0] if layer.legend_swatches else None, tooltip=layer.tooltip))
+        if layer.trace is not None:
+            toggles.append(OverlayToggle(
+                layer.trace.key, layer.trace.label, layer.trace.chip_label or layer.trace.label,
+                layer.gate, None, parent=layer.key,
+                tooltip=f"{layer.trace.legend_label or layer.trace.label} "
+                        f"(while {layer.chip_label or layer.label} is on)"))
+    for builtin in BUILTIN_OVERLAYS:
+        if builtin.after is None:
+            index = 0
+        else:
+            keys = [t.key for t in toggles]
+            index = keys.index(builtin.after) + 1 if builtin.after in keys else len(toggles)
+        toggles.insert(index, builtin.toggle)
+    return toggles
 
 
 # How far outside the visible widget rect a mapped orbit/trace point may
@@ -447,6 +573,15 @@ def drawable_polyline_segments(points: list[complex], pixel_points: list,
     return segments
 
 
+def format_readout_complex(z: complex, digits: int = 4) -> str:
+    """'−0.1226 + 0.7449i' with real minus signs, for the readout chips."""
+    if not (math.isfinite(z.real) and math.isfinite(z.imag)):
+        return "∞"
+    re_part = f"{z.real:.{digits}f}".replace("-", "−")
+    sign = "−" if z.imag < 0 else "+"
+    return f"{re_part} {sign} {abs(z.imag):.{digits}f}i"
+
+
 def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int) -> QPointF:
     """The exact inverse of ImageView._pixel_to_complex, generalized to an
     ARBITRARY (viewport, width, height) instead of reading a live widget's
@@ -477,8 +612,10 @@ def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int
 # identical to every shade paint_overlays' own orbit/marker branches use, just
 # representative of them) so the legend's swatch reads as the same color a
 # user sees drawn elsewhere on the SAME pane.
-ORBIT_LEGEND_COLOR: OverlayColor = (255, 120, 0, 255)     # orange -- matches the orbit dots/lines
-PARAM_MARKER_LEGEND_COLOR: OverlayColor = (255, 0, 0, 255)   # red -- matches the marker crosshair
+PARAM_MARKER_RADIUS = 6.0
+PARAM_CROSSHAIR_ALPHA = 140
+ORBIT_LEGEND_COLOR: OverlayColor = theme.rgba("mark_orbit")      # matches the orbit dots/lines
+PARAM_MARKER_LEGEND_COLOR: OverlayColor = theme.rgba("mark_param")   # matches the marker
 
 
 @dataclasses.dataclass(frozen=True)
@@ -538,8 +675,8 @@ def draw_legend(painter: QPainter, width: int, height: int, entries: list[Legend
     box_height = LEGEND_MARGIN * 2 + LEGEND_LINE_HEIGHT * len(entries)
     box_rect = QRectF(width - LEGEND_BOX_WIDTH - LEGEND_MARGIN, LEGEND_MARGIN,
                       LEGEND_BOX_WIDTH, box_height)
-    painter.fillRect(box_rect, QColor(20, 20, 20, 190))
-    painter.setPen(QColor(230, 230, 230))
+    painter.fillRect(box_rect, theme.color("legend_bg"))
+    painter.setPen(theme.color("legend_text"))
     for i, entry in enumerate(entries):
         line_top = box_rect.top() + LEGEND_MARGIN + i * LEGEND_LINE_HEIGHT
         x = box_rect.left() + LEGEND_MARGIN
@@ -562,6 +699,7 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
                    orbit_connect_lines: bool = True,
                    orbit_state=None,
                    show_param_marker: bool = False,
+                   show_crosshair: bool = False,
                    param: "complex | None" = None,
                    show_legend: bool = False,
                    layer_enabled: "dict | None" = None,
@@ -616,7 +754,7 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
 
     if show_critical_points and is_dynamical:
         if show_traced_orbits and orbit_traces:
-            trace_pen = QPen(QColor(255, 255, 255, 160))
+            trace_pen = QPen(QColor(*CRITICAL_TRACE_COLOR))
             trace_pen.setWidth(1)
             painter.setPen(trace_pen)
             for trace in orbit_traces:
@@ -624,10 +762,10 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
                 for a, b in drawable_polyline_segments(trace, pixel_points, inflated_rect):
                     painter.drawLine(a, b)
 
-        marker_pen = QPen(QColor(0, 0, 0))
+        marker_pen = QPen(theme.color("mark_outline"))
         marker_pen.setWidth(2)
         painter.setPen(marker_pen)
-        painter.setBrush(QColor(255, 255, 255))
+        painter.setBrush(QColor(*CRITICAL_POINT_FILL_COLOR))
         r = CRITICAL_POINT_MARKER_RADIUS
         for w in critical_points:
             if finite(w):   # infinity is a valid critical point but has no finite screen position
@@ -640,17 +778,17 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
         # regardless (see ImageView.set_orbit_connect_lines's own
         # docstring).
         if orbit_connect_lines:
-            line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from white/black
+            line_pen = QPen(QColor(*theme.rgba("mark_orbit", alpha=220)))
             line_pen.setWidth(1)
             painter.setPen(line_pen)
             for a, b in drawable_polyline_segments(orbit_state.history, pixel_points,
                                                    inflated_rect):
                 painter.drawLine(a, b)
 
-        dot_pen = QPen(QColor(0, 0, 0))
+        dot_pen = QPen(theme.color("mark_outline"))
         dot_pen.setWidth(1)
         painter.setPen(dot_pen)
-        painter.setBrush(QColor(255, 120, 0))
+        painter.setBrush(theme.color("mark_orbit"))
         dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
         for w, pixel in zip(orbit_state.history, pixel_points):   # visually subordinate
             if finite(w) and inflated_rect.contains(pixel):
@@ -661,22 +799,31 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
         # orbit passed through.
         seed_pixel = complex_to_pixel(orbit_state.z0, viewport, width, height)
         if finite(orbit_state.z0) and inflated_rect.contains(seed_pixel):
-            seed_pen = QPen(QColor(0, 0, 0))
+            seed_pen = QPen(theme.color("mark_outline"))
             seed_pen.setWidth(2)
             painter.setPen(seed_pen)
-            painter.setBrush(QColor(255, 255, 0))
+            painter.setBrush(theme.color("mark_orbit"))
             painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
                                 CRITICAL_POINT_MARKER_RADIUS)
 
-    if show_param_marker and not is_dynamical and param is not None and finite(param):
+    if not is_dynamical and param is not None and finite(param):
         pixel = complex_to_pixel(param, viewport, width, height)
-        if bounds.contains(pixel):
-            r = CRITICAL_POINT_MARKER_RADIUS
-            pen = QPen(QColor(255, 0, 0))
-            pen.setWidth(2)
+        side = min(width, height)
+        image = QRectF((width - side) // 2, (height - side) // 2, side, side)
+        if show_crosshair and image.contains(pixel):
+            # Thin lines through the marker, across the whole image.
+            pen = QPen(QColor(*theme.rgba("mark_param", alpha=PARAM_CROSSHAIR_ALPHA)))
+            pen.setWidthF(1.0)
             painter.setPen(pen)
-            painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
-            painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
+            painter.drawLine(QPointF(image.left(), pixel.y()), QPointF(image.right(), pixel.y()))
+            painter.drawLine(QPointF(pixel.x(), image.top()), QPointF(pixel.x(), image.bottom()))
+        if show_param_marker and bounds.contains(pixel):
+            # Mockup B's marker: an amber dot with a dark ring.
+            pen = QPen(theme.color("bg"))
+            pen.setWidthF(2.0)
+            painter.setPen(pen)
+            painter.setBrush(theme.color("mark_param"))
+            painter.drawEllipse(pixel, PARAM_MARKER_RADIUS, PARAM_MARKER_RADIUS)
 
     if show_legend:
         entries = build_legend_entries(
@@ -695,7 +842,7 @@ def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
     circle (critical points), square (fixed points), diamond (attracting
     cycles).
     """
-    pen = QPen(QColor(0, 0, 0))
+    pen = QPen(theme.color("mark_outline"))
     pen.setWidth(2)
     painter.setPen(pen)
     painter.setBrush(QColor(*color))
@@ -1246,6 +1393,13 @@ class ImageView(QWidget):
         # Legend (Stage 3) -- off by default, matching every other overlay's
         # own starting state.
         self._show_legend: bool = False
+        # Built-in overlay switches (see BUILTIN_OVERLAYS); registry layers
+        # keep their own dicts below.
+        self._show_orbit: bool = True
+        self._show_param_marker: bool = True
+        self._show_crosshair: bool = False
+        self._reference_scale_key = None
+        self._reference_scale_value: float | None = None
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
@@ -1378,7 +1532,9 @@ class ImageView(QWidget):
             decimals = max(4, int(math.ceil(-math.log10(pixel_step))) + 1)
         else:
             decimals = 4
-        coord = f"z = {w.real:.{decimals}f}{'+' if w.imag >= 0 else '-'}{abs(w.imag):.{decimals}f}j"
+        # On the parameter plane a pixel IS a value of a, not a point z.
+        name = "a" if self.pane.render_mode in PARAMETER_PLANE_MODES else "z"
+        coord = f"{name} = {w.real:.{decimals}f}{'+' if w.imag >= 0 else '-'}{abs(w.imag):.{decimals}f}j"
         sample = self._sample_at_pixel(pixel)
         return f"{coord}   {sample}" if sample else coord
 
@@ -1596,6 +1752,156 @@ class ImageView(QWidget):
         self._show_legend = show
         self.update()
 
+    def set_overlay(self, key: str, on: bool) -> None:
+        """One entry point for every overlay switch (see overlay_toggles):
+        what the overlay chips and the View menu both call."""
+        if key == ORBIT_TOGGLE_KEY:
+            self._show_orbit = on
+        elif key == PARAM_MARKER_TOGGLE_KEY:
+            self._show_param_marker = on
+        elif key == CROSSHAIR_TOGGLE_KEY:
+            self._show_crosshair = on
+        elif key in self._layer_enabled:
+            self.set_layer_enabled(key, on)
+            return
+        elif key in self._layer_trace_enabled:
+            self.set_trace_enabled(key, on)
+            return
+        else:
+            raise KeyError(key)
+        self.update()
+
+    def overlay_on(self, key: str) -> bool:
+        return {ORBIT_TOGGLE_KEY: self._show_orbit, PARAM_MARKER_TOGGLE_KEY: self._show_param_marker,
+                CROSSHAIR_TOGGLE_KEY: self._show_crosshair}.get(
+            key, self._layer_enabled.get(key, self._layer_trace_enabled.get(key, False)))
+
+    # ---- readout chips (painted on the image, bottom-left) -------------------------
+    def zoom_factor(self) -> float:
+        """How far in from this map's default framing for this mode (x1 = default)."""
+        m = self.session.map
+        key = (m.name, m.to_formula(), self.pane.render_mode,
+               None if self.pane.render_mode in PARAMETER_PLANE_MODES else self.session.param)
+        if key != self._reference_scale_key:
+            self._reference_scale_key = key
+            try:
+                self._reference_scale_value = default_view_for_mode(
+                    m, self.session.param, self.pane.render_mode)[1]
+            except Exception:   # a degenerate map: fall back to "no zoom shown"
+                self._reference_scale_value = None
+        ref = self._reference_scale_value
+        scale = self.pane.viewport.scale
+        return ref / scale if ref and scale > 0 else 1.0
+
+    def readout_chips(self) -> list[tuple[str, str]]:
+        """(accent label, value) pairs for the chips painted at the image's
+        bottom-left: `a` and the zoom on the parameter plane; z0, the step
+        count and the orbit's fate on the dynamical plane (once seeded)."""
+        if self.pane.render_mode in PARAMETER_PLANE_MODES:
+            zoom = self.zoom_factor()
+            zoom_text = f"×{zoom:.2f}" if zoom < 100 else f"×{zoom:.3g}"
+            return [("a", format_readout_complex(self.session.param)), ("", zoom_text)]
+        state = self.orbit_tracker.state
+        if state is None:
+            return []
+        rs = self.session.render_settings
+        c = self.orbit_tracker.classify(self.session.map, self.session.param, rs.max_iter, rs.tol)
+        fate = {"converged_fixed": "fixed point",
+                "converged_cycle": f"{c.period}-cycle" if c.period else "cycle",
+                "undetermined": "undetermined", "running": "running"}.get(c.kind, "")
+        return [("z₀", format_readout_complex(state.z0)),
+                ("", f"n {state.n}" + (f" · {fate}" if fate else ""))]
+
+    def _paint_readout_chips(self, painter: QPainter) -> None:
+        chips = self.readout_chips()
+        if not chips:
+            return
+        rect = QRectF(self._display_rect())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(theme.mono_font(theme.FONT_SIZE_MONO))
+        metrics = painter.fontMetrics()
+        accent = theme.color("amber" if self.pane.render_mode in PARAMETER_PLANE_MODES else "teal")
+        pad, gap, h = 8.0, 6.0, 24.0
+        x, y = rect.left() + 10.0, rect.bottom() - 10.0 - h
+        for label, value in chips:
+            label_w = metrics.horizontalAdvance(label + " ") if label else 0
+            w = pad * 2 + label_w + metrics.horizontalAdvance(value)
+            if x + w > rect.right() - 10.0 and x > rect.left() + 10.0:
+                break   # no room for this chip on a small image
+            box = QRectF(x, y, w, h)
+            painter.setPen(QPen(theme.color("border_strong"), 1))
+            painter.setBrush(theme.color("overlay"))
+            painter.drawRoundedRect(box, 6, 6)
+            text_box = box.adjusted(pad, 0, -pad, 0)
+            align = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            if label:
+                painter.setPen(accent)
+                painter.drawText(text_box, align, label)
+                text_box = text_box.adjusted(label_w, 0, 0, 0)
+                painter.setPen(theme.color("text"))
+            else:
+                painter.setPen(theme.color("text_soft"))
+            painter.drawText(text_box, align, value)
+            x += w + gap
+        painter.restore()
+
+    # ---- off-screen parameter marker: an edge arrow that re-centers on it -------------
+    OFFSCREEN_ARROW_INSET = 18.0
+    OFFSCREEN_ARROW_SIZE = 11.0
+
+    def offscreen_marker_arrow(self) -> tuple[QPointF, float] | None:
+        """(tip position, angle in radians) of the edge arrow pointing toward
+        the parameter marker when it lies outside the visible image, else None."""
+        if self.pane.render_mode not in PARAMETER_PLANE_MODES or not self._show_param_marker:
+            return None
+        a = self.session.param
+        if not (math.isfinite(a.real) and math.isfinite(a.imag)):
+            return None
+        rect = QRectF(self._display_rect())
+        pixel = self._complex_to_display_pixel(a)
+        if rect.contains(pixel):
+            return None
+        c = rect.center()
+        dx, dy = pixel.x() - c.x(), pixel.y() - c.y()
+        half_w = rect.width() / 2 - self.OFFSCREEN_ARROW_INSET
+        half_h = rect.height() / 2 - self.OFFSCREEN_ARROW_INSET
+        if half_w <= 0 or half_h <= 0:
+            return None
+        t = min(half_w / abs(dx) if dx else math.inf, half_h / abs(dy) if dy else math.inf)
+        if not math.isfinite(t):
+            return None
+        return QPointF(c.x() + dx * t, c.y() + dy * t), math.atan2(dy, dx)
+
+    def _offscreen_arrow_hit(self, pos: QPointF) -> bool:
+        arrow = self.offscreen_marker_arrow()
+        if arrow is None:
+            return False
+        tip, _angle = arrow
+        r = self.OFFSCREEN_ARROW_SIZE + 8
+        return QRectF(tip.x() - r, tip.y() - r, 2 * r, 2 * r).contains(pos)
+
+    def recenter_on_param(self) -> None:
+        vp = self.pane.viewport
+        self.pane.viewport = cdx.Viewport(self.session.param, vp.scale, vp.resolution)
+        self.update()
+        self.viewport_changed.emit()
+
+    def _paint_offscreen_arrow(self, painter: QPainter) -> None:
+        arrow = self.offscreen_marker_arrow()
+        if arrow is None:
+            return
+        tip, angle = arrow
+        s = self.OFFSCREEN_ARROW_SIZE
+        back = QPointF(tip.x() - s * 1.6 * math.cos(angle), tip.y() - s * 1.6 * math.sin(angle))
+        side = QPointF(-math.sin(angle) * s, math.cos(angle) * s)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(theme.color("bg"), 2))
+        painter.setBrush(theme.color("mark_param"))
+        painter.drawPolygon(QPolygonF([tip, back + side, back - side]))
+        painter.restore()
+
     # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
     def refresh_orbit_staleness(self) -> None:
         """Called at the same map/param-change points refresh_layers is
@@ -1707,8 +2013,8 @@ class ImageView(QWidget):
         painter = QPainter(self)
         message = self.no_effect_parameter_message()
         if message is not None:
-            painter.fillRect(self.rect(), QColor(40, 40, 40))
-            painter.setPen(QColor(220, 220, 220))
+            painter.fillRect(self.rect(), theme.color("bg"))
+            painter.setPen(theme.color("muted"))
             painter.drawText(self.rect(),
                              int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap),
                              message)
@@ -1717,7 +2023,7 @@ class ImageView(QWidget):
         if source_rect is not None:
             painter.drawPixmap(QRectF(self._display_rect()), self._pixmap, source_rect)
         if self._rubber_band_rect is not None:
-            pen = QPen(QColor(255, 255, 255))
+            pen = QPen(theme.color("text"))
             pen.setStyle(Qt.PenStyle.DashLine)
             pen.setWidth(1)
             painter.setPen(pen)
@@ -1738,10 +2044,11 @@ class ImageView(QWidget):
                        critical_points=self._critical_points,
                        show_traced_orbits=self._trace_orbits,
                        orbit_traces=self._orbit_traces,
-                       show_orbit=True,
+                       show_orbit=self._show_orbit,
                        orbit_connect_lines=self._orbit_connect_lines,
                        orbit_state=self.orbit_tracker.state,
-                       show_param_marker=True,
+                       show_param_marker=self._show_param_marker,
+                       show_crosshair=self._show_crosshair,
                        param=self.session.param,
                        show_legend=self._show_legend,
                        layer_enabled=self._layer_enabled,
@@ -1756,6 +2063,8 @@ class ImageView(QWidget):
                               layer_trace_enabled=self._layer_trace_enabled,
                               layer_points=self._layer_points,
                               layer_traces=self._layer_traces)
+        self._paint_offscreen_arrow(painter)
+        self._paint_readout_chips(painter)
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -1932,6 +2241,9 @@ class ImageView(QWidget):
         button = event.button()
         if button not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             return
+        if button == Qt.MouseButton.LeftButton and self._offscreen_arrow_hit(QPointF(event.position())):
+            self.recenter_on_param()   # the edge arrow: jump back to the marker
+            return
         self._gesture_button = button
         self._press_pos = QPointF(event.position())
         vp = self.pane.viewport
@@ -1965,7 +2277,12 @@ class ImageView(QWidget):
             self._rubber_band_rect = QRect(self._press_pos.toPoint(), pos).normalized()
             self.update()
         elif self._gesture is None:
-            self._update_cursor(event.modifiers())
+            if self._offscreen_arrow_hit(pos_f):
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.setToolTip("Re-center on the parameter marker")
+            else:
+                self.setToolTip("")
+                self._update_cursor(event.modifiers())
 
         # Live, on every move regardless of panning/dragging -- the cursor
         # coordinate (and, mid-pan, what's still on screen at that point)
@@ -2401,6 +2718,13 @@ class ExportImageDialog(QDialog):
             self._param_marker_checkbox.toggled.connect(self._update_preview)
             layout.addWidget(self._param_marker_checkbox)
 
+        # The painted legend is off on screen by default (the overlay chips
+        # carry the swatches now), but an exported image has no chips: offer it.
+        self._legend_checkbox = QCheckBox("Legend", self)
+        self._legend_checkbox.setChecked(self._pane.image_view._show_legend)
+        self._legend_checkbox.toggled.connect(self._update_preview)
+        layout.addWidget(self._legend_checkbox)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel, self)
         buttons.accepted.connect(self.accept)
@@ -2453,6 +2777,12 @@ class ExportImageDialog(QDialog):
             flags["orbit_state"] = view.orbit_tracker.state
         if self._param_marker_checkbox is not None:
             flags["show_param_marker"] = self._param_marker_checkbox.isChecked()
+            flags["show_crosshair"] = view.overlay_on(CROSSHAIR_TOGGLE_KEY)
+        if self._legend_checkbox.isChecked():
+            flags["show_legend"] = True
+            # Only what the export itself draws gets a legend line.
+            flags["layer_enabled"] = {CRITICAL_POINTS_LAYER_KEY: flags.get("show_critical_points", False)}
+            flags["layer_trace_enabled"] = {CRITICAL_TRACE_KEY: flags.get("show_traced_orbits", False)}
         return flags
 
     def resolution(self) -> int:
@@ -2652,30 +2982,25 @@ class SandboxWindow(QMainWindow):
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
         self.metadata_header = MetadataHeader(self.session, self.pane, self)
 
-        # PER-PANE mode combo -- replaces the old single window-level
-        # self.mode_combo. self.mode_combo is now specifically pane A's
-        # (kept under that name for the many single-pane call sites/tests
-        # that still mean "the" pane); self.mode_combo2 is pane B's, wired
-        # identically. Neither one is more "correct" than the other --
-        # Stage 3's coupling keys off render_mode, never off which combo
-        # this is.
-        self.mode_combo = QComboBox(self)
-        self.mode_combo.addItems(RENDER_MODES)
-        self.mode_combo.setCurrentText(self.pane.render_mode)
-        self.mode_combo.currentTextChanged.connect(lambda m: self._on_mode_changed(self.pane, m))
-
-        self.mode_combo2 = QComboBox(self)
-        self.mode_combo2.addItems(RENDER_MODES)
-        self.mode_combo2.setCurrentText(self.pane2.render_mode)
-        self.mode_combo2.currentTextChanged.connect(
-            lambda m: self._on_mode_changed(self.pane2, m))
-
-        self.pane_column = self._build_pane_column(self.mode_combo, self.image_view)
-        self.pane_column2 = self._build_pane_column(self.mode_combo2, self.image_view2)
-        self._pane_columns: dict[Pane, QWidget] = {
-            self.pane: self.pane_column, self.pane2: self.pane_column2}
-        self._mode_combos: dict[Pane, QComboBox] = {
+        # Each pane is a PlaneFrame: caps title + segmented mode control,
+        # the framed image, and a row of overlay chips (added in
+        # _build_overlay_chips, once the View-menu actions they mirror exist).
+        # mode_combo/mode_combo2 are compatibility shims over the segmented
+        # controls (setCurrentText(mode) still switches that pane's mode).
+        self.plane_frame = PlaneFrame(self.image_view, self)
+        self.plane_frame2 = PlaneFrame(self.image_view2, self)
+        self._plane_frames: dict[Pane, PlaneFrame] = {
+            self.pane: self.plane_frame, self.pane2: self.plane_frame2}
+        for pane, frame in self._plane_frames.items():
+            frame.mode_control.selected.connect(
+                lambda mode, p=pane: self._on_mode_changed(p, mode))
+            frame.resized.connect(self._equalize_chip_rows)
+        self.mode_combo = ModeSelector(self, self.pane)
+        self.mode_combo2 = ModeSelector(self, self.pane2)
+        self._mode_combos: dict[Pane, ModeSelector] = {
             self.pane: self.mode_combo, self.pane2: self.mode_combo2}
+        self.pane_column, self.pane_column2 = self.plane_frame, self.plane_frame2   # old names
+        self._pane_columns: dict[Pane, QWidget] = dict(self._plane_frames)
 
         # Side by side in a splitter, not two fixed halves -- the user can
         # drag the divider to give one pane more room. Coupled (both
@@ -2972,7 +3297,9 @@ class SandboxWindow(QMainWindow):
         self._pane_hint_timer.setInterval(PANE_HINT_MS)
         self._pane_hint_timer.timeout.connect(self.pane_hint_label.clear)
 
+        self._build_overlay_chips()
         self._update_pane_focus_styling()
+        self._sync_mode_controls()
         self._sync_orbit_panel()
 
     def _build_settings_dialog(self) -> None:
@@ -3011,57 +3338,83 @@ class SandboxWindow(QMainWindow):
         self.settings_dialog.activateWindow()
 
     def _build_view_menu_layer_actions(self) -> None:
-        """One checkable QAction per OVERLAY_LAYERS entry (plus, for a layer
-        with a trace, one more gated sub-action) -- called once from
-        _build_ui. Adding a layer to the registry is enough to give it a
-        View-menu toggle; nothing here needs touching.
+        """One checkable QAction per overlay switch (overlay_toggles(): every
+        OVERLAY_LAYERS entry and its gated trace, plus the seeded orbit, the
+        parameter marker and its crosshair) -- called once from _build_ui.
+        The overlay chips under each plane are built from the SAME list
+        (_build_overlay_chips) and mirror these actions, so the menu and the
+        chips can never disagree.
 
-        Each action is wired DIRECTLY to both ImageViews'
-        set_layer_enabled/set_trace_enabled (GLOBAL, not per-pane -- same
-        "one visual preference, not several checkboxes" reasoning the old
-        toolbar's own comment gave before Stage 4 removed it) -- the View
-        menu is the SOLE control for every layer, with no toolbar mirror to
-        keep in sync any more.
+        Each action drives BOTH ImageViews (one visual preference, not one
+        per pane). A trace's action is enabled only while its layer is on.
         """
-        for layer in OVERLAY_LAYERS:
-            action = self.view_menu.addAction(layer.label)
+        self.overlay_actions: dict[str, QAction] = {}
+        previous_gate = None
+        for toggle in overlay_toggles():
+            if toggle.parent is None and self.overlay_actions and toggle.gate != previous_gate:
+                self.view_menu.addSeparator()
+            previous_gate = toggle.gate
+            action = self.view_menu.addAction(toggle.menu_label)
             action.setCheckable(True)
-            action.toggled.connect(
-                lambda checked, key=layer.key: self.image_view.set_layer_enabled(key, checked))
-            action.toggled.connect(
-                lambda checked, key=layer.key: self.image_view2.set_layer_enabled(key, checked))
-            setattr(self, f"{layer.key}_action", action)
+            action.setChecked(toggle.default)
+            action.setToolTip(toggle.tooltip)
+            for view in (self.image_view, self.image_view2):
+                view.set_overlay(toggle.key, toggle.default)
+                action.toggled.connect(lambda checked, v=view, k=toggle.key: v.set_overlay(k, checked))
+            if toggle.parent is not None:
+                parent_action = self.overlay_actions[toggle.parent]
+                action.setEnabled(parent_action.isChecked())
+                parent_action.toggled.connect(action.setEnabled)
+            self.overlay_actions[toggle.key] = action
+            setattr(self, f"{toggle.key}_action", action)
+        self.view_menu.addSeparator()
 
-            if layer.trace is not None:
-                trace = layer.trace
-                trace_action = self.view_menu.addAction(trace.label)
-                trace_action.setCheckable(True)
-                trace_action.setEnabled(action.isChecked())
-                action.toggled.connect(trace_action.setEnabled)
-                trace_action.toggled.connect(
-                    lambda checked, key=trace.key: self.image_view.set_trace_enabled(key, checked))
-                trace_action.toggled.connect(
-                    lambda checked, key=trace.key: self.image_view2.set_trace_enabled(key, checked))
-                setattr(self, f"{trace.key}_action", trace_action)
+    def _build_overlay_chips(self) -> None:
+        """The chip row under each plane, one chip per overlay switch whose
+        gate matches the plane; traces are small secondary chips."""
+        for frame in self._plane_frames.values():
+            for toggle in overlay_toggles():
+                frame.add_chip(toggle.key, self.overlay_actions[toggle.key], toggle.chip_label,
+                               toggle.gate, toggle.swatch, toggle.tooltip,
+                               secondary=toggle.parent is not None)
 
-            self.view_menu.addSeparator()
+    def _equalize_chip_rows(self) -> None:
+        """Side by side, both planes' chip rows take the taller one's height,
+        so the two images stay the same size and line up."""
+        frames = [f for f in self._plane_frames.values() if f.isVisible()]
+        height = max((f.chip_rows_height() for f in frames), default=0)
+        for f in self._plane_frames.values():
+            if f.chip_row.minimumHeight() != height:
+                f.chip_row.setMinimumHeight(height)
 
-    def _build_pane_column(self, mode_combo: QComboBox, image_view: "ImageView") -> QWidget:
-        """One pane's own little control strip (mode combo) stacked above
-        its ImageView -- what actually goes side by side in the splitter.
-        """
-        column = QWidget(self)
-        column.setProperty("role", "paneColumn")
-        column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        layout = QVBoxLayout(column)
-        layout.setContentsMargins(0, 0, 0, 0)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Mode:", self))
-        row.addWidget(mode_combo)
-        row.addStretch(1)
-        layout.addLayout(row)
-        layout.addWidget(image_view, 1)
-        return column
+    def _sync_mode_controls(self) -> None:
+        """Each plane's header: title/accent from its current mode's plane,
+        and the modes its segmented control offers -- in Coupled view only
+        that plane's own family (parameter or dynamical); in Single view every
+        mode, grouped "Parameter ▸ ... | Dynamical ▸ ...". Ids stay data; the
+        buttons show MODE_LABELS."""
+        if not hasattr(self, "coupled_view_action"):
+            return
+        coupled = self.coupled_view_action.isChecked()
+        explore = not hasattr(self, "workspaces") or self.current_workspace() == "explore"
+        for pane, frame in self._plane_frames.items():
+            plane = "parameter" if pane.render_mode in PARAMETER_PLANE_MODES else "dynamical"
+            frame.set_plane(plane)
+            frame.set_chips_visible(explore)
+            if coupled:
+                family = PARAMETER_MODE_ORDER if plane == "parameter" else DYNAMICAL_MODE_ORDER
+                groups, titles = [[_mode_segment(m) for m in family]], None
+            else:
+                groups = [[_mode_segment(m) for m in PARAMETER_MODE_ORDER],
+                          [_mode_segment(m) for m in DYNAMICAL_MODE_ORDER]]
+                titles = ["Parameter ▸", "Dynamical ▸"]
+            key = (coupled, plane)
+            if getattr(frame, "_mode_key", None) != key:
+                frame._mode_key = key
+                frame.mode_control.set_segments(groups, titles)
+            frame.mode_control.set_current(pane.render_mode)
+            frame.set_focused(pane is self._focused_pane)
+        self._equalize_chip_rows()
 
     def _show_about_dialog(self) -> None:
         AboutDialog(self).exec()
@@ -3083,8 +3436,8 @@ class SandboxWindow(QMainWindow):
         # Purely visual -- which column has a highlighted border -- so the
         # user can actually SEE which pane Reset View/typed-field actions
         # (still self.pane-directed until Stage 3) are about to act on.
-        for pane, column in self._pane_columns.items():
-            theme.set_property(column, "focused", pane is self._focused_pane)
+        for pane, frame in self._plane_frames.items():
+            frame.set_focused(pane is self._focused_pane)
 
     def _relayout_panes(self) -> None:
         # Coupled: both panes visible, side by side. Single: only the
@@ -3094,6 +3447,7 @@ class SandboxWindow(QMainWindow):
         coupled = self.coupled_view_action.isChecked()
         for pane, column in self._pane_columns.items():
             column.setVisible(coupled or pane is self._focused_pane)
+        self._sync_mode_controls()
         self._refresh_render_status()
 
     # ---- orbit strip: follows whichever pane is currently dynamical -------------
@@ -3199,7 +3553,7 @@ class SandboxWindow(QMainWindow):
             pane.viewport = viewport
             pane.set_render_mode(mode)   # already validated by load_snapshot; re-validated here
                                          # for free, not re-checked for its own sake
-            self._mode_combos[pane].setCurrentText(pane.render_mode)
+        self._sync_mode_controls()
 
         self.coupled_view_action.setChecked(coupled)
         self._set_focused_pane(self.panes[min(focused_index, len(self.panes) - 1)])
@@ -3463,6 +3817,7 @@ class SandboxWindow(QMainWindow):
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, pane: Pane, mode: str) -> None:
         pane.set_render_mode(mode)
+        self._sync_mode_controls()
         if pane is self._focused_pane:
             self._refresh_header()   # domain/mode text depends on the mode itself
             self._update_status_bar()

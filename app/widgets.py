@@ -60,10 +60,13 @@ class SegmentedControl(QFrame):
         self._group.setExclusive(True)
         self._group.buttonClicked.connect(self._on_clicked)
         self._buttons: dict[Any, QToolButton] = {}
+        self._last_selected: Any = None
         self.set_segments([list(segments)])
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
-    def set_segments(self, groups: list[list[Segment]]) -> None:
+    def set_segments(self, groups: list[list[Segment]], titles: list[str] | None = None) -> None:
+        """`titles`: an optional small caption before each group (Single
+        view's "Parameter ▸" / "Dynamical ▸")."""
         current = self.current()
         while self._layout.count():
             item = self._layout.takeAt(0)
@@ -79,6 +82,10 @@ class SegmentedControl(QFrame):
                 divider.setProperty("role", "segmentDivider")
                 divider.setFixedWidth(1)
                 self._layout.addWidget(divider)
+            if titles and gi < len(titles) and titles[gi]:
+                caption = QLabel(titles[gi], self)
+                caption.setProperty("role", "segmentGroup")
+                self._layout.addWidget(caption)
             for seg in segments:
                 button = QToolButton(self)
                 button.setProperty("role", "segment")
@@ -97,10 +104,15 @@ class SegmentedControl(QFrame):
             self._buttons[current].setChecked(True)
 
     def _on_clicked(self, button: QToolButton) -> None:
-        self.selected.emit(button.property("segmentData"))
+        data = button.property("segmentData")
+        if data == self._last_selected:
+            return   # re-clicking the selected segment changes nothing
+        self._last_selected = data
+        self.selected.emit(data)
 
     def set_current(self, data: Any) -> None:
         button = self._buttons.get(data)
+        self._last_selected = data
         if button is not None and not button.isChecked():
             button.setChecked(True)
 

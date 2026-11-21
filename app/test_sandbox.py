@@ -623,7 +623,7 @@ def main() -> None:
     orbit_view.resize(400, 400)
     orbit_panel = OrbitPanel(orbit_session, orbit_view)
 
-    check("Click the image" in orbit_panel._readout_label.text(),
+    check(orbit_panel._readout_label.text() == "",
           "the readout starts with no orbit seeded")
     check(orbit_view.orbit_tracker.state is None, "no orbit exists before any click")
 
@@ -644,7 +644,7 @@ def main() -> None:
 
     orbit_view.clear_orbit()
     check(orbit_view.orbit_tracker.state is None, "clear_orbit removes the orbit")
-    check("Click the image" in orbit_panel._readout_label.text(),
+    check(orbit_panel._readout_label.text() == "",
           "the readout reverts to the no-orbit prompt after Clear")
 
     # Parameter-plane modes: click-to-seed is a no-op (orbit tracking is a
@@ -1200,7 +1200,8 @@ def main() -> None:
     window.image_view2.mouseReleaseEvent(_FakeMouseEvent(QPoint(50, 50)))
     check(window._focused_pane is window.pane2,
           "pressing on pane2's image moves focus to pane2, via ImageView.pane_activated")
-    check(window.pane_column2.property("focused") is True and not window.pane_column.property("focused"),
+    check(window.plane_frame2.image_frame.property("focused") is True
+          and not window.plane_frame.image_frame.property("focused"),
           "the focus-highlight border moves to the newly-focused pane's column")
 
     window.coupled_view_action.setChecked(False)
@@ -1281,8 +1282,9 @@ def main() -> None:
           "the menu bar is File, Edit, View, Help, in that order")
     view_action_texts = [a.text() for a in window.view_menu.actions() if a.text()]
     check(view_action_texts == ["Reset View", "Zoom In", "Zoom Out", "Coupled View",
-                                "Critical Points", "Trace Orbits",
+                                "Critical Points", "Trace Orbits", "Seeded Orbit",
                                 "Fixed Points", "Attracting Cycles", "Trace Cycle Paths",
+                                "Parameter Marker", "Crosshair",
                                 "Connect Orbit Points", "Legend", "Sidebar", "Equations && Settings",
                                 "Reset Layout", "Go to Tab"],
           "the View menu has the toolbar's own view controls PLUS every registry layer's own "
@@ -3113,6 +3115,133 @@ def main() -> None:
           "every bound registry entry has an agreement check, and every check has an entry "
           f"(missing: {sorted(bound_ids - set(AGREEMENT))}, stale: {sorted(set(AGREEMENT) - bound_ids)})")
     _kb_reset()
+
+    # ---- UI redesign, Step 3: planes -------------------------------------------------
+    print("\nplanes: headers and segmented mode controls:")
+    window.coupled_view_action.setChecked(True)
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+    left, right = window.plane_frame, window.plane_frame2
+    check(left.title_label.text() == "PARAMETER PLANE" and left.title_label.property("plane") == "parameter"
+          and right.title_label.text() == "DYNAMICAL PLANE" and right.title_label.property("plane") == "dynamical",
+          "pane headers name their plane in caps, with the plane's accent property")
+    check(left.mode_control.items() == sandbox_module.PARAMETER_MODE_ORDER
+          and right.mode_control.items() == sandbox_module.DYNAMICAL_MODE_ORDER,
+          "Coupled: the left pane offers only parameter-plane modes, the right only dynamical")
+    check(left.mode_control.labels() == ["Escape", "Green's", "Cycles", "Period"]
+          and right.mode_control.labels() == ["Escape", "Basins", "Green's"]
+          and not any(m in left.mode_control.labels() + right.mode_control.labels()
+                      for m in sandbox_module.RENDER_MODES),
+          "segments show friendly labels, never the RENDER_MODES ids")
+    check(all(left.mode_control.button(m).toolTip() for m in left.mode_control.items())
+          and left.mode_control.button("parameter_basin").toolTip().startswith("Number of attracting cycles"),
+          "each segment's tooltip gives the full name")
+    reached = set()
+    for pane, frame in ((window.pane, left), (window.pane2, right)):
+        for mode in frame.mode_control.items():
+            frame.mode_control.button(mode).click()
+            if pane.render_mode == mode:
+                reached.add(mode)
+    check(reached == set(sandbox_module.RENDER_MODES),
+          "Coupled: every RENDER_MODES id is reachable by clicking a segment")
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+    check(all(b.sizeHint().width() >= b.fontMetrics().horizontalAdvance(b.text())
+              for f in (left, right) for b in (f.mode_control.button(m) for m in f.mode_control.items())),
+          "no segment label is elided")
+
+    window._set_focused_pane(window.pane)
+    window.coupled_view_action.setChecked(False)
+    check(window.top_bar.view_switch.current() is False, "View > Coupled View off = top bar on Single")
+    check(left.mode_control.items() == sandbox_module.PARAMETER_MODE_ORDER + sandbox_module.DYNAMICAL_MODE_ORDER,
+          "Single: one pane offers every mode, parameter modes then dynamical")
+    reached = set()
+    for mode in left.mode_control.items():
+        left.mode_control.button(mode).click()
+        if window.pane.render_mode == mode:
+            reached.add(mode)
+        check(left.title_label.text() == ("PARAMETER PLANE" if mode in sandbox_module.PARAMETER_PLANE_MODES
+                                          else "DYNAMICAL PLANE"),
+              f"Single: the header follows the mode's plane ({mode})")
+    check(reached == set(sandbox_module.RENDER_MODES),
+          "Single: every RENDER_MODES id is reachable from the one pane's segments")
+    window.top_bar.view_switch.button(True).click()
+    check(window.coupled_view_action.isChecked(), "clicking Coupled in the top bar checks the menu item")
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+
+    print("\nplanes: overlay chips mirror the View menu:")
+    check(left.visible_chip_keys() == [sandbox_module.PARAM_MARKER_TOGGLE_KEY,
+                                       sandbox_module.CROSSHAIR_TOGGLE_KEY],
+          "parameter pane chips: Marker, Crosshair")
+    check(right.visible_chip_keys() == [CRITICAL_POINTS_LAYER_KEY, sandbox_module.CRITICAL_TRACE_KEY,
+                                        sandbox_module.ORBIT_TOGGLE_KEY, sandbox_module.FIXED_POINTS_LAYER_KEY,
+                                        ATTRACTING_CYCLES_LAYER_KEY, CYCLE_TRACE_KEY],
+          "dynamical pane chips: Critical points (+trace), Orbit, Fixed points, Cycles (+trace)")
+    check({k for k, _ in right.chips.items()} == {t.key for t in sandbox_module.overlay_toggles()},
+          "every pane's chips are built from the one overlay_toggles() list")
+    chip = right.chip(CRITICAL_POINTS_LAYER_KEY)
+    trace_chip = right.chip(sandbox_module.CRITICAL_TRACE_KEY)
+    was = window.critical_points_action.isChecked()
+    chip.click()
+    check(window.critical_points_action.isChecked() is (not was)
+          and window.image_view2._layer_enabled[CRITICAL_POINTS_LAYER_KEY] is (not was),
+          "clicking a chip toggles its View-menu action and the overlay")
+    window.critical_points_action.setChecked(False)
+    check(not chip.isChecked() and not trace_chip.isEnabled(),
+          "unchecking the menu item unchecks the chip, and its trace chip is disabled")
+    window.critical_points_action.setChecked(True)
+    check(trace_chip.isEnabled(), "...and re-enabled with its layer")
+    window.critical_points_action.setChecked(was)
+    check(trace_chip.property("secondary") is True, "trace chips are small secondary chips")
+    check(not window.legend_action.isChecked() and not window.image_view._show_legend,
+          "the painted legend is off by default (chips carry the swatches)")
+    crosshair = left.chip(sandbox_module.CROSSHAIR_TOGGLE_KEY)
+    crosshair.click()
+    check(window.image_view.overlay_on(sandbox_module.CROSSHAIR_TOGGLE_KEY)
+          and window.crosshair_action.isChecked(), "the Crosshair chip turns the crosshair on")
+    crosshair.click()
+
+    print("\nplanes: readout chips and the status-bar readout:")
+    window.session.param = complex(-0.1226, 0.7449)
+    chips = window.image_view.readout_chips()
+    check(chips[0] == ("a", "−0.1226 + 0.7449i") and chips[1][1].startswith("×"),
+          "parameter pane readout chips: a and the zoom factor")
+    window.image_view2.clear_orbit()
+    check(window.image_view2.readout_chips() == [], "dynamical pane: no chips until an orbit is seeded")
+    window.image_view2.seed_orbit(complex(0.55, -0.35))
+    window.image_view2.step_orbit(3)
+    chips2 = window.image_view2.readout_chips()
+    check(chips2[0] == ("z₀", "0.5500 − 0.3500i") and chips2[1][1].startswith("n 3"),
+          "dynamical pane readout chips: z0, then n and the orbit's fate")
+    window.image_view2.clear_orbit()
+    center = window.image_view.rect().center()
+    check(window.image_view.cursor_readout_text(center).startswith("a = ")
+          and window.image_view2.cursor_readout_text(center).startswith("z = "),
+          "the status-bar readout says a = on the parameter plane and z = on the dynamical plane")
+
+    print("\nplanes: off-screen parameter marker:")
+    window.image_view.resize(300, 300)
+    vp = window.pane.viewport
+    window.pane.viewport = cdx.Viewport(window.session.param + complex(10 * vp.scale, 0), vp.scale,
+                                        vp.resolution)
+    arrow = window.image_view.offscreen_marker_arrow()
+    check(arrow is not None and abs(arrow[1] - math.pi) < 1e-6,
+          "a marker off the left edge gets an edge arrow pointing left")
+    tip = arrow[0]
+    window.image_view.mousePressEvent(_FakeMouseEvent(tip.toPoint()))
+    check(window.pane.viewport.center == window.session.param
+          and window.image_view.offscreen_marker_arrow() is None,
+          "clicking the arrow re-centers on the marker")
+    window.image_view.mouseReleaseEvent(_FakeMouseEvent(tip.toPoint()))
+    window.pane.viewport = vp
+
+    print("\nplanes: export legend option:")
+    dialog = sandbox_module.ExportImageDialog(window.session, window.pane, window)
+    check(not dialog._legend_checkbox.isChecked(), "the export dialog offers Legend, off like the view")
+    dialog._legend_checkbox.setChecked(True)
+    check(dialog.overlay_flags().get("show_legend") is True, "checking it adds the legend to the export")
+    dialog.close()
 
     # ---- Info tab: generated, last, and extended by module panels --------------------
     print("\nInfo tab:")

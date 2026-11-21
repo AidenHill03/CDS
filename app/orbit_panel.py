@@ -86,8 +86,9 @@ class OrbitPanel(QWidget):
     def _refresh(self) -> None:
         tracker = self.image_view.orbit_tracker
         if tracker.state is None:
-            self._readout_label.setText("Click the image (dynamical-plane modes only) to seed "
-                                        "an orbit.")
+            # No orbit yet: say nothing here -- the status bar's pane hint
+            # already says what a click on each plane does.
+            self._readout_label.setText("")
             return
         classification = tracker.classify(self.session.map, self.session.param,
                                           self.session.render_settings.max_iter,

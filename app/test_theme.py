@@ -24,7 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 # Hex color literals ("#abc", "#a1b2c3", "#aa112233") and CSS color functions.
 _HEX = re.compile(r"#[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{2})?)?\b")
-_CSS_FN = re.compile(r"\brgba?\(")
+_CSS_FN = re.compile(r"(?<![\w.])rgba?\(")
 
 
 def check(cond: bool, what: str) -> None:

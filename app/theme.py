@@ -44,6 +44,19 @@ class Tokens:
     error: str           # inline validation text
     on_amber: str        # text on the amber primary button
     overlay: str         # readout-chip background painted over an image (#AARRGGBB)
+    # Marks painted on the planes (and into exported images).
+    mark_point: str      # critical points
+    mark_trace: str      # traced critical orbits (#AARRGGBB)
+    mark_outline: str    # outline around every marker
+    mark_orbit: str      # the seeded orbit and its seed
+    mark_param: str      # the parameter marker and its crosshair
+    fixed_attracting: str
+    fixed_repelling: str
+    fixed_neutral: str
+    cycle_strong: str    # superattracting end of the cycle gradient
+    cycle_weak: str      # |multiplier| -> 1 end
+    legend_bg: str       # the optional painted legend (#AARRGGBB)
+    legend_text: str
 
 
 DARK = Tokens(
@@ -62,6 +75,18 @@ DARK = Tokens(
     error="#FF7A6B",
     on_amber="#1A1206",
     overlay="#D10F1418",          # bg at 82 % opacity
+    mark_point="#FFFFFF",
+    mark_trace="#A0FFFFFF",
+    mark_outline="#000000",
+    mark_orbit="#FFBE5A",
+    mark_param="#FFBE5A",
+    fixed_attracting="#3CC83C",
+    fixed_repelling="#DC3C3C",
+    fixed_neutral="#E6C828",
+    cycle_strong="#FF00FF",
+    cycle_weak="#8C8CFF",
+    legend_bg="#BE141414",
+    legend_text="#E6E6E6",
 )
 
 THEMES: dict[str, Tokens] = {"dark": DARK}
@@ -116,6 +141,12 @@ def color(name: str, tokens: Tokens | None = None) -> QColor:
     """A token as a QColor, for code that paints (ImageView, chips' swatches)."""
     value = getattr(tokens or current, name)
     return QColor(value)
+
+
+def rgba(name: str, alpha: int | None = None, tokens: Tokens | None = None) -> tuple[int, int, int, int]:
+    """A token as an (r, g, b, a) tuple -- the overlay code's color type."""
+    c = color(name, tokens)
+    return (c.red(), c.green(), c.blue(), c.alpha() if alpha is None else alpha)
 
 
 def mix(a: str, b: str, t: float) -> QColor:
@@ -247,8 +278,11 @@ QDockWidget::title {{
 }}
 
 /* ---- planes ---- */
-QWidget[role="paneColumn"] {{ border: 1px solid transparent; border-radius: {RADIUS_FRAME}px; }}
-QWidget[role="paneColumn"][focused="true"] {{ border: 1px solid {c('teal')}; }}
+QFrame[role="planeFrame"] {{
+    background: {c('bg')}; border: 1px solid {c('border')}; border-radius: {RADIUS_FRAME}px;
+}}
+QFrame[role="planeFrame"][focused="true"] {{ border: 1px solid {c('teal')}; }}
+QLabel[role="segmentGroup"] {{ color: {c('muted')}; font-size: {FONT_SIZE_CAPTION}px; padding: 0 4px 0 8px; }}
 
 /* ---- text roles ---- */
 QLabel[role="muted"], QLabel[role="caption"] {{ color: {c('muted')}; }}
