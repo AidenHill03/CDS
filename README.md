@@ -3,7 +3,7 @@
 A rational-map dynamics sandbox, on the Riemann sphere throughout. Explore
 Julia sets, parameter planes, basins of attraction, and Green's-function
 potentials for a built-in family (Mandelbrot, multibrot, McMullen, Newton)
-or a custom rational map you build term-by-term — poles and all.
+or a custom rational map you build term-by-term.
 
 Built to eventually support the simultaneous-approximation construction
 (Fisher–Hill–Lazebnik–Thompson) this sandbox exists for in the first
