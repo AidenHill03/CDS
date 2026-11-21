@@ -15,8 +15,8 @@ re-parsed on every keystroke (cdx.parse_rational_parameters) purely to (a)
 mark the field red with the parser's own message on invalid syntax and
 (b) keep the parameter UI (which one is active, fixed values for the
 rest) in sync with whatever parameters the CURRENT text actually
-references -- but session.map itself is untouched until "Apply" is
-clicked. Unlike the old term editor's per-edit auto-apply (numeric field
+references -- but session.map itself is untouched until Return is
+pressed in the formula field (the UI redesign removed the Apply button). Unlike the old term editor's per-edit auto-apply (numeric field
 edits are always complete/valid the instant they're typed), a formula is
 usually SYNTACTICALLY INCOMPLETE for most of the time it's being typed
 ("z^2 + ", "z^2 + a" one character at a time), and building a full map
@@ -25,9 +25,11 @@ text field, not just valid syntax -- so this follows the Settings tab's
 explicit-Apply pattern, not the old term editor's live-apply one.
 
 PARAMETER UI. cdx.parse_rational_parameters(text) is the SAME parameter
-list from_expression itself derives; this panel shows it as an "Active"
-combo box (auto-selected when there is exactly one) plus one ComplexField
-per OTHER parameter, for its fixed substitution value -- see cdx.
+list from_expression itself derives; this panel shows it as a table:
+name | value | "on plane" radio. The radio picks the ACTIVE parameter (the
+one the parameter plane sweeps; auto-selected when there is exactly one),
+whose value field is the window's own `a` field (set_active_field); every
+OTHER parameter gets a ComplexField for its fixed substitution value -- see cdx.
 RationalMap.from_expression's own doc comment for exactly what "active"
 and "fixed" mean. Rebuilt whenever the parsed parameter list changes,
 preserving already-entered values for names that persist across the edit.
@@ -54,11 +56,11 @@ lines), so this needed no changes to keep working across the P/Q switch.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QRadioButton, QVBoxLayout, QWidget)
 
 import cdx
-from app import theme
+from app import controls, theme
 from app.complex_field import ComplexField
 
 
@@ -77,82 +79,148 @@ class EquationPanel(QWidget):
 
     # ---- construction ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        # Two columns (mockup B): the formula on the left, the parameter
+        # table on the right; they stack when the dock is narrow.
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(24)
 
+        left = QVBoxLayout()
+        left.setSpacing(6)
         eq_row = QHBoxLayout()
-        eq_row.addWidget(QLabel("f(z) ="))
+        fz = QLabel("f(z) =")
+        fz.setProperty("mono", True)
+        eq_row.addWidget(fz)
         self._formula_edit = QLineEdit()
+        self._formula_edit.setProperty("mono", True)
+        self._formula_edit.setAccessibleName("f(z)")
         self._formula_edit.textChanged.connect(self._on_formula_text_changed)
+        # Return applies (the field validates live; Return commits).
+        self._formula_edit.returnPressed.connect(self._apply)
         eq_row.addWidget(self._formula_edit, 1)
-        layout.addLayout(eq_row)
+        left.addLayout(eq_row)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
         self._error_label.setProperty("role", "error")
-        layout.addWidget(self._error_label)
+        left.addWidget(self._error_label)
 
-        param_box = QGroupBox("Parameters")
-        param_layout = QVBoxLayout(param_box)
+        undo_text = controls.key_sequence_label(controls.key_sequences("app.undo")[0])
+        self._hint_label = QLabel(f"Press Return to apply · {undo_text} undoes")
+        self._hint_label.setProperty("role", "caption")
+        left.addWidget(self._hint_label)
 
-        active_row = QHBoxLayout()
-        active_row.addWidget(QLabel("Active:"))
-        self._active_combo = QComboBox()
-        self._active_combo.currentTextChanged.connect(self._on_active_param_changed)
-        active_row.addWidget(self._active_combo)
-        active_row.addStretch(1)
-        param_layout.addLayout(active_row)
-
-        # Rebuilt on every parameter-list/active-selection change (see
-        # _rebuild_fixed_param_fields) -- one ComplexField per non-active
-        # parameter, added directly to this layout rather than into a
-        # separate nested container widget, since there is nothing else
-        # sharing this space that would need to be told apart from it.
-        self._fixed_params_layout = QVBoxLayout()
-        param_layout.addLayout(self._fixed_params_layout)
-
-        layout.addWidget(param_box)
-
-        apply_row = QHBoxLayout()
-        self._apply_button = QPushButton("Apply")
-        self._apply_button.clicked.connect(self._apply)
-        apply_row.addWidget(self._apply_button)
-        apply_row.addStretch(1)
-        layout.addLayout(apply_row)
-
-        pz_box = QGroupBox("Add Pole / Zero (forward root -> factor on the current P/Q)")
-        pz_layout = QVBoxLayout(pz_box)
-
-        pole_row = QHBoxLayout()
-        self._pole_field = ComplexField("Pole at:", 0j)
-        pole_row.addWidget(self._pole_field)
-        add_pole_btn = QPushButton("Add Pole")
+        # Add pole / Add zero: one compact row, plus Undo/Redo.
+        pz_row = QHBoxLayout()
+        pz_row.setSpacing(6)
+        self._pole_field = ComplexField("", 0j)
+        self._pole_field.setToolTip("Multiply the current map by a pole at this point")
+        add_pole_btn = QPushButton("Add pole")
+        add_pole_btn.setToolTip("Add a pole at the point on the left (forward root -> factor on P/Q)")
         add_pole_btn.clicked.connect(self._add_pole)
-        pole_row.addWidget(add_pole_btn)
-        pole_row.addStretch(1)
-        pz_layout.addLayout(pole_row)
-
-        zero_row = QHBoxLayout()
-        self._zero_field = ComplexField("Zero at:", 0j)
-        zero_row.addWidget(self._zero_field)
-        add_zero_btn = QPushButton("Add Zero")
+        self._zero_field = ComplexField("", 0j)
+        add_zero_btn = QPushButton("Add zero")
+        add_zero_btn.setToolTip("Add a zero at the point on the left")
         add_zero_btn.clicked.connect(self._add_zero)
-        zero_row.addWidget(add_zero_btn)
-        zero_row.addStretch(1)
-        pz_layout.addLayout(zero_row)
-
-        layout.addWidget(pz_box)
-
-        undo_row = QHBoxLayout()
+        for w in (self._pole_field, add_pole_btn, self._zero_field, add_zero_btn):
+            pz_row.addWidget(w)
+        pz_row.addSpacing(12)
         self._undo_button = QPushButton("Undo")
         self._undo_button.clicked.connect(self._undo)
         self._redo_button = QPushButton("Redo")
         self._redo_button.clicked.connect(self._redo)
-        undo_row.addWidget(self._undo_button)
-        undo_row.addWidget(self._redo_button)
-        undo_row.addStretch(1)
-        layout.addLayout(undo_row)
+        pz_row.addWidget(self._undo_button)
+        pz_row.addWidget(self._redo_button)
+        pz_row.addStretch(1)
+        left.addLayout(pz_row)
+        left.addStretch(1)
+        outer.addLayout(left, 3)
 
-        layout.addStretch(1)
+        right = QVBoxLayout()
+        right.setSpacing(6)
+        self._param_grid = QGridLayout()
+        self._param_grid.setHorizontalSpacing(10)
+        self._param_grid.setVerticalSpacing(6)
+        right.addLayout(self._param_grid)
+        right.addStretch(1)
+        outer.addLayout(right, 2)
+
+        # Which parameter the parameter plane sweeps: the model behind the
+        # table's "on plane" radios (kept as a combo so the selection logic
+        # below is unchanged; never shown).
+        self._active_combo = QComboBox(self)
+        self._active_combo.hide()
+        self._active_combo.currentTextChanged.connect(self._on_active_param_changed)
+        self._plane_group = QButtonGroup(self)
+        self._plane_group.setExclusive(True)
+        self._plane_group.buttonClicked.connect(
+            lambda b: self._active_combo.setCurrentText(b.property("paramName")))
+        self._active_field: QWidget | None = None
+        self._table_widgets: list[QWidget] = []
+
+    def set_active_field(self, field: QWidget) -> None:
+        """The value field for the ACTIVE parameter -- the window's own `a`
+        field (kept in sync with clicks and nudges on the plane)."""
+        self._active_field = field
+        self._rebuild_param_table()
+
+    def _rebuild_param_table(self) -> None:
+        keep = set(self._param_fields.values()) | {self._active_field}
+        for w in self._table_widgets:
+            self._param_grid.removeWidget(w)
+            if w not in keep:
+                w.hide()
+                w.deleteLater()
+        self._table_widgets = []
+        if self._active_field is not None:
+            self._param_grid.removeWidget(self._active_field)
+        for b in list(self._plane_group.buttons()):
+            self._plane_group.removeButton(b)
+
+        def add(widget, row, col):
+            self._param_grid.addWidget(widget, row, col)
+            if widget is not self._active_field:
+                self._table_widgets.append(widget)
+
+        header_param = QLabel("Parameter")
+        header_plane = QLabel("On plane")
+        for h in (header_param, header_plane):
+            h.setProperty("role", "caption")
+        add(header_param, 0, 0)
+        add(header_plane, 0, 2)
+        if not self._current_params:
+            none = QLabel("This map has no parameters.")
+            none.setProperty("role", "muted")
+            add(none, 1, 0)
+            if self._active_field is not None:
+                self._active_field.hide()
+            return
+        active = self._active_combo.currentText()
+        for row, name in enumerate(self._current_params, start=1):
+            label = QLabel(name)
+            label.setProperty("mono", True)
+            label.setProperty("role", "paramName")
+            theme.set_property(label, "active", name == active)
+            add(label, row, 0)
+            if name == active:
+                field = self._active_field
+                if field is not None:
+                    field.show()
+                    self._param_grid.addWidget(field, row, 1)
+                else:
+                    field = QLabel("(set on the plane)")
+                    field.setProperty("role", "muted")
+                    add(field, row, 1)
+            else:
+                field = self._param_fields[name]
+                add(field, row, 1)
+            radio = QRadioButton("Parameter plane")
+            radio.setProperty("paramName", name)
+            radio.setChecked(name == active)
+            radio.setToolTip(f"Sweep {name} across the parameter plane")
+            self._plane_group.addButton(radio)
+            add(radio, row, 2)
+        self._param_grid.setColumnStretch(1, 1)
 
     # ---- external resync: session.map was replaced wholesale (e.g. a family load) ------
     def refresh_from_session(self) -> None:
@@ -214,19 +282,20 @@ class EquationPanel(QWidget):
         self._rebuild_fixed_param_fields(fixed)
 
     def _rebuild_fixed_param_fields(self, fixed: dict[str, complex]) -> None:
-        while self._fixed_params_layout.count():
-            item = self._fixed_params_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        for field in self._param_fields.values():
+            if field in self._table_widgets:
+                self._table_widgets.remove(field)
+            self._param_grid.removeWidget(field)
+            field.deleteLater()
         self._param_fields = {}
         active = self._active_combo.currentText() if self._current_params else ""
         for name in self._current_params:
             if name == active:
                 continue
-            field = ComplexField(f"{name} =", fixed.get(name, 0j))
+            field = ComplexField("", fixed.get(name, 0j))
+            field.setToolTip(f"The fixed value of {name}")
             self._param_fields[name] = field
-            self._fixed_params_layout.addWidget(field)
+        self._rebuild_param_table()
 
     # ---- live validation: syntax + parameter list, NOT applied to session.map ----------
     def _on_formula_text_changed(self, text: str) -> None:

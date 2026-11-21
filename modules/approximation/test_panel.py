@@ -120,7 +120,8 @@ def main():
     window = SandboxWindow()
     widget, title = make_panel(window)
     index = window.add_panel(widget, title)
-    check(window.workspaces.widget(index) is widget and window._workspace_keys.get("approximation") is widget
+    check(window.workspace_widget("approximation") is widget
+          and window.workspaces.indexOf(window._workspace_keys["approximation"]) == index
           and not window.top_bar.workspace_switch.isHidden()
           and window.top_bar.workspace_switch.labels() == ["Explore", "Approximation"],
           "make_panel + add_panel register Approximation as a workspace next to Explore")

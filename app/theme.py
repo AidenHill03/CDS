@@ -309,6 +309,7 @@ QLabel[mono="true"], QLineEdit[mono="true"], QTableWidget[mono="true"] {{
     font-family: "{FONT_MONO}";
 }}
 QLabel[role="empty"] {{ color: {c('muted')}; }}
+QLabel[role="paramName"][active="true"] {{ color: {c('amber')}; }}
 QLabel[role="loadedDot"] {{ color: {c('teal')}; font-size: 9px; }}
 QListWidget::item {{ border-radius: {RADIUS_CONTROL}px; margin: 1px 0; }}
 QListWidget::item:selected {{ background: {c('control_on')}; }}

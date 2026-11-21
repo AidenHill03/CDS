@@ -20,9 +20,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QFrame, QHBoxLayout, QLabel, QLayout,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                                QTabBar,
                                QToolButton, QVBoxLayout, QWidget)
@@ -30,6 +30,69 @@ from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QFrame, QHBoxLayout, Q
 from app import theme
 
 QWIDGETSIZE_MAX = (1 << 24) - 1
+
+
+# ---- flow layout ---------------------------------------------------------------------------------
+class FlowLayout(QLayout):
+    """Left-to-right, wrapping to a new row when out of width (Qt's flow-layout example)."""
+
+    def __init__(self, parent: QWidget | None = None, spacing: int = 6):
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, apply=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _do_layout(self, rect: QRect, apply: bool) -> int:
+        x, y, line_h = rect.x(), rect.y(), 0
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue
+            hint = item.sizeHint()
+            if x + hint.width() > rect.right() + 1 and line_h > 0:
+                x = rect.x()
+                y += line_h + self._spacing
+                line_h = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._spacing
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
 
 
 # ---- segmented control ----------------------------------------------------------------

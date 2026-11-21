@@ -1666,19 +1666,16 @@ def main() -> None:
           "'Settings...' is a plain triggerable action, opening a dialog, not a toggle")
     check(window.settings_action.menuRole() == QAction.MenuRole.PreferencesRole,
           "its MenuRole is PreferencesRole, so macOS relocates it into the app menu (Cmd+,)")
-    check(window.settings_dialog.isModal() is False,
-          "the dialog is NON-modal -- Apply, see the re-render, and adjust again all without "
-          "closing it")
-    check(window.settings_panel.parent() is window.settings_dialog,
-          "the Settings dialog holds the actual SettingsPanel instance")
-    check(not window.settings_dialog.isVisible(), "the dialog starts hidden, not shown at launch")
-
-    window._on_open_settings()
-    check(window.settings_dialog.isVisible(), "triggering 'Settings...' shows the dialog")
-    reopened_dialog = window.settings_dialog
-    window._on_open_settings()
-    check(window.settings_dialog is reopened_dialog,
-          "triggering it again re-shows the SAME dialog instance, not a second stacked one")
+    check(not hasattr(window, "settings_dialog"), "there is no Settings dialog any more")
+    window.settings_dock.set_current_widget(window.equation_tab)
+    window.settings_dock.hide()
+    window.settings_action.trigger()
+    check(not window.settings_dock.isHidden()
+          and window.settings_dock.current_widget() is window.rendering_tab,
+          "'Settings...' (Cmd+, / Ctrl+,) opens the dock on the Rendering tab")
+    check(window.rendering_tab is window.rendering_panel and window.coloring_tab is window.coloring_panel
+          and window.settings_panel is window.rendering_panel,
+          "the Rendering and Coloring tabs are live SettingsPanels")
 
     window.pane.viewport = cdx.Viewport(complex(0, 0), 1.5, 60)
     window._start_render(window.pane)
@@ -1690,7 +1687,7 @@ def main() -> None:
     window.settings_panel._apply()
 
     check(window.pane.viewport.resolution == new_resolution,
-          "Apply THROUGH THE DIALOG still updates the pane's viewport resolution")
+          "applying from the Rendering tab updates the pane's viewport resolution")
     check(window.session.render_settings.threads == 1,
           "Apply updates the session's render_settings too, not just resolution")
 
@@ -1698,7 +1695,7 @@ def main() -> None:
                  and window.image_view._buffer_viewport.resolution == round(new_resolution * 1.3),
                  timeout_ms=10000)
     check(ok, "Apply triggers an immediate re-render at the NEW resolution -- not the debounce, "
-          "and not the old one -- exactly as it did as a tab")
+          "and not the old one")
 
     # ---- mode selector: switching modes reaches the session and re-renders ------------
     print("\nmode selector:")
@@ -2655,7 +2652,8 @@ def main() -> None:
           and switch.labels() == ["Explore", "Bench"] and switch.current() == "explore",
           'placement="workspace" adds a workspace and shows the Explore | Bench switch')
     switch.button("bench").click()
-    check(window.workspaces.currentWidget() is ws and window.current_workspace() == "bench",
+    check(window.workspace_widget("bench") is ws and window.current_workspace() == "bench"
+          and window.workspaces.currentWidget() is window._workspace_keys["bench"],
           "clicking the switch shows that workspace")
     window.show_workspace("explore")
     check(window.workspaces.currentWidget() is window.explore_workspace
@@ -3276,6 +3274,84 @@ def main() -> None:
           and any(k.startswith("Orbit of") for k in rows),
           "Info's This map section: degree, critical points (∞ included), each critical orbit's fate")
     check("This map" in window.info_panel.toPlainText(), "...shown after the controls")
+
+    # ---- UI redesign, Step 5: dock tabs --------------------------------------------------
+    print("\ndock: Equation tab (Return applies, inline errors, parameter table):")
+    eq = window.equation_panel
+    lib._select_by_name("mandelbrot")
+    lib._load_selected()
+    window.settings_dock.reveal(window.equation_tab)
+    eq._formula_edit.setText("z^2 + a + 0.25")
+    QTest.keyClick(eq._formula_edit, Qt.Key.Key_Return)
+    check(window.session.map.to_formula().replace(" ", "").startswith("z^2")
+          and "0.25" in window.session.map.to_formula(),
+          "Return in the f(z) field applies the formula")
+    eq._formula_edit.setText("z^2 + (")
+    check(eq._error_label.text() != "" and eq._formula_edit.property("invalid") is True,
+          "a parse error shows as error text under the field (and an error border, no pink fill)")
+    eq._formula_edit.setText("z^2 + a")
+    check(eq._error_label.text() == "" and not eq._formula_edit.property("invalid"),
+          "...and clears as soon as the text parses")
+    QTest.keyClick(eq._formula_edit, Qt.Key.Key_Return)
+    check(window.param_field.parent() is not None and eq.isAncestorOf(window.param_field),
+          "the active parameter's value field (the old toolbar a =) sits in the parameter table")
+    radios = eq._plane_group.buttons()
+    check(len(radios) == 1 and radios[0].isChecked() and radios[0].property("paramName") == "a",
+          "one row per parameter, with its 'on plane' radio checked for the active one")
+
+    print("\ndock: the active-parameter field and the plane marker stay in sync:")
+    window.mode_combo.setCurrentText("parameter")
+    window.mode_combo2.setCurrentText("julia")
+    window.param_field._line_edit.setText("-0.12+0.75i")
+    window.param_field._on_editing_finished()
+    check(window.session.param == complex(-0.12, 0.75)
+          and window.image_view.readout_chips()[0][1] == "−0.1200 + 0.7500i",
+          "typing a value moves the marker (and its readout chip)")
+    window.image_view.resize(300, 300)
+    target = window.image_view._complex_to_display_pixel(complex(-0.5, 0.25)).toPoint()
+    window.image_view.mousePressEvent(_FakeMouseEvent(target))
+    window.image_view.mouseReleaseEvent(_FakeMouseEvent(target))
+    check(abs(window.param_field.value - window.session.param) < 1e-12
+          and abs(window.session.param - complex(-0.5, 0.25)) < 0.05,
+          "clicking the parameter plane updates the field")
+    before = window.session.param
+    window.image_view._held_arrows = {1 + 0j}
+    window.image_view._do_nudge()
+    window.image_view._held_arrows = set()
+    check(window.session.param != before and window.param_field.value == window.session.param,
+          "an arrow nudge on the plane updates the field too")
+
+    print("\ndock: Rendering/Coloring apply live, one debounced re-render:")
+    started: list = []
+    real_start = window._start_render
+    window._start_render = lambda pane: (started.append(pane), real_start(pane))[1]
+    rp = window.rendering_panel
+    rp._widgets["max_iter"].setValue(window.session.settings.max_iter + 1)
+    rp._widgets["max_iter"].setValue(window.session.settings.max_iter + 2)
+    window.coloring_panel._widgets["color_period"].setValue(3.0)
+    check(started == [], "nothing renders while the user is still editing")
+    QTest.qWait(sandbox_module.SETTINGS_APPLY_DEBOUNCE_MS + 200)
+    check(sorted(map(id, started)) == sorted(map(id, window.panes)),
+          "after the pause: exactly one re-render per pane for the Rendering and Coloring edits together")
+    started.clear()
+    QTest.qWait(sandbox_module.SETTINGS_APPLY_DEBOUNCE_MS + 200)
+    check(started == [], "...and nothing more once applied")
+    window._start_render = real_start
+    rp._widgets["escape_radius"].setValue(0.0)
+    rp._apply()
+    check("escape_radius" in rp.errors() and window.session.settings.escape_radius > 0,
+          "an invalid Rendering value shows inline and is not applied")
+    rp._widgets["escape_radius"].setValue(2.0)
+    rp._apply()
+    check(rp.errors() == {}, "...and the error clears once fixed")
+
+    print("\ndock: Orbit tab:")
+    check(window.orbit_tab.isAncestorOf(window.z0_field) and window.orbit_tab.isAncestorOf(window.orbit_panel),
+          "the Orbit tab holds the z0 field and the Step / Run N / Clear controls")
+    window.connect_lines_checkbox.setChecked(False)
+    check(not window.orbit_connect_lines_action.isChecked(), "Connect orbit points: the checkbox drives the menu item")
+    window.orbit_connect_lines_action.setChecked(True)
+    check(window.connect_lines_checkbox.isChecked(), "...and the menu item drives the checkbox")
 
     # ---- Info tab: generated, last, and extended by module panels --------------------
     print("\nInfo tab:")

@@ -1,13 +1,14 @@
 """app/sandbox.py -- P5a/P5b: the interactive window.
 
-Single window, driven by app.session.Session, with tabs: the image pane
-(render pipeline: threaded, progressive, cursor-anchored zoom, overscan
-buffer, correct orientation), an equation-authoring panel over the P/Q
-model (app/equation_panel.py), a read-only dynamical-facts panel
-(app/facts_panel.py), and a family library (app/library_panel.py).
-Render/cache configuration (app/settings_panel.py) lives outside the tab
-strip, in a non-modal dialog opened from File > Settings... (see
-SandboxWindow._build_settings_dialog).
+Single window, driven by app.session.Session (UI redesign layout): a top
+bar (map chip, workspace switch, Coupled | Single, render status, Reset
+view, Export); the Explore workspace -- the parameter and dynamical planes
+side by side (render pipeline: threaded, progressive, cursor-anchored zoom,
+overscan buffer, correct orientation); a right sidebar dock (Info,
+Library -- app/library_panel.py, Facts -- app/facts_panel.py); and a bottom
+"Equations & Settings" dock (Equation -- app/equation_panel.py, Rendering
+and Coloring -- app/settings_panel.py, applied live, and Orbit). Research
+modules add workspaces or tabs through SandboxWindow.add_panel.
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -34,7 +35,8 @@ from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF
                             Slot)
 from PySide6.QtGui import (QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPolygonF)
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QFrame,
+                               QScrollArea,
                                QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
                                QSplitter, QStackedWidget, QTabWidget, QTextEdit, QToolBar,
@@ -61,7 +63,8 @@ from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_S
                          render_map)
 from app.settings import (Settings, library_path, load_settings, preview_path_for,
                           previews_dir, save_settings)
-from app.settings_panel import SettingsPanel
+from app.settings_panel import (COLORING_GROUPS, RENDERING_GROUPS, SETTINGS_APPLY_DEBOUNCE_MS,
+                                SettingsPanel)
 from app.version import PRODUCT_NAME
 from app.plane_frame import PlaneFrame
 from app.widgets import Segment, TabbedDock, TopBar
@@ -3043,9 +3046,11 @@ class SandboxWindow(QMainWindow):
         # `a` sits on the Equation tab (it is the active parameter's value) and
         # z0 on the Orbit tab; each stays in sync with clicks in the planes
         # (see _apply_param_change and _on_orbit_changed).
-        self.param_field = ComplexField("a =", self.session.param, self)
+        self.param_field = ComplexField("", self.session.param, self)
+        self.param_field.setAccessibleName("Value of the active parameter")
         self.param_field.committed.connect(self._on_param_field_committed)
-        self.z0_field = ComplexField("z₀ =", complex(0, 0), self)
+        self.z0_field = ComplexField("", complex(0, 0), self)
+        self.z0_field.setAccessibleName("Orbit seed z0")
         self.z0_field.committed.connect(self._on_z0_field_committed)
 
         # ---- sidebar (right dock): Info | Library | Facts ----------------------------
@@ -3073,18 +3078,47 @@ class SandboxWindow(QMainWindow):
         self.settings_dock = TabbedDock("Equations & Settings", "SettingsDock", "bottom", self,
                                         heading="Equations & Settings")
         self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
+        # The active parameter's value field IS the old toolbar `a =` field.
+        self.equation_panel.set_active_field(self.param_field)
         self.equation_tab = QWidget(self)
         eq_layout = QVBoxLayout(self.equation_tab)
         eq_layout.setContentsMargins(18, 12, 18, 12)
-        eq_layout.addWidget(self.param_field)
         eq_layout.addWidget(self.equation_panel, 1)
-        self.rendering_tab = self._placeholder_tab("Rendering settings are still in File ▸ Settings…")
-        self.coloring_tab = self._placeholder_tab("Coloring settings are still in File ▸ Settings…")
+        # Rendering and Coloring apply live (debounced); there is no dialog.
+        # One shared pause-then-apply for both tabs, and one coalesced
+        # re-render for whatever they applied together.
+        self._settings_apply_timer = QTimer(self)
+        self._settings_apply_timer.setSingleShot(True)
+        self._settings_apply_timer.setInterval(SETTINGS_APPLY_DEBOUNCE_MS)
+        self._settings_render_timer = QTimer(self)
+        self._settings_render_timer.setSingleShot(True)
+        self._settings_render_timer.setInterval(0)
+        self._settings_render_timer.timeout.connect(self._render_after_settings)
+        self.rendering_panel = SettingsPanel(self.session, self._on_settings_applied, self,
+                                             groups=RENDERING_GROUPS,
+                                             schedule_apply=self._settings_apply_timer.start)
+        self.coloring_panel = SettingsPanel(self.session, self._on_settings_applied, self,
+                                            groups=COLORING_GROUPS,
+                                            schedule_apply=self._settings_apply_timer.start)
+        self._settings_apply_timer.timeout.connect(self.rendering_panel.apply_pending)
+        self._settings_apply_timer.timeout.connect(self.coloring_panel.apply_pending)
+        self.settings_panel = self.rendering_panel   # old name
+        self.rendering_tab, self.coloring_tab = self.rendering_panel, self.coloring_panel
         self.orbit_tab = QWidget(self)
         orbit_layout = QVBoxLayout(self.orbit_tab)
         orbit_layout.setContentsMargins(18, 12, 18, 12)
-        orbit_layout.addWidget(self.z0_field)
+        orbit_layout.setSpacing(8)
+        z0_row = QHBoxLayout()
+        z0_label = QLabel("z₀ =")
+        z0_label.setProperty("mono", True)
+        z0_row.addWidget(z0_label)
+        z0_row.addWidget(self.z0_field, 1)
+        z0_row.addStretch(2)
+        orbit_layout.addLayout(z0_row)
         orbit_layout.addWidget(self.orbit_panel)
+        self.connect_lines_checkbox = QCheckBox("Connect orbit points", self)
+        self.connect_lines_checkbox.setChecked(True)
+        orbit_layout.addWidget(self.connect_lines_checkbox)
         orbit_layout.addStretch(1)
         self.settings_dock.add_tab(self.equation_tab, "Equation", "The map f(z) and its parameters")
         self.settings_dock.add_tab(self.rendering_tab, "Rendering", "Resolution, iterations, threads, cache")
@@ -3094,8 +3128,6 @@ class SandboxWindow(QMainWindow):
         # Bottom dock spans the full width under the planes AND the sidebar.
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
-
-        self._build_settings_dialog()
 
         # ---- top bar (replaces the old toolbar) ---------------------------------------
         self.top_bar = TopBar(self)
@@ -3154,9 +3186,8 @@ class SandboxWindow(QMainWindow):
         self.export_facts_action.triggered.connect(self._on_export_facts)
         self.file_menu.addSeparator()
 
-        # Settings (Stage 5): opens self.settings_dialog (built by
-        # _build_settings_dialog, called just above) rather than a tab --
-        # see that method's own docstring. PreferencesRole is what makes
+        # Settings: shows the dock's Rendering tab (_on_open_settings).
+        # PreferencesRole is what makes
         # Qt relocate this out of File and into the app menu on macOS
         # (Cmd+,) regardless of where it's added in code; File is just
         # where it lives on platforms that don't do that relocation.
@@ -3238,6 +3269,9 @@ class SandboxWindow(QMainWindow):
         self.orbit_connect_lines_action.setChecked(True)
         self.orbit_connect_lines_action.toggled.connect(self.image_view.set_orbit_connect_lines)
         self.orbit_connect_lines_action.toggled.connect(self.image_view2.set_orbit_connect_lines)
+        # The Orbit tab's checkbox and this menu item are one setting.
+        self.orbit_connect_lines_action.toggled.connect(self.connect_lines_checkbox.setChecked)
+        self.connect_lines_checkbox.toggled.connect(self.orbit_connect_lines_action.setChecked)
         self.view_menu.addSeparator()
 
         # Legend (Stage 3) -- menu-only, like Fixed Points/Attracting Cycles/
@@ -3313,40 +3347,10 @@ class SandboxWindow(QMainWindow):
         self._sync_mode_controls()
         self._sync_orbit_panel()
 
-    def _build_settings_dialog(self) -> None:
-        """Settings (Stage 5) lives in a NON-MODAL dialog opened from a
-        menu action, not a tab -- unlike View/Terms/Facts/Library,
-        adjusting render/cache settings is an occasional, deliberate
-        action, not something worth a permanently-visible tab slot; a
-        dialog you can leave open WHILE looking at the re-rendered image
-        (Apply -> see the result -> adjust, without closing anything) is
-        also a more natural fit for that workflow than switching tabs back
-        and forth would be. Built ONCE here (not per-open) and stored on
-        self.settings_dialog -- the same GC-safety reason help_menu/
-        about_action are stored on self (see that comment): a local-only
-        QDialog would be eligible for Python to collect the moment
-        _build_ui returns, and re-showing it via .show() after that garbage
-        collection would just no-op invisibly instead of raising an
-        obvious error. _on_open_settings re-shows this SAME instance on
-        every trigger, never constructing a second one -- multiple Settings
-        windows stacking up would be its own bug, not a feature.
-
-        SettingsPanel itself is UNCHANGED (Apply -> Session.apply_settings/
-        per-pane resolution/save_settings/immediate re-render, all still
-        exactly _on_settings_applied's own job) -- it doesn't know or care
-        whether its parent is a QTabWidget page or a QDialog.
-        """
-        self.settings_dialog = QDialog(self)
-        self.settings_dialog.setWindowTitle("Settings")
-        dialog_layout = QVBoxLayout(self.settings_dialog)
-        self.settings_panel = SettingsPanel(self.session, self._on_settings_applied,
-                                            self.settings_dialog)
-        dialog_layout.addWidget(self.settings_panel)
-
     def _on_open_settings(self) -> None:
-        self.settings_dialog.show()
-        self.settings_dialog.raise_()
-        self.settings_dialog.activateWindow()
+        """File > Settings... / Cmd+, / Ctrl+,: the Rendering tab of the dock
+        (there is no Settings dialog any more)."""
+        self.settings_dock.reveal(self.rendering_tab)
 
     def _build_view_menu_layer_actions(self) -> None:
         """One checkable QAction per overlay switch (overlay_toggles(): every
@@ -3858,6 +3862,11 @@ class SandboxWindow(QMainWindow):
             pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
+        # Coalesced: Rendering and Coloring applying in the same pause
+        # produce ONE re-render per pane, not one each.
+        self._settings_render_timer.start()
+
+    def _render_after_settings(self) -> None:
         for pane in self.panes:
             self._debounce_timers[pane].stop()
             self._start_render(pane)
@@ -3919,6 +3928,11 @@ class SandboxWindow(QMainWindow):
         self.top_bar.workspace_switch.set_current(key)
         self._on_workspace_changed(key)
 
+    def workspace_widget(self, key: str) -> QWidget | None:
+        """The widget a workspace shows (a module's own panel, not its scroll area)."""
+        page = self._workspace_keys.get(key)
+        return page.widget() if isinstance(page, QScrollArea) else page
+
     def current_workspace(self) -> str:
         current = self.workspaces.currentWidget()
         return next(k for k, w in self._workspace_keys.items() if w is current)
@@ -3959,9 +3973,15 @@ class SandboxWindow(QMainWindow):
         self._extra_panels.append(widget)
         if placement == "workspace":
             key = title.lower()
-            self._workspace_keys[key] = widget
+            # In a scroll area: a module's own minimum size must not squeeze
+            # the docks (a QStackedWidget is as tall as its tallest page).
+            page = QScrollArea(self)
+            page.setWidgetResizable(True)
+            page.setFrameShape(QFrame.Shape.NoFrame)
+            page.setWidget(widget)
+            self._workspace_keys[key] = page
             self._workspace_titles[key] = title
-            index = self.workspaces.addWidget(widget)
+            index = self.workspaces.addWidget(page)
             switch = self.top_bar.workspace_switch
             switch.set_segments([[Segment(k, self._workspace_titles[k])
                                   for k in self._workspace_keys]])
