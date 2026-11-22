@@ -7,7 +7,9 @@ QWidget.grab() images of: both workspaces, each sidebar tab, each dock tab,
 Single view, and the collapsed sidebar; then (at the first size) the top
 bar's map chip with long typeset formulas (the Kim-type operator, and the
 Halley · Laguerre L4 preset), the Equation tab's live preview, and the
-Build popover.
+Build popover -- alone, and open in the 1100x720 window. The offscreen
+platform is given screens of exactly those sizes (SCREEN_LAYOUT), so popups
+are placed as on a real display.
 
     PYTHONPATH=cdx/build python tools/snapshot_ui.py [--out DIR]
 
@@ -30,8 +32,22 @@ if str(REPO) not in sys.path:
 SIZES = [(1389, 868), (1100, 720)]
 
 
+SCREEN_LAYOUT = {   # offscreen screens matching the snapshot sizes (popups are placed
+                    # inside the screen they open on, so the screen must be real-sized)
+    "synchronousWindowSystemEvents": True, "windowFrameMargins": False,
+    "screens": [{"name": "large", "x": 0, "y": 0, "width": 1389, "height": 868,
+                 "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1},
+                {"name": "small", "x": 1389, "y": 0, "width": 1100, "height": 720,
+                 "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1}]}
+
+
 def _prepare_qt_env() -> None:
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if "QT_QPA_PLATFORM" not in os.environ:
+        import json
+        import tempfile
+        cfg = Path(tempfile.mkdtemp()) / "screens.json"
+        cfg.write_text(json.dumps(SCREEN_LAYOUT))
+        os.environ["QT_QPA_PLATFORM"] = f"offscreen:configfile={cfg}"
     if "QT_QPA_PLATFORM_PLUGIN_PATH" not in os.environ:
         import PySide6
         plugins = Path(PySide6.__file__).parent / "Qt" / "plugins" / "platforms"
@@ -89,9 +105,30 @@ def main() -> None:
         window.grab().save(str(path))
         saved.append(path)
 
+    def screen_origin(w: int, h: int):
+        from PySide6.QtCore import QPoint
+        for sc in app.screens():
+            g = sc.geometry()
+            if (g.width(), g.height()) == (w, h):
+                return g.topLeft()
+        return QPoint(0, 0)
+
+    def grab_with_popup(name: str, popup) -> None:
+        """The window with `popup` (a separate top-level) painted where it is."""
+        from PySide6.QtGui import QPainter
+        _settle(app, window)
+        img = window.grab()
+        p = QPainter(img)
+        p.drawPixmap(window.mapFromGlobal(popup.geometry().topLeft()), popup.grab())
+        p.end()
+        path = out / f"{name}.png"
+        img.save(str(path))
+        saved.append(path)
+
     for w, h in SIZES:
         tag = f"{w}x{h}"
         window.reset_layout()
+        window.move(screen_origin(w, h))
         window.resize(w, h)
         window.show_workspace("explore")
         _settle(app, window)
@@ -123,6 +160,7 @@ def main() -> None:
     w, h = SIZES[0]
     tag = f"{w}x{h}"
     window.reset_layout()
+    window.move(screen_origin(w, h))
     window.resize(w, h)
     _settle(app, window)
     kim = ("z^3*(2*(a-1)+a^2 +4*(a-1)*z+2*(a-1)*z^2)/"
@@ -148,6 +186,18 @@ def main() -> None:
     pop.set_choice(BuilderChoice(poly="hermite", degree=5, map_kind="relaxed_newton"))
     window.equation_panel.open_builder()
     grab_widget(f"{tag}-build-popover", pop)
+    pop.hide()
+
+    # The Build popover open in the smallest window, from the bottom dock --
+    # where it used to fall off the screen.
+    w, h = SIZES[-1]
+    window.reset_layout()
+    window.move(screen_origin(w, h))
+    window.resize(w, h)
+    window.settings_dock.reveal(window.equation_panel)
+    _settle(app, window)
+    window.equation_panel.open_builder()
+    grab_with_popup(f"{w}x{h}-build-popover-open", pop)
     pop.hide()
 
     for path in saved:

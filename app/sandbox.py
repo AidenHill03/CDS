@@ -3313,6 +3313,12 @@ class SandboxWindow(QMainWindow):
         self.settings_dock.add_tab(self.rendering_tab, "Rendering", "Resolution, iterations, threads, cache")
         self.settings_dock.add_tab(self.coloring_tab, "Coloring", "Palette, scaling, Green's function")
         self.settings_dock.add_tab(self.orbit_tab, "Orbit", "Seed, step and run an orbit")
+        # Never shorter (while expanded) than the f(z) row plus a one-line
+        # preview: the preview then fits whatever room it gets, never cut off.
+        m = eq_layout.contentsMargins()
+        self.settings_dock.set_expanded_minimum_height(
+            self.settings_dock.header.sizeHint().height() + m.top() + m.bottom()
+            + self.equation_panel.minimum_height_with_preview() + 4)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.settings_dock)
         # Bottom dock spans the full width under the planes AND the sidebar.
         self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)

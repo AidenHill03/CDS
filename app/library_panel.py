@@ -64,7 +64,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLa
                                QPushButton, QToolButton, QVBoxLayout, QWidget)
 
 import cdx
-from app import theme
+from app import popups, theme
 from app.family_views import parameter_view_for
 from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
 from app.settings import preview_path_for
@@ -236,6 +236,9 @@ def _plain_formula(formula: str) -> str:
         return formula
 
 
+LIST_TOP_MARGIN = 6   # px between the list's frame and its first visible row
+
+
 class LibraryRow(QWidget):
     """One list row: loaded dot, thumbnail, name, formula, and a ⋯ menu."""
 
@@ -272,11 +275,18 @@ class LibraryRow(QWidget):
         self.menu_button.setIcon(more_icon(theme.color("muted")))
         self.menu_button.setToolTip(f"Actions for {name}")
         self.menu_button.setAccessibleName(f"Actions for {name}")
-        self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        # The ⋯ menu opens through app.popups (screen-aware), not Qt's own
+        # menu-button placement: see LibraryPanel._refresh_list.
+        self.menu: QMenu | None = None
+        self.menu_button.clicked.connect(self.show_menu)
         layout.addWidget(self.menu_button)
         for label in (self.name_label, self.thumbnail, self.dot):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.set_loaded(False)
+
+    def show_menu(self) -> None:
+        if self.menu is not None:
+            popups.popup_menu(self.menu, self.menu_button, align_right=True)
 
     def set_icon(self, icon: QIcon) -> None:
         self.thumbnail.setPixmap(icon.pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE))
@@ -354,6 +364,9 @@ class LibraryPanel(QWidget):
         self._list = QListWidget(self)
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # A top margin inside the list, so a row scrolled part-way out is
+        # clipped below a gap rather than flush under the search field.
+        self._list.setViewportMargins(0, LIST_TOP_MARGIN, 0, 0)
         self._list.setMinimumHeight(_ROW_HEIGHT * 4)
         self._list.currentItemChanged.connect(lambda *_: self._refresh_detail())
         # Double-click or Return = Load (the press already made it current).
@@ -430,7 +443,7 @@ class LibraryPanel(QWidget):
                 self._list.addItem(item)
                 row = LibraryRow(name, entry.to_formula() if entry is not None else "", icon,
                                  name in PRESET_FAMILY_NAMES)
-                row.menu_button.setMenu(self._row_menu(name))
+                row.menu = self._row_menu(name)
                 row.set_loaded(name == self._loaded_name)
                 self._list.setItemWidget(item, row)
                 self._rows[name] = row
@@ -458,7 +471,7 @@ class LibraryPanel(QWidget):
         row = self._rows.get(name)
         if row is None:
             return []
-        return [a.text() for a in row.menu_button.menu().actions() if a.text()]
+        return [a.text() for a in row.menu.actions() if a.text()] if row.menu is not None else []
 
     def row_icon(self, name: str) -> QIcon | None:
         item = self._item_for(name)
@@ -533,12 +546,33 @@ class LibraryPanel(QWidget):
 
     def _select_by_name(self, name: str) -> None:
         item = self._item_for(name)
-        if item is not None:
-            self._list.setCurrentItem(item)
-            return
-        names = self.entry_names()
-        if names:
-            self._list.setCurrentItem(self._item_for(names[0]))
+        if item is None:
+            names = self.entry_names()
+            if not names:
+                return
+            item = self._item_for(names[0])
+        self._list.setCurrentItem(item)
+        self._reveal_with_section(item)
+
+    def _reveal_with_section(self, item: QListWidgetItem) -> None:
+        """Scrolls `item` into view; when it is the first row of its section,
+        the section header (PRESETS / YOURS) comes into view with it instead
+        of being left half-scrolled under the search field."""
+        row = self._list.row(item)
+        above = self._list.item(row - 1) if row > 0 else None
+        if above is not None and above.data(_NAME_ROLE) is None:   # a section header
+            self._list.scrollToItem(above, QAbstractItemView.ScrollHint.EnsureVisible)
+        self._list.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+
+    def section_header_rect(self, title: str):
+        """The visual rect (viewport coordinates) of a section header, or
+        None when it is not in the list -- for tests."""
+        for r in range(self._list.count()):
+            it = self._list.item(r)
+            w = self._list.itemWidget(it)
+            if it.data(_NAME_ROLE) is None and isinstance(w, QLabel) and w.text() == title.upper():
+                return self._list.visualItemRect(it)
+        return None
 
     def _selected_name(self) -> str | None:
         item = self._list.currentItem()

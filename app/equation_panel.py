@@ -58,9 +58,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QPoint
+from PySide6.QtWidgets import (QAbstractScrollArea, QButtonGroup, QComboBox, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget)
 
 import cdx
 from app import controls, theme
@@ -69,6 +69,7 @@ from app.mathdisplay import FormulaView, LivePreview
 
 PREVIEW_PX = 18         # the live preview's base size (full-size typesetting)
 PREVIEW_DEBOUNCE_MS = 150
+PREVIEW_BOTTOM_SLACK = 12   # px kept under the preview inside the visible area
 
 
 class EquationPanel(QWidget):
@@ -117,18 +118,18 @@ class EquationPanel(QWidget):
 
         # Live typeset preview of what is being typed (debounced). On a parse
         # error the last good preview stays, greyed, and the error shows below.
-        self._preview = FormulaView(compact=False, px=PREVIEW_PX)
+        # fit=True: full size when the dock has room, otherwise fitted to the
+        # room it has (never clipped mid-line); at least one line tall --
+        # SandboxWindow keeps the dock at least that tall (see
+        # minimum_height_with_preview).
+        self._preview = FormulaView(compact=False, fit=True, px=PREVIEW_PX)
         self._preview.setAccessibleName("Formula preview")
-        self._preview_scroll = QScrollArea()
-        self._preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._preview_scroll.setWidget(self._preview)
-        self._preview_scroll.setWidgetResizable(False)
-        self._preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._preview_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
-        left.addWidget(self._preview_scroll)
+        left.addWidget(self._preview)
+        self._eq_row = eq_row
+        self._left = left
+        self._watched_area: QWidget | None = None
         self._live_preview = LivePreview(self._preview, PREVIEW_DEBOUNCE_MS, self)
-        self._preview.installEventFilter(self)
+        self._live_preview.flushed.connect(self._update_preview_room)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -195,17 +196,6 @@ class EquationPanel(QWidget):
         self._active_field: QWidget | None = None
         self._table_widgets: list[QWidget] = []
 
-    def eventFilter(self, obj, event) -> bool:   # noqa: N802
-        if obj is self._preview and event.type() == event.Type.LayoutRequest:
-            self._fit_preview()
-        return super().eventFilter(obj, event)
-
-    def _fit_preview(self) -> None:
-        self._preview.adjustSize()
-        bar = self._preview_scroll.horizontalScrollBar()
-        extra = bar.sizeHint().height() if self._preview.width() > self._preview_scroll.viewport().width() else 0
-        self._preview_scroll.setFixedHeight(self._preview.sizeHint().height() + extra + 2)
-
     # ---- family builder --------------------------------------------------------------
     def set_save_family_handler(self, handler: Callable[[str], str | None]) -> None:
         """`handler(name)` saves the CURRENT map to the Library under `name`
@@ -223,7 +213,10 @@ class EquationPanel(QWidget):
         return self._builder
 
     def open_builder(self) -> None:
-        self.builder().popup_below(self._build_button)
+        self.builder().popup_at(self._build_button)
+
+    def build_button(self) -> QPushButton:
+        return self._build_button
 
     def apply_expression(self, text: str) -> bool:
         """Puts `text` in the f(z) field and applies it (as Return would).
@@ -237,6 +230,49 @@ class EquationPanel(QWidget):
         if self._save_family is None or not self.apply_expression(expression):
             return False
         return self._save_family(name) is not None
+
+    # ---- preview room: full size whenever the visible area allows ---------------------
+    def _visible_area(self) -> QWidget:
+        """The widget whose height is what the user can see: the dock page's
+        scroll viewport when the panel is inside one, else the panel."""
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QAbstractScrollArea):
+                return w.viewport()
+            w = w.parentWidget()
+        return self
+
+    def showEvent(self, event) -> None:   # noqa: N802
+        area = self._visible_area()
+        if area is not self and area is not self._watched_area:
+            area.installEventFilter(self)
+            self._watched_area = area
+        super().showEvent(event)
+        self._update_preview_room()
+
+    def eventFilter(self, obj, event) -> bool:   # noqa: N802
+        if obj is self._watched_area and event.type() == QEvent.Type.Resize:
+            self._update_preview_room()
+        return super().eventFilter(obj, event)
+
+    def _update_preview_room(self) -> None:
+        """The preview's minimum height: its full natural height when the
+        visible area has room for the f(z) row plus that (the rows below then
+        scroll), else whatever room there is, never under one line -- so it
+        is fitted, never clipped."""
+        area = self._visible_area()
+        offset = self.mapTo(area, QPoint(0, 0)).y() if area is not self else 0
+        room = (area.height() - max(0, offset) - self._eq_row.sizeHint().height()
+                - self._left.spacing() - PREVIEW_BOTTOM_SLACK)
+        natural = self._preview.sizeHint().height()
+        one_line = self._preview.one_line_height()
+        self._preview.setMinimumHeight(max(one_line, min(natural, room)))
+
+    def minimum_height_with_preview(self) -> int:
+        """The height (from this panel's top) that shows the f(z) row and a
+        one-line preview in full."""
+        return (self._eq_row.sizeHint().height() + self._left.spacing()
+                + self._preview.minimumSizeHint().height())
 
     def preview(self) -> FormulaView:
         """The live typeset preview under f(z) = (for tests and snapshots)."""
@@ -328,7 +364,6 @@ class EquationPanel(QWidget):
         self._formula_edit.setText(self.session.map.to_formula())
         self._formula_edit.blockSignals(False)
         self._live_preview.set_now(self.session.map.to_formula())
-        self._fit_preview()
         theme.set_invalid(self._formula_edit, False)
 
         if self.session.map.is_pq_backed():

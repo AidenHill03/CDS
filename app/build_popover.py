@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from app import family_builder as fb
+from app import popups
 from app.mathdisplay import FormulaView
 
 RECOMPUTE_DEBOUNCE_MS = 120
@@ -41,9 +43,24 @@ class BuildPopover(QFrame):
         self._on_save = on_save
         self._built: fb.Built | None = None
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 12, 14, 12)
+        # Body (scrolls when the screen is short) over a fixed footer, so
+        # Apply / Save as family are always visible.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.body = QWidget(self)
+        self.body.setObjectName("BuildPopoverBody")
+        outer = QVBoxLayout(self.body)
+        outer.setContentsMargins(14, 12, 14, 6)
         outer.setSpacing(8)
+        self.scroll = QScrollArea(self)
+        self.scroll.setObjectName("BuildPopoverScroll")
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidget(self.body)
+        self.scroll.setStyleSheet("QScrollArea, #BuildPopoverBody { background: transparent; }")
+        root.addWidget(self.scroll, 1)
 
         title = QLabel("POLYNOMIAL p(z)", self)
         title.setProperty("role", "section")
@@ -111,7 +128,9 @@ class BuildPopover(QFrame):
         self.error_label.setMaximumWidth(460)
         outer.addWidget(self.error_label)
 
-        buttons = QHBoxLayout()
+        self.footer = QWidget(self)
+        buttons = QHBoxLayout(self.footer)
+        buttons.setContentsMargins(14, 6, 14, 12)
         buttons.addStretch(1)
         self.save_button = QPushButton("Save as family", self)
         self.save_button.setToolTip("Apply, and add it to the Library under the generated name")
@@ -122,7 +141,7 @@ class BuildPopover(QFrame):
         self.apply_button.clicked.connect(self.apply)
         buttons.addWidget(self.save_button)
         buttons.addWidget(self.apply_button)
-        outer.addLayout(buttons)
+        root.addWidget(self.footer)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -172,7 +191,6 @@ class BuildPopover(QFrame):
         self._custom_label.setVisible(custom)
         self.degree_spin.setEnabled(not custom)
         self.degree_spin.setMinimum(t.min_degree)
-        self.adjustSize()
         self._schedule()
 
     def _schedule(self, *_args) -> None:
@@ -221,10 +239,23 @@ class BuildPopover(QFrame):
             self.hide()
         return ok
 
-    def popup_below(self, anchor: QWidget) -> None:
+    def natural_size(self) -> QSize:
+        """The size with nothing scrolled: the whole body plus the footer."""
+        self.body.adjustSize()
+        body = self.body.sizeHint()
+        bar = self.scroll.verticalScrollBar().sizeHint().width()
+        return QSize(body.width() + bar, body.height() + self.footer.sizeHint().height() + 2)
+
+    def minimum_popup_height(self) -> int:
+        """Below this the popover would rather overlap its button than shrink:
+        the footer plus a few rows of the form."""
+        return self.footer.sizeHint().height() + 160
+
+    def popup_at(self, anchor) -> None:
+        """Shows the popover anchored to `anchor` (the Build button), placed by
+        app.popups: below if it fits, else above, else capped with the body
+        scrolling -- always inside the anchor screen's available geometry."""
         self.recompute()
-        self.adjustSize()
-        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
-        self.move(pos)
+        popups.place(self, anchor, self.natural_size(), self.minimum_popup_height())
         self.show()
         self.raise_()

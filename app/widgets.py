@@ -215,6 +215,7 @@ class TabbedDock(QDockWidget):
         self._side = side
         self._collapsed = False
         self._expanded_extent: int | None = None
+        self._expanded_min_height = 0
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea if side == "right"
                              else Qt.DockWidgetArea.BottomDockWidgetArea)
@@ -374,6 +375,14 @@ class TabbedDock(QDockWidget):
         self.set_collapsed(False)
 
     # ---- collapse ----
+    def set_expanded_minimum_height(self, height: int) -> None:
+        """A bottom dock's minimum height while EXPANDED (collapsed it is just
+        its tab strip): e.g. so the Equation tab's field and a one-line
+        preview are never cut off."""
+        self._expanded_min_height = max(0, int(height))
+        if not self._collapsed:
+            self.setMinimumHeight(self._expanded_min_height)
+
     def is_collapsed(self) -> bool:
         return self._collapsed
 
@@ -397,10 +406,12 @@ class TabbedDock(QDockWidget):
             if collapsed:
                 self._expanded_extent = self.height()
                 self.stack.hide()
+                self.setMinimumHeight(0)
                 self.setMaximumHeight(self.header.sizeHint().height())
             else:
                 self.stack.show()
                 self.setMaximumHeight(QWIDGETSIZE_MAX)
+                self.setMinimumHeight(self._expanded_min_height)
                 if main is not None and self._expanded_extent:
                     main.resizeDocks([self], [self._expanded_extent], Qt.Orientation.Vertical)
         self._collapsed = collapsed

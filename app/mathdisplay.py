@@ -49,7 +49,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
@@ -1193,15 +1193,20 @@ class FormulaView(QWidget):
     width (map chip, library rows); the full formula shows in a tooltip.
     compact=False: full size; sizeHint is the natural size (put it in a
     scroll area when it may be wide).
+    compact=False, fit=True: full size when the widget is given room for it,
+    otherwise the compact layout fitted to whatever room it has (stacked at
+    >= 70% size, else one inline line, middle-elided), never clipped. Its
+    minimum height is one line (the Equation tab's live preview).
 
     set_source(text) validates with cdx first. On failure the last good
     formula stays, greyed out, and set_source returns False."""
 
     def __init__(self, parent: QWidget | None = None, *, compact: bool = False, px: float = 16.0,
                  height: int | None = None, max_natural_width: int | None = None,
-                 color_role: str = "text", tooltip: bool = True):
+                 color_role: str = "text", tooltip: bool = True, fit: bool = False):
         super().__init__(parent)
         self._compact = compact
+        self._fit = fit and not compact
         self._px = float(px)
         self._height = height
         self._max_natural_width = max_natural_width
@@ -1221,6 +1226,8 @@ class FormulaView(QWidget):
             self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             if height is not None:
                 self.setFixedHeight(height)
+        elif self._fit:
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         else:
             self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -1286,10 +1293,30 @@ class FormulaView(QWidget):
         return self._cache
 
     def is_elided(self) -> bool:
-        if not self._compact or self._node is None:
+        if self._node is None or not (self._compact or self.is_fitted()):
             return False
         c = self.layout_for(self.width(), self.height())
         return bool(c and c.elided)
+
+    def one_line_height(self) -> int:
+        return math.ceil(self._px * 1.9)
+
+    def _natural_fits(self, w: float, h: float) -> bool:
+        box = self._natural()
+        return box is not None and box.w + 6 <= w and box.h + 2 <= h
+
+    def is_fitted(self) -> bool:
+        """fit mode, and the natural layout does not fit right now (so the
+        compact layout is painted)."""
+        return self._fit and self._node is not None and not self._natural_fits(self.width(), self.height())
+
+    def painted_box(self) -> Box | None:
+        """What paintEvent paints at the current size (for tests)."""
+        if self._node is None:
+            return None
+        if self._compact or self.is_fitted():
+            return self.layout_for(self.width(), self.height()).box
+        return self._natural()
 
     def sizeHint(self) -> QSize:   # noqa: N802
         if self._compact:
@@ -1311,6 +1338,8 @@ class FormulaView(QWidget):
     def minimumSizeHint(self) -> QSize:   # noqa: N802
         if self._compact:
             return QSize(round(self._px * 3), self.sizeHint().height())
+        if self._fit:
+            return QSize(round(self._px * 3), self.one_line_height())
         return self.sizeHint()
 
     # ---- painting -----------------------------------------------------------------
@@ -1332,7 +1361,7 @@ class FormulaView(QWidget):
                            self._empty_text)
             p.end()
             return
-        if self._compact:
+        if self._compact or (self._fit and not self._natural_fits(rect.width(), rect.height())):
             c = self.layout_for(rect.width(), rect.height())
             paint_box(p, c.box, rect, self._color())
         else:
@@ -1387,7 +1416,10 @@ class FormulaToolTip(QFrame):
         tip.caption.setText(caption)
         tip.caption.setVisible(bool(caption))
         tip.adjustSize()
-        tip.move(global_pos + QPoint(12, 16))
+        # Below-right of the pointer, or above when there is no room; inside
+        # the pointer's screen (app.popups).
+        from app import popups
+        popups.place(tip, QRect(global_pos + QPoint(0, 4), QSize(16, 16)), tip.sizeHint())
         tip.show()
         tip.raise_()
         tip._hide_timer.start(12000)
@@ -1406,7 +1438,9 @@ class FormulaToolTip(QFrame):
 
 class LivePreview(QObject):
     """Debounces a text source into a FormulaView: on a parse error the view
-    keeps its last good formula, greyed."""
+    keeps its last good formula, greyed. `flushed` fires after each update."""
+
+    flushed = Signal()
 
     def __init__(self, view: FormulaView, delay_ms: int = 150, parent: QObject | None = None):
         super().__init__(parent or view)
@@ -1429,3 +1463,4 @@ class LivePreview(QObject):
     def flush(self) -> None:
         self._timer.stop()
         self.view.set_source(self._pending)
+        self.flushed.emit()
