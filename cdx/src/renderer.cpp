@@ -915,6 +915,11 @@ Image Renderer::render_parameter_polynomial_multicritical(
                                                 custom->distinct_critical_points(Cplx(1.0, 0.0)),
                                                 free_s)
                  : std::vector<Cplx>{};
+    // PerCritical needs the labelled order (see CriticalLabelBase); the
+    // symmetric strategies do not, and keep the cheaper continued solve.
+    const bool per_critical = strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base =
+        per_critical ? custom->critical_label_base() : CriticalLabelBase{};
 
     // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
     // escape value (> 0 by construction: n + 2 - log_d(log|z|) with |z|
@@ -944,7 +949,9 @@ Image Renderer::render_parameter_polynomial_multicritical(
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
 
             std::vector<Cplx> crit;
-            if (cp_fixed) {
+            if (per_critical) {
+                crit = custom->critical_point_labels(p, label_base);
+            } else if (cp_fixed) {
                 crit = fixed_free;
             } else {
                 const ContinuedCriticalPoints cc =
@@ -955,6 +962,7 @@ Image Renderer::render_parameter_polynomial_multicritical(
             if (crit.empty()) { img.at(col, row) = 0.0; continue; }
 
             const CompiledMap compiled = custom->compile(p);
+            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius);
             double out = 0.0;
             bool escaped = false;
             switch (strategy) {
@@ -962,7 +970,6 @@ Image Renderer::render_parameter_polynomial_multicritical(
                     double worst = 0.0;
                     for (const Cplx& c0 : crit) {
                         const double v = escape_value(compiled, esc, c0, escaped);
-            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius);
                         if (!escaped) { worst = 0.0; break; }   // a bounded orbit decides it
                         worst = std::max(worst, v);
                     }
@@ -1058,6 +1065,13 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
     // parameter_basin's own identical choice -- see that method's comment.
     const FindAttractorsOptions opts;
 
+    // PerCritical on a Custom map selects by the labelling convention
+    // (CriticalLabelBase): critical_index means the same free critical point
+    // here as in the polynomial path and in parameter_period.
+    const bool labelled = custom && strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base = labelled ? custom->critical_label_base()
+                                                  : CriticalLabelBase{};
+
     // Stage 2 (spatial continuation): within one column, rows are already
     // processed strictly sequentially by a single thread (parallel_columns
     // parallelizes ACROSS columns, not within one -- see its own comment),
@@ -1107,9 +1121,21 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                 else map_.step_with_param(p, zr, zi);
             };
 
+            // PerCritical (Custom): classify only the selected LABELLED free
+            // critical point. Discovery above still seeds from every one.
+            std::vector<Cplx> tracked = crit_pts;
+            if (labelled) {
+                const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
+                tracked.clear();
+                if (!lab.empty()) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(lab.size()) - 1);
+                    tracked.push_back(lab[static_cast<std::size_t>(idx)]);
+                }
+            }
+
             std::vector<OrbitFate> fates;
-            fates.reserve(crit_pts.size());
-            for (const Cplx& c0 : crit_pts) {
+            fates.reserve(tracked.size());
+            for (const Cplx& c0 : tracked) {
                 const Cplx seed = nudge_seed_off_pole(c0, *discovery_map, p);
                 fates.push_back(classify_rational_orbit(seed.real(), seed.imag(), step, ar, ai, aid,
                                                          settings_.tol, settings_.max_iter));
@@ -1137,9 +1163,11 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                     break;
                 }
                 case ParameterStrategy::PerCritical: {
+                    // Custom: `fates` holds just the labelled selection.
+                    // Built-in rational family: its single representative.
                     if (!fates.empty()) {
-                        const int idx =
-                            std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
+                        const int idx = labelled ? 0
+                            : std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
                         out = fates[idx].resolved ? fates[idx].nu : 0.0;
                     }
                     break;
@@ -1312,14 +1340,10 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
 
     // FromMap: the free/pre-fixed split is structural -- once per render.
     // A map whose critical points do not move gets them once, too.
-    FreeCriticalStructure free_s;
-    bool cp_fixed = false;
-    std::vector<Cplx> fixed_distinct;
-    if (from_map) {
-        free_s = custom->free_critical_structure();
-        cp_fixed = custom->critical_points_constant();
-        if (cp_fixed) fixed_distinct = custom->distinct_critical_points(Cplx(1.0, 0.0));
-    }
+    // Seeds come in LABEL order (CriticalLabelBase), so critical_index is
+    // the same free critical point as in render_parameter's PerCritical.
+    const CriticalLabelBase label_base =
+        from_map ? custom->critical_label_base() : CriticalLabelBase{};
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
@@ -1331,16 +1355,7 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
             bool mixed_flag = false;
 
             if (from_map) {
-                std::vector<Cplx> distinct;
-                if (cp_fixed) {
-                    distinct = fixed_distinct;
-                } else {
-                    const ContinuedCriticalPoints cc =
-                        custom->distinct_critical_points_continued(a, prev_ordinary);
-                    distinct = cc.distinct;
-                    prev_ordinary = cc.ordinary_raw;
-                }
-                const std::vector<Cplx> seeds = custom->free_critical_points(a, distinct, free_s);
+                const std::vector<Cplx> seeds = custom->critical_point_labels(a, label_base);
                 if (!seeds.empty()) {
                     const std::vector<SeedOutcome> outs = per_seed_outcomes(seeds, *custom, a, opts);
                     const int idx = std::clamp(critical_index, 0, static_cast<int>(outs.size()) - 1);
@@ -1428,6 +1443,8 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
             double zr = c0.real(), zi = c0.imag();
 
             const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            const double escR = std::sqrt(esc.R2);
 
             // Escape-rate potential G(z) = lim d^-n log+|f^n(z)|: normalize
             // AT the pixel's own escape iteration, not against a single
@@ -1443,8 +1460,6 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
                 } else {
                     map_.step_with_param(p, zr, zi);
                 }
-            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
-            const double escR = std::sqrt(esc.R2);
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 if (mag > escR) {

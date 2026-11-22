@@ -2193,6 +2193,46 @@ int main() {
               "a slowly-rotating attracting fixed point reports period 1, not a multiple");
     }
 
+    // ---- Labelling: the compiled derivative numerator is a pure speed path ----------
+    std::printf("\ncritical-point labels: the compiled-in-a evaluator changes nothing but speed:\n");
+    {
+        struct LCase { const char* label; RationalMap map; bool expect_fast; };
+        const LCase lcases[] = {
+            {"z^3 + a z + 1 (P/Q)", RationalMap::from_expression("z^3 + a*z + 1", "a", {}), true},
+            {"z^4 + a z^2 + (1-a) z (P/Q)",
+             RationalMap::from_expression("z^4 + a*z^2 + (1-a)*z", "a", {}), true},
+            {"relaxed Newton n=5", relaxed_newton_power(5), true},
+            // Degree 20 in a: more than the 16-sample fit can capture, so it
+            // must be rejected (verification fails) and fall back, unharmed.
+            {"z^3 + a^20 z + 1 (degree 20 in a: too high to compile)",
+             RationalMap::from_expression("z^3 + a^20*z + 1", "a", {}), false},
+        };
+        for (const LCase& lc : lcases) {
+            const CriticalLabelBase fast = lc.map.critical_label_base();
+            CriticalLabelBase slow = fast;
+            slow.fast.valid = false;
+            double worst = 0.0;
+            bool same_count = true;
+            for (int i = 0; i < 9; ++i) {
+                for (int j = 0; j < 9; ++j) {
+                    const Cplx a(-1.3 + 0.31 * i, -1.2 + 0.29 * j);
+                    const auto lf = lc.map.critical_point_labels(a, fast);
+                    const auto ls = lc.map.critical_point_labels(a, slow);
+                    if (lf.size() != ls.size()) { same_count = false; continue; }
+                    for (std::size_t k = 0; k < lf.size(); ++k) {
+                        if (std::isfinite(lf[k].real()))
+                            worst = std::max(worst, std::abs(lf[k] - ls[k]) / std::max(1.0, std::abs(ls[k])));
+                    }
+                }
+            }
+            char msg[220];
+            std::snprintf(msg, sizeof msg, "%s: compiled evaluator %s, labels agree with the "
+                         "direct path to %.1e (same order everywhere)", lc.label,
+                         fast.fast.valid ? "used" : "rejected (falls back)", worst);
+            check(fast.fast.valid == lc.expect_fast && same_count && worst < 1e-9, msg);
+        }
+    }
+
     // ---- NO REGRESSION: a map with no RationalMap behind it degrades honestly -------
     std::printf("\nno RationalMap behind the map: degrades to all-undetermined, never a "
                "fabricated period:\n");

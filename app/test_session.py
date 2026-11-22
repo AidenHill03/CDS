@@ -380,6 +380,83 @@ def main() -> None:
         check(np.array_equal(img > 0, np.flipud(img) > 0),
               f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
 
+    # ---- critical_index labelling convention (Bug B, part 3) ----------------------
+    print("\ncritical_index labelling: continued from a* along a straight segment:")
+    cub = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_l")
+    a_star = 0.618 + 0.382j
+
+    # The old seam: Im a = 0, Re a in [-1.5, -0.45]. Labels must not jump there.
+    eps = 1e-7
+    worst = 0.0
+    for x in np.linspace(-1.5, -0.05, 60):
+        up = cub.critical_point_labels(complex(x, eps))
+        dn = cub.critical_point_labels(complex(x, -eps))
+        worst = max(worst, max(abs(u - d) for u, d in zip(up, dn)))
+    check(worst < 1e-5, f"labels are continuous across Im a = 0 for Re a < 0 "
+                        f"(largest change across the axis {worst:.2g})")
+
+    # The ONLY discontinuity: the ray from the collision at a = 0 pointing
+    # directly away from a*. Walk a circle around 0; the labels may swap
+    # exactly once, at angle arg(-a*).
+    n_samp = 720
+    ang = 2 * np.pi * np.arange(n_samp) / n_samp
+    labs = [cub.critical_point_labels(0.5 * complex(math.cos(t), math.sin(t))) for t in ang]
+    jumps = []
+    for i in range(n_samp):
+        l0, l1 = labs[i], labs[(i + 1) % n_samp]
+        if abs(l0[0] - l1[0]) > abs(l0[0] - l1[1]):     # label 0 landed nearer old label 1
+            jumps.append(ang[i] + np.pi / n_samp)        # midpoint of the sample interval
+    predicted = (math.atan2(-a_star.imag, -a_star.real)) % (2 * np.pi)
+    check(len(jumps) == 1 and abs(((jumps[0] - predicted + np.pi) % (2 * np.pi)) - np.pi)
+          <= 2 * np.pi / n_samp,
+          f"around |a| = 0.5 the labels swap exactly once ({len(jumps)} found), on the ray "
+          f"from 0 directly away from a* (angle {math.degrees(predicted):.1f} deg)")
+    check(all(len(l) == 2 for l in labs), "two free critical points at every sample")
+
+    # Viewport independence: the same parameter gets the same PerCritical
+    # value in two different viewports (pixels whose coordinates coincide
+    # exactly, computed with the engine's own Viewport.coord formula).
+    set_l = cdx.RenderSettings(150, 2.0, 1e-6, 0)
+    vpA = cdx.Viewport(0j, 1.5, 61)          # pixel size 0.05
+    vpB = cdx.Viewport(0.25 - 0.5j, 1.0, 41)  # pixel size 0.05, shifted
+    imA = render_map(cub, 0j, vpA, set_l, "parameter", strategy="per_critical", critical_index=1)
+    imB = render_map(cub, 0j, vpB, set_l, "parameter", strategy="per_critical", critical_index=1)
+
+    def coords(vp):
+        s_ = 2.0 * vp.scale / (vp.resolution - 1)
+        idx = np.arange(vp.resolution)
+        return vp.center.real - vp.scale + s_ * idx, vp.center.imag - vp.scale + s_ * idx
+
+    xa, ya = coords(vpA)
+    xb, yb = coords(vpB)
+    pairs = 0
+    same = True
+    for cb, xv in enumerate(xb):
+        ca = np.nonzero(xa == xv)[0]
+        if not len(ca):
+            continue
+        for rb, yv in enumerate(yb):
+            ra = np.nonzero(ya == yv)[0]
+            if not len(ra):
+                continue
+            pairs += 1
+            same &= bool(imA[ra[0], ca[0]] == imB[rb, cb])
+    check(pairs >= 100 and same, f"PerCritical is identical at the {pairs} parameters the two "
+                                 "viewports share -- labels do not depend on the viewport")
+
+    # critical_index selects the same orbit in "parameter" and "parameter_period".
+    vp_x = cdx.Viewport(-0.6 + 0.2j, 0.6, 31)
+    agree = True
+    for k in (0, 1):
+        pc = render_map(cub, 0j, vp_x, set_l, "parameter", strategy="per_critical", critical_index=k)
+        pp = render_map(cub, 0j, vp_x, set_l, "parameter_period", critical_index=k)
+        escaped_pc = pc > 0
+        escaped_pp = pp[2] == 1.0
+        decided = (pp[1] == 0.0)                      # period mode resolved this orbit
+        agree &= np.mean(escaped_pc[decided] == escaped_pp[decided]) > 0.99
+    check(agree, "critical_index k is the same free critical point in parameter (PerCritical) "
+                 "and parameter_period")
+
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
     s.map = cdx.RationalMap.mandelbrot()

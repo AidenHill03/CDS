@@ -311,6 +311,16 @@ PYBIND11_MODULE(cdx, m) {
              "(infinity for a polynomial, a pole mapping to a fixed infinity, a "
              "parameter-independent fixed critical point) -- see the C++ "
              "FreeCriticalStructure comment for the rule.")
+        .def("critical_point_labels",
+             [](const RationalMap& m, Cplx a) { return m.critical_point_labels(a); },
+             py::arg("a"),
+             "The free critical points at `a` IN LABEL ORDER -- index k is what "
+             "critical_index = k selects in render_parameter (PerCritical) and "
+             "render_parameter_period. Labels are fixed at a base parameter "
+             "a* = 0.618+0.382i by (Re, Im) order and continued along the straight "
+             "segment a* -> a, so the only discontinuities are rays from collision "
+             "points pointing directly away from a*, independent of any viewport. "
+             "See the C++ CriticalLabelBase comment.")
         .def("polynomial_coefficients",
              [](const RationalMap& m, Cplx a) -> py::object {
                  std::vector<Cplx> c;
@@ -909,6 +919,12 @@ PYBIND11_MODULE(cdx, m) {
           "z-plane, never a symmetry quotient. This is what Renderer."
           "render_parameter_period uses per pixel.");
 
+    m.def("polynomial_escape_radius", &polynomial_escape_radius, py::arg("coeffs"),
+          "Certified escape radius rho of the polynomial with these ASCENDING "
+          "coefficients: the positive root of |a_d| r^d - sum_{k<d} |a_k| r^k - r. "
+          "Any orbit with |z| > rho escapes to infinity. Every polynomial "
+          "escape-time path escapes at max(rho, settings.escape_radius).");
+
     m.def("polynomial_escape_certified", &polynomial_escape_certified, py::arg("map"),
           "True iff `map` has no poles anywhere (structurally -- independent of the "
           "parameter) and degree >= 2, in which case infinity is ALWAYS "
@@ -919,12 +935,6 @@ PYBIND11_MODULE(cdx, m) {
           "e.g. mcmullen -- see this function's own C++ doc comment for why).");
 
     py::class_<WadaStats>(m, "WadaStats")
-    m.def("polynomial_escape_radius", &polynomial_escape_radius, py::arg("coeffs"),
-          "Certified escape radius rho of the polynomial with these ASCENDING "
-          "coefficients: the positive root of |a_d| r^d - sum_{k<d} |a_k| r^k - r. "
-          "Any orbit with |z| > rho escapes to infinity. Every polynomial "
-          "escape-time path escapes at max(rho, settings.escape_radius).");
-
         .def(py::init<>())
         .def_readwrite("n_basins",            &WadaStats::n_basins)
         .def_readwrite("unresolved_fraction", &WadaStats::unresolved_fraction)

@@ -157,6 +157,67 @@ struct FreeCriticalStructure {
 };
 
 // -----------------------------------------------------------------------------
+// THE CRITICAL-POINT LABELLING CONVENTION -- what `critical_index` means in
+// every mode (render_parameter's PerCritical, polynomial or rational, and
+// render_parameter_period's FromMap), and what RationalMap::
+// critical_point_labels returns for the Facts panel.
+//
+// Free critical points can collide (z^3 + a z + 1 at a = 0), and going once
+// around a collision swaps them, so no global labelling is continuous
+// everywhere: there must be a cut. The convention makes the cut
+// deterministic, documented and independent of the viewport:
+//   1. A fixed base parameter a* per map: 0.618 + 0.382i, nudged (by
+//      +0.0137i steps) if any two free critical points there are within
+//      1e-6 (relative) of each other or fewer than generic exist.
+//   2. At a*, the free FINITE non-pole critical points (roots of the
+//      derivative numerator) are labelled 0, 1, ... in order of (Re, Im),
+//      each rounded to 1e-9.
+//   3. For a pixel parameter a, those points are continued along the
+//      straight segment a* -> a: adaptive steps, a secant predictor, a
+//      Newton corrector on the derivative-numerator polynomial; a step is
+//      halved when Newton fails, a point jumps more than a quarter of its
+//      distance to its nearest neighbour, or two tracked points come within
+//      the collapse tolerance (1e-9 relative).
+//   4. Free critical points that are not tracked roots -- infinity and
+//      pole copies, both closed-form -- follow, in (Re, Im) order.
+// So the cuts are the rays from each collision point pointing directly
+// away from a*, and they do not move when the user pans or zooms. If a
+// continuation fails outright (the segment passes within ~1e-7 of a
+// collision, i.e. the pixel lies ON a cut, or the root count changes), the
+// pixel falls back to step 2's sort applied at a itself.
+// -----------------------------------------------------------------------------
+// The derivative numerator N_a(z) = sum_k c_k(a) z^k with every c_k(a)
+// itself a polynomial in a, compiled once so the labelling continuation can
+// evaluate N at a new parameter in a few dozen flops instead of rebuilding
+// it through the P/Q expression evaluator (measured: that rebuild, paid on
+// every continuation step including rejected ones, was nearly all of the
+// labelling cost). Built by RationalMap::compile_deriv_numerator_in_a: fitted
+// from 16 samples on |a| = 1 and accepted only if it reproduces
+// deriv_numerator_poly at four other parameters (|a| up to ~4) to 1e-10
+// relative; otherwise valid == false and callers use the direct path. (The
+// parser only admits rational expressions and clears denominators in a too,
+// so the coefficients are always polynomial in a; what fails is degree
+// >= 16 in a, which 16 samples cannot capture.)
+struct DerivNumeratorInA {
+    bool valid = false;
+    int  z_terms = 0;                 // number of z-coefficients
+    int  a_terms = 0;                 // number of a-coefficients per z-coefficient
+    std::vector<Cplx> coef;           // coef[k * a_terms + j] multiplies a^j z^k
+    // N_a's coefficients (ascending in z) into `out`, resized to z_terms.
+    void eval(Cplx a, std::vector<Cplx>& out) const;
+};
+
+struct CriticalLabelBase {
+    bool  constant = false;           // critical points do not move: labels are just `points`
+    Cplx  a_star{0.618, 0.382};
+    std::vector<Cplx> points;         // free tracked critical points at a_star, label order
+    int   expected_degree = 0;        // effective degree of the derivative numerator at a_star
+    bool  closed_form_free = false;   // infinity / pole copies can be free (step 4 needed)
+    FreeCriticalStructure free_s;
+    DerivNumeratorInA fast;           // speed only: same polynomial, evaluated faster
+};
+
+// -----------------------------------------------------------------------------
 // RationalMap::eval(z, a) redoes every term's effective_coeff/
 // effective_location/effective_strength -- each an a^param_power call -- on
 // EVERY invocation, even though every caller that matters (an escape-time
@@ -683,6 +744,26 @@ public:
     // dedup radius) of an excluded location counts as that location.
     std::vector<Cplx> free_critical_points(Cplx a, const std::vector<Cplx>& distinct,
                                            const FreeCriticalStructure& s) const;
+
+    // The labelling convention above (see CriticalLabelBase): the base is
+    // computed once per render, then critical_point_labels(a, base) gives the
+    // free critical points at `a` IN LABEL ORDER. The one-argument form
+    // builds the base itself (cold; for one-off callers such as the Facts
+    // panel). continue_critical_labels is step 3 from an arbitrary already-
+    // labelled start (from_a, from_pts) -- the warm-start primitive; it
+    // returns false if the continuation failed.
+    CriticalLabelBase critical_label_base() const;
+    DerivNumeratorInA compile_deriv_numerator_in_a() const;
+    std::vector<Cplx> critical_point_labels(Cplx a, const CriticalLabelBase& base) const;
+    std::vector<Cplx> critical_point_labels(Cplx a) const;
+    bool continue_critical_labels(const CriticalLabelBase& base, Cplx from_a,
+                                  const std::vector<Cplx>& from_pts, Cplx to_a,
+                                  std::vector<Cplx>& out) const;
+    // Step 4 / the fallback: everything free at `a`, tracked points first
+    // (given), then the closed-form ones, each group in (Re, Im) order when
+    // `sort_tracked` is set.
+    std::vector<Cplx> assemble_labels(Cplx a, const CriticalLabelBase& base,
+                                      std::vector<Cplx> tracked, bool sort_tracked) const;
 
     // f's own coefficients at `a`, ASCENDING (index k multiplies z^k), when
     // is_polynomial_structurally(); returns false (and leaves `out`
