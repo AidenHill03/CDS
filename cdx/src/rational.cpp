@@ -1137,7 +1137,9 @@ bool near_rel(Cplx z, Cplx w, double rel_tol) {
 }  // namespace
 
 FreeCriticalStructure RationalMap::free_critical_structure() const {
-    constexpr double kSameLocation = 1e-6;   // relative; a multiple root's estimates spread ~1e-5..1e-6
+    // static: used inside a non-capturing lambda below, which MSVC (C3493)
+    // only allows for a variable with static storage duration.
+    static constexpr double kSameLocation = 1e-6;   // relative; a multiple root's estimates spread ~1e-5..1e-6
     constexpr double kFixedTol     = 1e-7;   // chordal; "f(w) == w"
 
     FreeCriticalStructure s;
