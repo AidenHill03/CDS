@@ -167,7 +167,7 @@ jobs:
                      app.test_orbit_panel app.test_orbit_tracker app.test_render_cache \
                      app.test_sandbox app.test_session app.test_settings \
                      app.test_settings_panel app.test_equation_panel app.test_pane \
-                     app.test_theme; do
+                     app.test_theme app.test_mathdisplay; do
             echo "=== $mod ==="
             python -m "$mod"
           done

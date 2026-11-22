@@ -4549,6 +4549,7 @@ class SandboxWindow(QMainWindow):
         if self.sidebar.current_widget() is not self.info_panel or self.sidebar.is_collapsed():
             return
         self._this_map_dirty = False
+        self.info_panel.set_map_formula(self.session.map.to_formula())
         self.info_panel.set_this_map(self.this_map_rows())
 
     def this_map_rows(self) -> list[tuple[str, str]]:

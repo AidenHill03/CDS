@@ -94,7 +94,7 @@ a = Analysis(
     # wherever it was assumed to be.
     pathex=[str(cdx_extension.parent), str(repo_root)],
     binaries=[(str(cdx_extension), ".")],
-    # Bundled OFL fonts (TTFs + licence texts), loaded at startup by
+    # Bundled OFL fonts (TTFs, the STIX Two Math OTF, licence texts), loaded at startup by
     # app.theme.load_fonts from <bundle>/app/resources/fonts.
     datas=[(str(repo_root / "app" / "resources" / "fonts"), "app/resources/fonts")],
     # The panel import in phoenix.py is inside a function; listed explicitly so

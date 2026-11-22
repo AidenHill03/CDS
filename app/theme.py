@@ -99,6 +99,7 @@ active_style_name = ""
 FONT_UI = "Inter"
 FONT_HEADING = "Space Grotesk"
 FONT_MONO = "JetBrains Mono"
+FONT_MATH = "STIX Two Math"   # formulas (app.mathdisplay); Inter italic if it fails to load
 
 FONT_SIZE_UI = 13          # px
 FONT_SIZE_SMALL = 12
@@ -118,6 +119,7 @@ FONT_FILES = (
     "Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf",
     "SpaceGrotesk-Medium.ttf", "SpaceGrotesk-Bold.ttf",
     "JetBrainsMono-Regular.ttf", "JetBrainsMono-Medium.ttf",
+    "STIXTwoMath-Regular.otf",
 )
 
 # ---- geometry (4 px grid) -----------------------------------------------------------

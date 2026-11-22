@@ -68,7 +68,8 @@ from app import theme
 from app.family_views import parameter_view_for
 from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
 from app.settings import preview_path_for
-from app.widgets import ElidedLabel, more_icon, pretty_formula
+from app.mathdisplay import DisplayParseError, FormulaView, parse_display, plain_text
+from app.widgets import more_icon
 
 # Matches self._list.setIconSize below -- a saved family's sidecar preview
 # (see app.sandbox.THUMBNAIL_RESOLUTION/preview_path_for) is rendered
@@ -226,6 +227,15 @@ def _icon_for(name: str) -> QIcon:
     return _placeholder_icon()
 
 
+def _plain_formula(formula: str) -> str:
+    """The formula as linear Unicode (H₅(z), z²) for search -- so typing what
+    the typeset display shows finds it."""
+    try:
+        return plain_text(parse_display(formula))
+    except DisplayParseError:
+        return formula
+
+
 class LibraryRow(QWidget):
     """One list row: loaded dot, thumbnail, name, formula, and a ⋯ menu."""
 
@@ -249,11 +259,13 @@ class LibraryRow(QWidget):
         text = QVBoxLayout()
         text.setSpacing(0)
         self.name_label = QLabel(name, self)
-        self.formula_label = ElidedLabel(pretty_formula(formula) or "(empty map)", self)
-        self.formula_label.setProperty("role", "muted")
-        self.formula_label.setProperty("mono", True)
+        # Typeset, compact (fitted to the row, middle-elided; full formula
+        # in a tooltip).
+        self.formula_view = FormulaView(self, compact=True, px=12, height=20, color_role="muted")
+        self.formula_view.set_empty_text("(empty map)")
+        self.formula_view.set_source(formula)
         text.addWidget(self.name_label)
-        text.addWidget(self.formula_label)
+        text.addWidget(self.formula_view)
         layout.addLayout(text, 1)
         self.menu_button = QToolButton(self)
         self.menu_button.setProperty("role", "icon")
@@ -262,7 +274,7 @@ class LibraryRow(QWidget):
         self.menu_button.setAccessibleName(f"Actions for {name}")
         self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         layout.addWidget(self.menu_button)
-        for label in (self.name_label, self.formula_label, self.thumbnail, self.dot):
+        for label in (self.name_label, self.thumbnail, self.dot):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.set_loaded(False)
 
@@ -349,11 +361,17 @@ class LibraryPanel(QWidget):
         self._list.installEventFilter(_ReturnLoads(self))
         layout.addWidget(self._list, 1)
 
+        # Detail header: the family's name, then its typeset formula (compact).
+        header = QHBoxLayout()
+        header.setSpacing(8)
         self._formula_label = QLabel(self)
-        self._formula_label.setWordWrap(True)
         self._formula_label.setProperty("mono", True)
         self._formula_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self._formula_label)
+        header.addWidget(self._formula_label)
+        self._formula_view = FormulaView(self, compact=True, px=15, height=34)
+        self._formula_view.set_empty_text("(empty map)")
+        header.addWidget(self._formula_view, 1)
+        layout.addLayout(header)
         notes_caption = QLabel("NOTES", self)
         notes_caption.setProperty("role", "section")
         layout.addWidget(notes_caption)
@@ -493,7 +511,7 @@ class LibraryPanel(QWidget):
                 continue
             entry = self.session.library.find(name)
             formula = entry.to_formula() if entry is not None else ""
-            haystack = f"{name} {formula} {pretty_formula(formula)}".lower()
+            haystack = f"{name} {formula} {_plain_formula(formula)}".lower()
             hidden = bool(needle) and needle not in haystack
             item.setHidden(hidden)
             section_has_visible = section_has_visible or not hidden
@@ -531,12 +549,15 @@ class LibraryPanel(QWidget):
         self._notes_edit.blockSignals(True)
         if name is None:
             self._formula_label.setText("")
+            self._formula_view.set_source("")
             self._notes_edit.setPlainText("")
             self._notes_edit.setReadOnly(True)
         else:
             entry = self.session.library.find(name)
             formula = entry.to_formula() if entry is not None else ""
-            self._formula_label.setText(f"{name}: {pretty_formula(formula) or '(empty map)'}")
+            self._formula_label.setText(f"{name}:")
+            self._formula_view.set_source(formula)
+            self._formula_view.setToolTip(formula)
             self._notes_edit.setPlainText(entry.notes if entry is not None else "")
             self._notes_edit.setReadOnly(name in PRESET_FAMILY_NAMES)
             self._notes_edit.setPlaceholderText("" if name in PRESET_FAMILY_NAMES
@@ -557,6 +578,16 @@ class LibraryPanel(QWidget):
         self._on_change()
 
     # ---- load: replaces session.map; the CALLER resets its own pane's viewport --------
+    def load_family(self, name: str) -> bool:
+        """Selects `name` and loads it, exactly as double-clicking its row
+        would. False if there is no such entry."""
+        item = self._item_for(name)
+        if item is None:
+            return False
+        self._list.setCurrentItem(item)
+        self._load_selected()
+        return True
+
     def _load_selected(self) -> None:
         # The viewport reset (mode-aware, per pane) is on_load's job
         # (app/sandbox.py's _on_family_loaded): this panel touches no viewport.

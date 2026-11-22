@@ -82,11 +82,11 @@ def main() -> None:
 
     print("\nfonts:")
     loaded = theme.load_fonts()
-    for family in (theme.FONT_UI, theme.FONT_HEADING, theme.FONT_MONO):
+    for family in (theme.FONT_UI, theme.FONT_HEADING, theme.FONT_MONO, theme.FONT_MATH):
         check(family in loaded and family in QFontDatabase.families(), f"{family} is registered")
     for name in theme.FONT_FILES:
         check((theme.FONTS_DIR / name).is_file(), f"{name} is bundled")
-    for lic in ("Inter-OFL.txt", "SpaceGrotesk-OFL.txt", "JetBrainsMono-OFL.txt"):
+    for lic in ("Inter-OFL.txt", "SpaceGrotesk-OFL.txt", "JetBrainsMono-OFL.txt", "STIXTwoMath-OFL.txt"):
         text = (theme.FONTS_DIR / lic).read_text(encoding="utf-8") if (theme.FONTS_DIR / lic).is_file() else ""
         check("SIL Open Font License" in text, f"{lic} is the OFL")
     spec = (REPO / "complexdynamics.spec").read_text(encoding="utf-8")

@@ -56,12 +56,17 @@ lines), so this needed no changes to keep working across the P/Q switch.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QRadioButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
 import cdx
 from app import controls, theme
 from app.complex_field import ComplexField
+from app.mathdisplay import FormulaView, LivePreview
+
+PREVIEW_PX = 18         # the live preview's base size (full-size typesetting)
+PREVIEW_DEBOUNCE_MS = 150
 
 
 class EquationPanel(QWidget):
@@ -99,6 +104,21 @@ class EquationPanel(QWidget):
         self._formula_edit.returnPressed.connect(self._apply)
         eq_row.addWidget(self._formula_edit, 1)
         left.addLayout(eq_row)
+
+        # Live typeset preview of what is being typed (debounced). On a parse
+        # error the last good preview stays, greyed, and the error shows below.
+        self._preview = FormulaView(compact=False, px=PREVIEW_PX)
+        self._preview.setAccessibleName("Formula preview")
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._preview_scroll.setWidget(self._preview)
+        self._preview_scroll.setWidgetResizable(False)
+        self._preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._preview_scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        left.addWidget(self._preview_scroll)
+        self._live_preview = LivePreview(self._preview, PREVIEW_DEBOUNCE_MS, self)
+        self._preview.installEventFilter(self)
 
         self._error_label = QLabel()
         self._error_label.setWordWrap(True)
@@ -164,6 +184,25 @@ class EquationPanel(QWidget):
             lambda b: self._active_combo.setCurrentText(b.property("paramName")))
         self._active_field: QWidget | None = None
         self._table_widgets: list[QWidget] = []
+
+    def eventFilter(self, obj, event) -> bool:   # noqa: N802
+        if obj is self._preview and event.type() == event.Type.LayoutRequest:
+            self._fit_preview()
+        return super().eventFilter(obj, event)
+
+    def _fit_preview(self) -> None:
+        self._preview.adjustSize()
+        bar = self._preview_scroll.horizontalScrollBar()
+        extra = bar.sizeHint().height() if self._preview.width() > self._preview_scroll.viewport().width() else 0
+        self._preview_scroll.setFixedHeight(self._preview.sizeHint().height() + extra + 2)
+
+    def preview(self) -> FormulaView:
+        """The live typeset preview under f(z) = (for tests and snapshots)."""
+        return self._preview
+
+    def flush_preview(self) -> None:
+        """Applies any pending (debounced) preview update now."""
+        self._live_preview.flush()
 
     def set_active_field(self, field: QWidget) -> None:
         """The value field for the ACTIVE parameter -- the window's own `a`
@@ -246,6 +285,8 @@ class EquationPanel(QWidget):
         self._formula_edit.blockSignals(True)
         self._formula_edit.setText(self.session.map.to_formula())
         self._formula_edit.blockSignals(False)
+        self._live_preview.set_now(self.session.map.to_formula())
+        self._fit_preview()
         theme.set_invalid(self._formula_edit, False)
 
         if self.session.map.is_pq_backed():
@@ -318,6 +359,7 @@ class EquationPanel(QWidget):
         return self._warning_label.text() if self._warning_label.isVisibleTo(self) else ""
 
     def _on_formula_text_changed(self, text: str) -> None:
+        self._live_preview.text_changed(text)
         try:
             info = cdx.parse_rational_info(text)
         except ValueError as e:

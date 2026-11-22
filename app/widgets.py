@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QFrame, QHBoxLayout, QLabel, QLayout,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
@@ -504,24 +504,19 @@ class ElidedLabel(QLabel):
         super().setText(shown)
 
 
-# ---- formula pretty-printing ----------------------------------------------------------------
-_SUPERSCRIPTS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
-
-
-def pretty_formula(formula: str) -> str:
-    """'z^2 + a*z - 1' -> 'z² + a·z − 1' (display only; never parsed back)."""
-    text = re.sub(r"\^\(?(-?\d+)\)?", lambda m: m.group(1).translate(_SUPERSCRIPTS), formula)
-    text = text.replace("*", "·")
-    text = re.sub(r"(?<=\s)-(?=\s)", "−", text)
-    return text
-
-
 # ---- map chip ---------------------------------------------------------------------------
 class MapChip(QPushButton):
-    """'family  formula' in a pill; clicking it opens the Library."""
+    """'family  formula' in a pill; clicking it opens the Library. The
+    formula is typeset (app.mathdisplay) in compact mode, fitted to the
+    chip's height, middle-elided when too wide; hovering shows the full
+    typeset formula."""
+
+    FORMULA_PX = 15
+    MAX_FORMULA_WIDTH = 440
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
+        from app.mathdisplay import FormulaView
         self.setProperty("role", "mapChip")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QHBoxLayout(self)
@@ -530,21 +525,40 @@ class MapChip(QPushButton):
         self.name_label = QLabel(self)
         self.name_label.setProperty("role", "muted")
         self.name_label.setProperty("mono", True)
-        self.formula_label = QLabel(self)
-        self.formula_label.setProperty("mono", True)
-        for label in (self.name_label, self.formula_label):
-            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            layout.addWidget(label)
+        self.formula_view = FormulaView(self, compact=True, px=self.FORMULA_PX,
+                                        height=theme.CHIP_HEIGHT - 6,
+                                        max_natural_width=self.MAX_FORMULA_WIDTH, tooltip=False)
+        self.formula_view.set_empty_text("(empty map)")
+        for w in (self.name_label, self.formula_view):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            layout.addWidget(w)
+        self._formula = ""
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
     def set_map(self, name: str, formula: str) -> None:
         self.name_label.setText(name)
-        self.formula_label.setText(pretty_formula(formula) if formula else "(empty map)")
+        self._formula = formula
+        if not self.formula_view.set_source(formula):
+            # Not displayable (cdx rejects it -- not expected for a map that
+            # exists): show nothing rather than a stale formula.
+            self.formula_view.set_source("")
         self.setAccessibleName(f"{name}: {formula}. Open the library")
         self.updateGeometry()
 
+    def formula(self) -> str:
+        return self._formula
+
     def text_shown(self) -> str:
-        return f"{self.name_label.text()} {self.formula_label.text()}"
+        return f"{self.name_label.text()} {self.formula_view.plain_text()}"
+
+    def event(self, e) -> bool:
+        from app.mathdisplay import FormulaToolTip
+        if e.type() == QEvent.Type.ToolTip and self._formula:
+            FormulaToolTip.show_for(self, e.globalPos(), self._formula, self.toolTip())
+            return True
+        if e.type() in (QEvent.Type.Leave, QEvent.Type.MouseButtonPress):
+            FormulaToolTip.hide_for(self)
+        return super().event(e)
 
     def sizeHint(self) -> QSize:
         layout = self.layout()
