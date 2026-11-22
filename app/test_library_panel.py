@@ -36,8 +36,11 @@ from app.library_panel import (LibraryPanel, _bounding_view, _derive_dynamical_v
                                _DYNAMICAL_VIEW_PADDING, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for,
                                default_view_for_mode)
-from app.session import PRESET_FAMILY_NAMES, Session
-from app.settings import preview_path_for
+from app.family_views import (PRESET_PARAMETER_VIEWS, parameter_view_for, rename_family_meta,
+                               save_parameter_view, stored_parameter_view)
+from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
+                         PRESET_FAMILY_NAMES, Session)
+from app.settings import family_meta_path_for, preview_path_for
 
 failures = 0
 
@@ -64,14 +67,36 @@ def main() -> None:
 
     print("=== app.library_panel tests ===")
 
-    # ---- default-view lookup ------------------------------------------------------
-    print("\ndefault view lookup:")
-    center, scale = default_view_for("mandelbrot")
-    check(center == complex(-0.5, 0.0) and scale == 1.5,
-          "mandelbrot's default view matches the classic Mandelbrot framing")
-    fallback_center, fallback_scale = default_view_for("some-user-family-not-in-the-table")
-    check(fallback_center == 0j and fallback_scale > 0,
-          "an unlisted name gets the generic fallback view, not a KeyError")
+    # ---- default-view lookup: each family's stored parameter-plane framing ---------
+    # (app.family_views). The presets use the thumbnail table: the earlier
+    # hand-picked table opened McMullen at +-2.5, where its structure is a
+    # speck, and gave unlisted families an arbitrary (0, 2).
+    print("\ndefault view lookup (stored per-family parameter framing):")
+    expected_presets = {"mandelbrot": (complex(-0.75, 0), 1.5), "multibrot3": (0j, 1.35),
+                        "multibrot5": (0j, 1.25), "mcmullen2": (0j, 0.3), "mcmullen3": (0j, 0.3)}
+    check(all(default_view_for(n) == v for n, v in expected_presets.items()),
+          "each preset opens at its table framing (McMullen at +-0.3, not a speck at +-2.5)")
+    fallback = (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE)
+    check(default_view_for("some-user-family-not-in-the-table") == fallback,
+          "a family with no stored view falls back to DEFAULT_PARAMETER_VIEW_CENTER/SCALE")
+    check(default_view_for("newton3") == fallback,
+          "...as does newton3 (a has no effect on it; no table entry)")
+
+    # A saved family's view lives in a JSON sidecar beside its preview PNG.
+    save_parameter_view("viewed-family", complex(0.1, -0.2), 0.05)
+    check(stored_parameter_view("viewed-family") == (complex(0.1, -0.2), 0.05)
+          and family_meta_path_for("viewed-family").exists(),
+          "save_parameter_view stores a saved family's framing in its sidecar")
+    rename_family_meta("viewed-family", "viewed-family-2")
+    check(parameter_view_for("viewed-family-2") == (complex(0.1, -0.2), 0.05)
+          and stored_parameter_view("viewed-family") is None,
+          "rename moves the stored framing with the family")
+    family_meta_path_for("garbled-family").write_text("{not json")
+    check(parameter_view_for("garbled-family") == fallback,
+          "an unreadable sidecar reads as 'nothing stored', never an exception")
+    save_parameter_view("mandelbrot", 5j, 9.0)
+    check(parameter_view_for("mandelbrot") == PRESET_PARAMETER_VIEWS["mandelbrot"],
+          "a preset's framing is fixed: saving one for it is ignored")
 
     # ---- dynamical (Julia-set) default framing: FIXED, interim -----------------------
     # default_view_for's own table is a-SPACE (the parameter plane) --
@@ -356,11 +381,38 @@ def main() -> None:
     panel._delete_selected()
     check("thumbed-family" not in session.library.names(), "...and a Yes deletes it")
 
+    # ---- legacy library file: no framing data anywhere -> defaults -------------------
+    print("\nlegacy library file (written before per-family framings existed):")
+    legacy_session = Session()
+    legacy_session.map = cdx.RationalMap.from_expression("z^2 + a*z^3", "a", {}, "legacy-family")
+    legacy_session.save_to_library("legacy-family")
+    legacy_path = Path(tempfile.mkdtemp()) / "legacy-library.txt"
+    legacy_session.save_library_file(str(legacy_path))
+    check("parameter_view" not in legacy_path.read_text(),
+          "sanity: the library file format itself carries no framing (it lives app-side)")
+    fresh = Session()
+    fresh.load_library_file(str(legacy_path))
+    check("legacy-family" in fresh.library.names()
+          and default_view_for("legacy-family") == fallback,
+          "a library file with no view data loads, and its family opens at the defaults")
+
+    # ---- callbacks: the owner persists the framing on save / rename -----------------
+    saved_as: list[str] = []
+    renamed: list[tuple[str, str]] = []
+    cb_panel = LibraryPanel(Session(), lambda: None, lambda: None,
+                            on_saved_as=saved_as.append,
+                            on_renamed=lambda old, new: renamed.append((old, new)))
+    cb_panel._do_save_as("cb-family")
+    cb_panel._do_rename("cb-family", "cb-family-renamed")
+    check(saved_as == ["cb-family"] and renamed == [("cb-family", "cb-family-renamed")],
+          "Save current as and Rename tell the owner (it stores/moves the framing)")
+
     provided: list[str] = []
     thumbed = LibraryPanel(Session(), lambda: None, lambda: None,
                            thumbnail_provider=lambda name, entry: provided.append(name) or _placeholder_icon())
     check(sorted(provided) == sorted(PRESET_FAMILY_NAMES),
-          "preset thumbnails come from the thumbnail provider (one call per preset)")
+          "row thumbnails come from the thumbnail provider (one call per row; a fresh "
+          "session's library is just the presets)")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

@@ -34,9 +34,10 @@ preview (app.settings.preview_path_for) exists, to show it as a list icon
 the whole test module so this stays off the real filesystem there too.
 
 LOADING resets each visible pane's VIEWPORT to a per-family, MODE-aware
-default (default_view_for_mode below) -- hand-picked a-space framings
-(_DEFAULT_VIEWS, via default_view_for) for the six built-in shapes' most
-legible parameter-plane region on a parameter-plane pane, a FIXED center-0
+default (default_view_for_mode below) -- the family's own STORED parameter-
+plane framing (app.family_views: a table for the presets, the parameter
+pane's viewport at "Save current as..." for a saved family, else
+DEFAULT_PARAMETER_VIEW_CENTER/SCALE) on a parameter-plane pane, a FIXED center-0
 z-space framing (default_dynamical_view) on a dynamical-plane one --
 using the PARAMETER-plane table for a dynamical pane's reset was a real
 bug (Stage 2): it jumped every Julia-set pane onto whatever window makes
@@ -64,6 +65,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLa
 
 import cdx
 from app import theme
+from app.family_views import parameter_view_for
 from app.session import PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES
 from app.settings import preview_path_for
 from app.widgets import ElidedLabel, more_icon, pretty_formula
@@ -74,40 +76,18 @@ from app.widgets import ElidedLabel, more_icon, pretty_formula
 # smaller" every other thumbnail in this app already does.
 _LIST_ICON_SIZE = 32
 
-# Hand-picked (center, scale) for each built-in preset's most legible
-# region -- not derived from any formula, just where each shape's
-# interesting structure actually sits. A name not listed here (a
-# user-saved family, or a future preset this table hasn't caught up
-# with) falls back to _FALLBACK_VIEW.
-_DEFAULT_VIEWS: dict[str, tuple[complex, float]] = {
-    "mandelbrot": (complex(-0.5, 0.0), 1.5),
-    "multibrot3": (complex(0.0, 0.0), 1.5),
-    "multibrot5": (complex(0.0, 0.0), 1.3),
-    "mcmullen2": (complex(0.0, 0.0), 2.5),
-    "mcmullen3": (complex(0.0, 0.0), 2.5),
-    "newton3": (complex(0.0, 0.0), 2.0),
-}
-_FALLBACK_VIEW: tuple[complex, float] = (complex(0.0, 0.0), 2.0)
-
 _NAME_ROLE = Qt.ItemDataRole.UserRole
 _ICON_ROLE = Qt.ItemDataRole.UserRole + 1     # the row's thumbnail (drawn by its row widget)
 _ROW_HEIGHT = 48                               # >= 44 px: sidebar touch-target minimum
 
 
 def default_view_for(name: str) -> tuple[complex, float]:
-    return _DEFAULT_VIEWS.get(name, _FALLBACK_VIEW)
-
-
-# KNOWN OPEN PROBLEM, not addressed here: _DEFAULT_VIEWS is a hand-picked
-# table for exactly six built-in shapes, and _FALLBACK_VIEW is a single
-# generic guess for everything else (any user-saved family). There is no
-# per-instance parameter-plane framing at all -- a custom map's a-space
-# window is just whatever the generic fallback happens to be, legible or
-# not. Left exactly as it is; only the DYNAMICAL side changes below.
+    """The family's parameter-plane framing -- see app.family_views."""
+    return parameter_view_for(name)
 
 
 # The dynamical (Julia-set) plane's OWN default framing has nothing to do
-# with the table above: _DEFAULT_VIEWS/default_view_for frames a-SPACE (the
+# with the parameter view above: default_view_for frames a-SPACE (the
 # parameter plane), and using it for z-space too was a real bug -- resetting
 # or loading a family while looking at a Julia set jumped to whatever window
 # happens to make the PARAMETER plane legible (e.g. mandelbrot's own
@@ -314,22 +294,32 @@ class LibraryPanel(QWidget):
     dot, a thumbnail and a ⋯ menu; the selected entry's formula and notes
     below; "Save current as..." at the bottom.
 
-    `thumbnail_provider(name, map) -> QIcon | None` supplies preset
-    thumbnails (SandboxWindow renders and caches them); `confirm(title,
-    text) -> bool` asks before a delete (a QMessageBox by default; tests
-    inject their own).
+    `thumbnail_provider(name, map) -> QIcon | None` supplies every row's
+    thumbnail, preset or saved (SandboxWindow's FamilyThumbnailer renders
+    them off the GUI thread and returns a placeholder until each arrives;
+    refresh_preview(name) then swaps it in). Without one, a saved family
+    shows its sidecar PNG and a preset a placeholder. `confirm(title, text)
+    -> bool` asks before a delete (a QMessageBox by default; tests inject
+    their own). `on_saved_as(name)` and `on_renamed(old, new)` let the
+    owner persist per-family data that lives outside the library (the
+    parameter-plane framing, app.family_views) -- this panel itself still
+    never writes to disk.
     """
 
     def __init__(self, session, on_load: Callable[[], None], on_change: Callable[[], None],
                 parent: QWidget | None = None,
                 thumbnail_provider: Callable[[str, cdx.RationalMap], QIcon | None] | None = None,
-                confirm: Callable[[str, str], bool] | None = None):
+                confirm: Callable[[str, str], bool] | None = None,
+                on_saved_as: Callable[[str], None] | None = None,
+                on_renamed: Callable[[str, str], None] | None = None):
         super().__init__(parent)
         self.session = session
         self._on_load = on_load
         self._on_change = on_change
         self._thumbnail_provider = thumbnail_provider
         self._confirm = confirm or self._confirm_with_dialog
+        self._on_saved_as = on_saved_as
+        self._on_renamed = on_renamed
         self._loaded_name: str | None = None
         self._rows: dict[str, LibraryRow] = {}
 
@@ -395,10 +385,10 @@ class LibraryPanel(QWidget):
         self._list.setItemWidget(item, label)
 
     def _row_icon(self, name: str, entry) -> QIcon:
-        if name in PRESET_FAMILY_NAMES:
-            icon = self._thumbnail_provider(name, entry) if self._thumbnail_provider else None
-            return icon if icon is not None else _placeholder_icon()
-        return _icon_for(name)
+        icon = self._thumbnail_provider(name, entry) if self._thumbnail_provider else None
+        if icon is not None:
+            return icon
+        return _placeholder_icon() if name in PRESET_FAMILY_NAMES else _icon_for(name)
 
     def _refresh_list(self, select: str | None = None) -> None:
         self._list.blockSignals(True)
@@ -473,14 +463,20 @@ class LibraryPanel(QWidget):
 
     def refresh_previews(self) -> None:
         """Re-reads each row's thumbnail without touching selection or the
-        detail pane -- called by SandboxWindow._on_library_changed after it
-        (re)writes the sidecar thumbnails (this panel never writes to disk)."""
+        detail pane -- after a library change, or a palette/strategy change
+        (the thumbnail provider re-renders what is out of date)."""
         for name in self.entry_names():
-            item = self._item_for(name)
-            icon = self._row_icon(name, self.session.library.find(name))
-            item.setData(_ICON_ROLE, icon)
-            if name in self._rows:
-                self._rows[name].set_icon(icon)
+            self.refresh_preview(name)
+
+    def refresh_preview(self, name: str) -> None:
+        """Re-reads ONE row's thumbnail -- e.g. when its render arrives."""
+        item = self._item_for(name)
+        if item is None:
+            return
+        icon = self._row_icon(name, self.session.library.find(name))
+        item.setData(_ICON_ROLE, icon)
+        if name in self._rows:
+            self._rows[name].set_icon(icon)
 
     # ---- search ----------------------------------------------------------------------------
     def _apply_filter(self, text: str) -> None:
@@ -592,6 +588,8 @@ class LibraryPanel(QWidget):
             return
         self._error_label.setText("")
         self._loaded_name = name   # the current map now IS this entry
+        if self._on_saved_as is not None:
+            self._on_saved_as(name)   # e.g. record its parameter-plane framing
         self._refresh_list(select=name)
         self._on_change()
 
@@ -614,6 +612,8 @@ class LibraryPanel(QWidget):
         self._error_label.setText("")
         if self._loaded_name == old_name:
             self._loaded_name = new_name
+        if self._on_renamed is not None:
+            self._on_renamed(old_name, new_name)
         self._refresh_list(select=new_name)
         self._on_change()
 

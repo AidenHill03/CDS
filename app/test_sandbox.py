@@ -1872,8 +1872,9 @@ def main() -> None:
     # a real routing bug could pass unnoticed.
     window.session.map = cdx.RationalMap.mandelbrot()
     expected_param_center, expected_param_scale = default_view_for(window.session.map.name)
-    check((expected_param_center, expected_param_scale) == (complex(-0.5, 0.0), 1.5),
-          "sanity: mandelbrot's own parameter-table entry, not the generic fallback")
+    check((expected_param_center, expected_param_scale) == (complex(-0.75, 0.0), 1.5),
+          "sanity: mandelbrot's own stored parameter framing (app.family_views), not the "
+          "generic fallback")
 
     # window.pane is on "julia" (dynamical) here (last set by the mode
     # selector section above) -- Reset View on it must frame the FIXED
@@ -2592,6 +2593,9 @@ def main() -> None:
     window.session.map = cdx.RationalMap.mandelbrot()
     window.mode_combo.setCurrentText("julia")
     window.library_panel._do_save_as("stage-c-sidecar-family")
+    # The thumbnail renders off the GUI thread now (FamilyThumbnailer).
+    wait_for(lambda: preview_path_for("stage-c-sidecar-family").exists()
+             and window.thumbnailer.pending() == 0, timeout_ms=20000)
     check(preview_path_for("stage-c-sidecar-family").exists(),
           "Save Current As -> on_change -> _on_library_changed writes a real sidecar PNG, "
           "not just the library.txt entry")
@@ -2600,9 +2604,9 @@ def main() -> None:
     saved_icon = (window.library_panel.row_icon("stage-c-sidecar-family")
                  .pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage())
     check(not saved_icon.isNull() and saved_icon != placeholder_image,
-          "...and the live LibraryPanel's own list icon reflects it immediately, through the "
-          "real _on_library_changed -> refresh_previews wiring, not just on the next full "
-          "app restart")
+          "...and the live LibraryPanel's own list icon reflects it as soon as it lands, "
+          "through the real thumbnailer -> refresh_preview wiring, not just on the next "
+          "full app restart")
 
     window.library_panel._do_delete("stage-c-sidecar-family")
     check(not preview_path_for("stage-c-sidecar-family").exists(),
@@ -2624,6 +2628,12 @@ def main() -> None:
               "param/layout fields")
         check(base64.b64decode(saved_data["preview"])[:8] == b"\x89PNG\r\n\x1a\n",
               "...and it's a genuine PNG (correct magic bytes), not an arbitrary string")
+        julia_thumb = sandbox_module.render_experiment_thumbnail(
+            window.session.map, window.session.param, window.session.settings,
+            window.session.render_settings)
+        check(saved_data["preview"] == sandbox_module.qimage_to_base64_png(julia_thumb),
+              "an experiment keeps its DYNAMICAL-plane (Julia set) thumbnail: an experiment is "
+              "one specific a -- only Library families switched to the parameter plane")
 
         # Opening it must not raise on the new field, even though
         # _do_open_experiment intentionally never reads `preview` back out
@@ -3289,17 +3299,78 @@ def main() -> None:
           "editing the formula away from the entry makes the chip read custom and clears the dot")
     lib._select_by_name("mandelbrot")
     lib._load_selected()
-    sandbox_module._PRESET_THUMBNAIL_CACHE.clear()
+    # ---- family thumbnails: parameter planes, off the GUI thread ----------------------
+    # (Thumbnails render in FamilyThumbnailer's own pool; a row shows the
+    # placeholder until its render lands, then refresh_preview swaps it in.)
+    def thumb_array(name: str) -> np.ndarray:
+        img = (lib.row_icon(name).pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
+               .convertToFormat(QImage.Format.Format_RGB888))
+        raw = np.frombuffer(img.constBits(), np.uint8, img.sizeInBytes())
+        rows_ = raw.reshape(img.height(), img.bytesPerLine())[:, :img.width() * 3]
+        return rows_.reshape(img.height(), img.width(), 3).copy()
+
+    sandbox_module._FAMILY_THUMBNAIL_CACHE.clear()
+    t0 = time.perf_counter()
     lib._refresh_list()
+    refresh_time = time.perf_counter() - t0
     placeholder = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
-    check(all(lib.row_icon(n).pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage() != placeholder
-              for n in sandbox_module.PRESET_FAMILY_NAMES),
-          "every preset row shows a real rendered thumbnail")
-    check(len(sandbox_module._PRESET_THUMBNAIL_CACHE) == len(sandbox_module.PRESET_FAMILY_NAMES),
-          "...cached once per preset")
+    check(window.thumbnailer.pending() > 0
+          and all(lib.row_icon(n).pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage() == placeholder
+                  for n in sandbox_module.PRESET_FAMILY_NAMES),
+          f"a cold Library refresh returns at once ({refresh_time * 1000:.0f} ms) with "
+          f"placeholders, the renders still in flight")
+    t0 = time.perf_counter()
+    QTest.qWait(30)
+    check(time.perf_counter() - t0 < 1.0,
+          "the event loop stays responsive while thumbnails render (never on the GUI thread)")
+    ok = wait_for(lambda: window.thumbnailer.pending() == 0, timeout_ms=60000)
+    check(ok and all(lib.row_icon(n).pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage() != placeholder
+                     for n in sandbox_module.PRESET_FAMILY_NAMES),
+          "...then every preset row shows its real thumbnail")
+    thumbs = {n: thumb_array(n) for n in sandbox_module.PRESET_FAMILY_NAMES}
+    zd = ("mandelbrot", "multibrot3", "multibrot5")
+    check(all(not np.array_equal(thumbs[x], thumbs[y]) for x in zd for y in zd if x < y),
+          "mandelbrot, multibrot3 and multibrot5 thumbnails are pairwise different (at a = 0 "
+          "they were all the unit disk)")
+    check(all(window.thumbnailer.sources.get(n) == "parameter" for n in zd),
+          "...each one its parameter plane")
+    check(window.thumbnailer.sources.get("newton3") == "dynamical" and np.ptp(thumbs["newton3"]) > 0,
+          "newton3 (a has no effect) takes the dynamical-plane basin fallback, and it is not uniform")
+    for name in ("mcmullen2", "mcmullen3"):
+        check(window.thumbnailer.sources.get(name) == "parameter" and np.ptp(thumbs[name]) > 0
+              and len(np.unique(thumbs[name].reshape(-1, 3), axis=0)) > 8,
+              f"{name}'s thumbnail is its parameter plane (Bug C fixed: no fallback) and not uniform")
+    n_cached = len(sandbox_module._FAMILY_THUMBNAIL_CACHE)
     lib._refresh_list()
-    check(len(sandbox_module._PRESET_THUMBNAIL_CACHE) == len(sandbox_module.PRESET_FAMILY_NAMES),
-          "a rebuild reuses the cache instead of re-rendering")
+    check(window.thumbnailer.pending() == 0 and len(sandbox_module._FAMILY_THUMBNAIL_CACHE) == n_cached,
+          "a list rebuild reuses the cached thumbnails instead of re-rendering")
+    old_palette = window.session.settings.color_palette
+    new_palette = next(p for p in ("magma", "viridis", "classic") if p != old_palette)
+    window._on_settings_applied(dataclasses.replace(window.session.settings, color_palette=new_palette))
+    check(window.thumbnailer.pending() > 0, "a palette change invalidates them: they re-render")
+    wait_for(lambda: window.thumbnailer.pending() == 0, timeout_ms=60000)
+    window._on_settings_applied(dataclasses.replace(window.session.settings, color_palette=old_palette))
+    wait_for(lambda: window.thumbnailer.pending() == 0, timeout_ms=60000)
+
+    # ---- a family's parameter view: stored on save, applied on load ------------------
+    param_pane = next(p for p in window.panes if p.render_mode in sandbox_module.PARAMETER_PLANE_MODES)
+    saved_view = cdx.Viewport(complex(-0.1234, 0.6543), 0.0425, param_pane.viewport.resolution)
+    param_pane.viewport = saved_view
+    lib._do_save_as("framed-family")
+    param_pane.viewport = cdx.Viewport(0j, 2.0, param_pane.viewport.resolution)
+    lib._select_by_name("framed-family")
+    lib._load_selected()
+    check((param_pane.viewport.center, param_pane.viewport.scale)
+          == (saved_view.center, saved_view.scale),
+          "Save current as stores the parameter pane's view; loading the family restores it")
+    lib._select_by_name("mcmullen2")
+    lib._load_selected()
+    check((param_pane.viewport.center, param_pane.viewport.scale) == (0j, 0.3),
+          "loading mcmullen2 frames its parameter plane at +-0.3 (it used to open as a speck)")
+    lib._do_delete("framed-family")
+    wait_for(lambda: window.thumbnailer.pending() == 0, timeout_ms=60000)
+    lib._select_by_name("mandelbrot")
+    lib._load_selected()
     window.sidebar.reveal(window.info_panel)
     rows = dict(window.info_panel.this_map_rows())
     check(rows.get("Degree") == "2" and "∞" in rows.get("Critical points", "")

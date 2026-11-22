@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -53,7 +54,10 @@ from app.equation_panel import EquationPanel
 from app.facts_panel import (FactsPanel, _classify, _is_inf, critical_orbit_fates, facts_to_dict,
                              format_short)
 from app.info_panel import InfoPanel
-from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
+from app.family_views import (parameter_view_for, rename_family_meta, save_parameter_view,
+                               set_thumbnail_key, thumbnail_key)
+from app.library_panel import (LibraryPanel, _placeholder_icon, default_dynamical_view,
+                               default_view_for_mode)
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
@@ -62,8 +66,8 @@ from app.render_cache import RenderCache
 from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
                          PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES, RENDER_MODES, Session,
                          render_map)
-from app.settings import (Settings, library_path, load_settings, preview_path_for,
-                          previews_dir, save_settings)
+from app.settings import (Settings, family_meta_path_for, library_path, load_settings,
+                          preview_path_for, previews_dir, save_settings)
 from app.settings_panel import (COLORING_GROUPS, RENDERING_GROUPS, SETTINGS_APPLY_DEBOUNCE_MS,
                                 SettingsPanel)
 from app.version import PRODUCT_NAME
@@ -104,8 +108,11 @@ PARAM_HISTORY_LIMIT = 200
 # A held/repeated arrow nudge is ONE undo step, not one per tick.
 NUDGE_HISTORY_COALESCE_S = 0.7
 
-# Preset thumbnails (render_thumbnail), shared by every window of the process.
-_PRESET_THUMBNAIL_CACHE: dict[tuple, "QIcon"] = {}
+# Family thumbnails (render_family_thumbnail) by (name, key), shared by every
+# window of the process -- see FamilyThumbnailer.
+_FAMILY_THUMBNAIL_CACHE: dict[tuple[str, str], "QIcon"] = {}
+# Families whose parameter-plane thumbnail came back uniform, logged once each.
+_UNIFORM_THUMBNAIL_LOGGED: set[str] = set()
 
 # ---- render modes as the UI shows them ------------------------------------------------------
 # RENDER_MODES ids stay data; the segmented controls show these labels, and
@@ -2579,26 +2586,77 @@ EXPORT_PREVIEW_RESOLUTION = 240
 THUMBNAIL_RESOLUTION = 64
 
 
-def render_thumbnail(rational_map: cdx.RationalMap, param: complex, color_settings: Settings,
-                     render_settings: cdx.RenderSettings,
-                     resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
-    """A small CLEAN dynamical-plane render (Julia set, no overlays) of
-    (rational_map, param) -- the same render_map + array_to_qimage pipeline
-    every other render goes through, so a thumbnail always matches what the
-    map actually looks like, never a stale/approximated stand-in.
+def render_experiment_thumbnail(rational_map: cdx.RationalMap, param: complex,
+                                color_settings: Settings, render_settings: cdx.RenderSettings,
+                                resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
+    """The thumbnail of an EXPERIMENT (.cdsx snapshot): a small clean
+    DYNAMICAL-plane render (Julia set, no overlays) of (rational_map, param)
+    -- an experiment is one specific a, so its Julia set is the right
+    picture. The same render_map + array_to_qimage pipeline every other
+    render goes through, so it always matches what the map looks like.
 
-    Always the DYNAMICAL plane (never parameter): a family's own critical/
-    fixed-point structure lives there regardless of whether `a` affects
-    anything at all, whereas a parameter-plane render can be entirely
-    degenerate for a map like newton_cubic() where `a` has no effect (see
-    ImageView.no_effect_parameter_message) -- there is no single parameter-
-    plane framing that is meaningful for every possible family, but
-    default_dynamical_view's fixed center-0 framing (Stage A) is.
+    A FAMILY's thumbnail (the Library) is a different picture -- its
+    parameter plane, which is what tells families apart: at a = 0 every
+    z^d + a is the unit disk. See render_family_thumbnail.
     """
     center, scale = default_dynamical_view(rational_map, param)
     viewport = cdx.Viewport(center, scale, resolution)
     array = render_map(rational_map, param, viewport, render_settings, "julia")
     return array_to_qimage(array, "julia", color_settings, render_settings.max_iter)
+
+
+def render_family_thumbnail(name: str, rational_map: cdx.RationalMap, color_settings: Settings,
+                            render_settings: cdx.RenderSettings,
+                            view: tuple[complex, float] | None = None,
+                            resolution: int = THUMBNAIL_RESOLUTION) -> tuple[QImage, str]:
+    """The Library thumbnail of a FAMILY: its PARAMETER plane (mode
+    "parameter", the user's current strategy/critical_index and palette)
+    at the family's stored framing (app.family_views), through the same
+    render_map + array_to_qimage pipeline as every other render. Returns
+    (image, source), source "parameter" or "dynamical".
+
+    Honest fallbacks, to the dynamical-plane BASIN render at the family's
+    representative parameter (a = 0) -- never a flat square:
+      * `a` has no effect on the map (describe_parameter_role says "unused
+        by this map", e.g. newton3): there is no parameter plane to show;
+      * the parameter render comes back uniform (every value and the
+        escaped mask constant) -- logged once per family.
+    `resolution` is in device pixels (callers pass 64 x the device pixel
+    ratio). Safe to call off the GUI thread: it builds a QImage, never a
+    QPixmap.
+    """
+    if describe_parameter_role(rational_map) != "unused by this map":
+        center, scale = view if view is not None else parameter_view_for(name)
+        viewport = cdx.Viewport(center, scale, resolution)
+        array = render_map(rational_map, 0j, viewport, render_settings, "parameter",
+                           strategy=color_settings.parameter_strategy,
+                           critical_index=color_settings.parameter_critical_index)
+        if np.ptp(array[0]) > 0 or np.ptp(array[1]) > 0:
+            return (array_to_qimage(array, "parameter", color_settings, render_settings.max_iter),
+                    "parameter")
+        if name not in _UNIFORM_THUMBNAIL_LOGGED:
+            _UNIFORM_THUMBNAIL_LOGGED.add(name)
+            print(f"[thumbnails] {name}: the parameter plane at {center} +- {scale} is uniform; "
+                  "showing the dynamical-plane basin instead", file=sys.stderr)
+    center, scale = default_dynamical_view(rational_map, 0j)
+    viewport = cdx.Viewport(center, scale, resolution)
+    array = render_map(rational_map, 0j, viewport, render_settings, "basin")
+    return array_to_qimage(array, "basin", color_settings, render_settings.max_iter), "dynamical"
+
+
+def family_thumbnail_key(name: str, rational_map: cdx.RationalMap, color_settings: Settings,
+                         render_settings: cdx.RenderSettings, resolution: int) -> str:
+    """Everything a family thumbnail depends on: the map, its framing, the
+    pixel size, and the computing/colouring settings (palette, scaling,
+    period, strategy, critical index, iteration settings). A change to any
+    of them is a different key -- that is the invalidation."""
+    center, scale = parameter_view_for(name)
+    parts = (rational_map.serialize(), center.real, center.imag, scale, resolution,
+             color_settings.color_palette, color_settings.color_scaling,
+             color_settings.color_period, color_settings.parameter_strategy,
+             color_settings.parameter_critical_index, render_settings.max_iter,
+             render_settings.escape_radius, render_settings.tol)
+    return hashlib.sha1(repr(parts).encode("utf-8")).hexdigest()[:20]
 
 
 def qimage_to_base64_png(image: QImage) -> str:
@@ -2615,38 +2673,144 @@ def qimage_to_base64_png(image: QImage) -> str:
     return base64.b64encode(buffer.data().data()).decode("ascii")
 
 
-def _regenerate_library_previews(library: cdx.FamilyLibrary, color_settings: Settings,
-                                 render_settings: cdx.RenderSettings) -> None:
-    """(Re)writes a sidecar thumbnail (see app.settings.preview_path_for) for
-    every non-preset entry currently in `library`, and removes any leftover
-    sidecar for a name no longer present -- so previews/ never drifts out of
-    sync with what save_user_library just wrote to library.txt. Called after
-    EVERY persisted library change (SandboxWindow._on_library_changed): a
-    rename or delete is handled for free by recomputing from the library's
-    current contents rather than special-casing each action, since a rename
-    changes an entry's hashed filename and a delete just drops it from the
-    "keep" set below.
-
-    Rendered at a=0 -- RationalMap itself carries no stored parameter (see
-    Session.param, which belongs to the session, not to any one library
-    entry, and may currently be showing a completely different family), so
-    there is no "the" parameter a saved entry was last viewed at to reuse;
-    0 is a plain, always-valid evaluation point, not a per-entry guess.
+def _remove_stale_family_sidecars(library: cdx.FamilyLibrary) -> None:
+    """Deletes every sidecar (thumbnail PNG, framing JSON) whose family is
+    no longer in `library` -- called after every persisted library change
+    (SandboxWindow._on_library_changed). Rendering the thumbnails that are
+    missing or out of date is FamilyThumbnailer's job, off the GUI thread.
     """
-    keep_paths = set()
+    keep = set()
     for name in library.names():
         if name in PRESET_FAMILY_NAMES:
             continue
-        entry = library.find(name)
-        if entry is None:
-            continue
-        path = preview_path_for(name)
-        keep_paths.add(path)
-        image = render_thumbnail(entry, 0j, color_settings, render_settings)
-        image.save(str(path), "PNG")
-    for existing in previews_dir().glob("*.png"):
-        if existing not in keep_paths:
+        keep.add(preview_path_for(name))
+        keep.add(family_meta_path_for(name))
+    for existing in list(previews_dir().glob("*.png")) + list(previews_dir().glob("*.json")):
+        if existing not in keep:
             existing.unlink()
+
+
+class _ThumbnailSignals(QObject):
+    """Created on the GUI thread and connected to a bound method of the
+    GUI-thread FamilyThumbnailer, so delivery is queued -- see
+    RenderSignals for why a context-less receiver crashed."""
+    done = Signal(str, str, object, str)   # name, key, QImage, source
+
+
+class _ThumbnailTask(QRunnable):
+    def __init__(self, name: str, key: str, rational_map: cdx.RationalMap,
+                 color_settings: Settings, render_settings: cdx.RenderSettings,
+                 view: tuple[complex, float], resolution: int):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.name, self.key = name, key
+        self.rational_map = rational_map
+        self.color_settings, self.render_settings = color_settings, render_settings
+        self.view, self.resolution = view, resolution
+        self.signals = _ThumbnailSignals()
+        self.cancelled = False
+
+    def run(self) -> None:
+        if self.cancelled:
+            return
+        try:
+            image, source = render_family_thumbnail(self.name, self.rational_map,
+                                                    self.color_settings, self.render_settings,
+                                                    self.view, self.resolution)
+        except Exception as exc:   # never crash the pool; leave the placeholder up
+            print(f"[thumbnails] {self.name}: {exc}", file=sys.stderr)
+            return
+        if not self.cancelled:
+            self.signals.done.emit(self.name, self.key, image, source)
+
+
+class FamilyThumbnailer(QObject):
+    """Library thumbnails, rendered OFF the GUI thread.
+
+    icon(name, map) answers immediately: the cached thumbnail if its key
+    (family_thumbnail_key) is current, else the placeholder -- and in that
+    case starts a background render (one at a time per family). When a
+    render lands, `ready(name)` fires on the GUI thread and the caller
+    re-asks. Presets are cached in memory; saved families also in their
+    sidecar PNG, with the key in the family's JSON sidecar, so they are not
+    re-rendered on the next launch. A palette, scaling, period, strategy or
+    critical-index change is a new key: icon() then re-renders.
+
+    Pixel size: THUMBNAIL_RESOLUTION logical px x the device pixel ratio
+    (128 on Retina), with the ratio set on the image so it draws crisply.
+    """
+    ready = Signal(str)
+
+    def __init__(self, settings_getter: Callable[[], Settings],
+                 render_settings_getter: Callable[[], cdx.RenderSettings],
+                 dpr_getter: Callable[[], float], parent: QObject | None = None):
+        super().__init__(parent)
+        self._settings = settings_getter
+        self._render_settings = render_settings_getter
+        self._dpr = dpr_getter
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)    # leaves the main render pool its threads
+        self._pending: dict[str, _ThumbnailTask] = {}   # GUI-side owners (see RenderSignals)
+        self.sources: dict[str, str] = {}               # name -> "parameter" / "dynamical"
+
+    def _resolution(self) -> tuple[int, float]:
+        dpr = max(1.0, float(self._dpr() or 1.0))
+        return int(round(THUMBNAIL_RESOLUTION * dpr)), dpr
+
+    def icon(self, name: str, rational_map: cdx.RationalMap | None) -> QIcon:
+        if rational_map is None:
+            return _placeholder_icon()
+        st = self._settings()
+        rs = self._render_settings()
+        res, dpr = self._resolution()
+        key = family_thumbnail_key(name, rational_map, st, rs, res)
+        cached = _FAMILY_THUMBNAIL_CACHE.get((name, key))
+        if cached is not None:
+            return cached
+        if name not in PRESET_FAMILY_NAMES and thumbnail_key(name) == key:
+            path = preview_path_for(name)
+            image = QImage(str(path))
+            if not image.isNull():
+                image.setDevicePixelRatio(dpr)
+                icon = QIcon(QPixmap.fromImage(image))
+                _FAMILY_THUMBNAIL_CACHE[(name, key)] = icon
+                return icon
+        self._schedule(name, key, rational_map, st, rs, res)
+        return _placeholder_icon()
+
+    def _schedule(self, name, key, rational_map, st, rs, res) -> None:
+        current = self._pending.get(name)
+        if current is not None:
+            if current.key == key:
+                return
+            current.cancelled = True     # superseded: its result is dropped below anyway
+        single = cdx.RenderSettings(rs.max_iter, rs.escape_radius, rs.tol, 1)
+        task = _ThumbnailTask(name, key, rational_map, st, single, parameter_view_for(name), res)
+        task.signals.done.connect(self._on_done)
+        self._pending[name] = task
+        self._pool.start(task)
+
+    def _on_done(self, name: str, key: str, image: QImage, source: str) -> None:
+        task = self._pending.get(name)
+        if task is None or task.key != key:
+            return   # superseded by a newer request for this family
+        del self._pending[name]
+        _, dpr = self._resolution()
+        if name not in PRESET_FAMILY_NAMES:
+            image.save(str(preview_path_for(name)), "PNG")
+            set_thumbnail_key(name, key)
+        image.setDevicePixelRatio(dpr)
+        _FAMILY_THUMBNAIL_CACHE[(name, key)] = QIcon(QPixmap.fromImage(image))
+        self.sources[name] = source
+        self.ready.emit(name)
+
+    def pending(self) -> int:
+        return len(self._pending)
+
+    def shutdown(self) -> None:
+        for task in self._pending.values():
+            task.cancelled = True
+        self._pending.clear()
 
 
 class ExportImageDialog(QDialog):
@@ -3071,9 +3235,18 @@ class SandboxWindow(QMainWindow):
         # ---- sidebar (right dock): Info | Library | Facts ----------------------------
         self.sidebar = TabbedDock("Sidebar", "SidebarDock", "right", self)
         self.info_panel = InfoPanel(self)
+        # Library thumbnails: parameter planes, rendered off the GUI thread
+        # (FamilyThumbnailer), each row showing a placeholder until its own
+        # render lands.
+        self.thumbnailer = FamilyThumbnailer(lambda: self.session.settings,
+                                             lambda: self.session.render_settings,
+                                             self.devicePixelRatioF, self)
+        self.thumbnailer.ready.connect(self._on_family_thumbnail_ready)
         self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
                                           self._on_library_changed, self,
-                                          thumbnail_provider=self._preset_thumbnail)
+                                          thumbnail_provider=self.thumbnailer.icon,
+                                          on_saved_as=self._on_family_saved_as,
+                                          on_renamed=self._on_family_renamed)
         self.facts_panel = FactsPanel(self.session, self._on_center_view,
                                       self._on_seed_orbit_from_facts, self)
         # Info scrolls itself (a QTextBrowser); the others get a scroll area.
@@ -3534,11 +3707,12 @@ class SandboxWindow(QMainWindow):
             state = orbit_pane.image_view.orbit_tracker.state
             if state is not None:
                 orbit = (self.panes.index(orbit_pane), state.z0, state.n)
-        # Clean thumbnail (Stage C), same as a library entry's own -- see
-        # render_thumbnail's own docstring for why it's always the
-        # dynamical plane, never parameter.
-        preview_image = render_thumbnail(self.session.map, self.session.param,
-                                         self.session.settings, self.session.render_settings)
+        # Clean thumbnail (Stage C): an experiment is one specific a, so its
+        # thumbnail stays the DYNAMICAL plane -- see
+        # render_experiment_thumbnail (a family's is its parameter plane).
+        preview_image = render_experiment_thumbnail(self.session.map, self.session.param,
+                                                    self.session.settings,
+                                                    self.session.render_settings)
         preview = qimage_to_base64_png(preview_image)
         try:
             self.session.save_snapshot(path, panes, focused_index, coupled, orbit, preview)
@@ -3561,7 +3735,7 @@ class SandboxWindow(QMainWindow):
         # explicitly for THIS window to apply to its own panes/layout/
         # tracker. `preview` (Stage C) is intentionally unused here -- this
         # app has no experiment BROWSER yet for it to appear in (see
-        # render_thumbnail's own module-level note); it round-trips through
+        # render_experiment_thumbnail); it round-trips through
         # save/load correctly (see app/test_sandbox.py) and is available
         # for a future browser to display without another format change.
         try:
@@ -3914,6 +4088,9 @@ class SandboxWindow(QMainWindow):
             pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
+        # A new palette or strategy is a new thumbnail key: out-of-date
+        # thumbnails re-render in the background.
+        self.library_panel.refresh_previews()
         # Coalesced: Rendering and Coloring applying in the same pause
         # produce ONE re-render per pane, not one each.
         self._settings_render_timer.start()
@@ -4160,9 +4337,34 @@ class SandboxWindow(QMainWindow):
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
         self.session.save_user_library(library_path())
-        _regenerate_library_previews(self.session.library, self.session.settings,
-                                     self.session.render_settings)
+        _remove_stale_family_sidecars(self.session.library)
+        # Re-asks every row: anything missing or out of date (a family saved
+        # over with a new formula, a new framing) renders in the background.
         self.library_panel.refresh_previews()
+
+    def current_parameter_view(self) -> tuple[complex, float] | None:
+        """The parameter plane's framing as the user sees it now: the focused
+        pane if it shows a parameter plane, else the first pane that does
+        (None when neither does)."""
+        candidates = [self._focused_pane] + [p for p in self.panes if p is not self._focused_pane]
+        for pane in candidates:
+            if pane.render_mode in PARAMETER_PLANE_MODES:
+                return pane.viewport.center, pane.viewport.scale
+        return None
+
+    def _on_family_saved_as(self, name: str) -> None:
+        # "Save current as..." stores the parameter pane's viewport with the
+        # family, so loading it later frames the same region.
+        view = self.current_parameter_view()
+        if view is not None:
+            save_parameter_view(name, *view)
+
+    def _on_family_renamed(self, old_name: str, new_name: str) -> None:
+        rename_family_meta(old_name, new_name)
+
+    def _on_family_thumbnail_ready(self, name: str) -> None:
+        if shiboken6.isValid(self.library_panel):
+            self.library_panel.refresh_preview(name)
 
     # ---- viewport change -> debounced render ------------------------------------
     def _on_viewport_changed(self, pane: Pane) -> None:
@@ -4190,9 +4392,9 @@ class SandboxWindow(QMainWindow):
         #
         # Resets to this map's own MODE-appropriate default framing
         # (default_view_for_mode) -- the FOCUSED pane's own render_mode
-        # decides which table applies: default_view_for's a-space table
-        # (DEFAULT_PARAMETER_VIEW_CENTER/SCALE is exactly
-        # default_view_for("mandelbrot")) for a parameter-plane pane,
+        # decides which applies: the family's stored a-space framing
+        # (default_view_for -> app.family_views, falling back to
+        # DEFAULT_PARAMETER_VIEW_CENTER/SCALE) for a parameter-plane pane,
         # default_dynamical_view's critical-/fixed-point-derived z-space
         # framing for a dynamical one (_apply_param_change routes through
         # the identical dispatcher for exactly that purpose). Earlier this
@@ -4338,18 +4540,6 @@ class SandboxWindow(QMainWindow):
         self._refresh_map_chip()
         self._this_map_dirty = True
         self._refresh_this_map()
-
-    def _preset_thumbnail(self, name: str, entry: cdx.RationalMap) -> QIcon:
-        """A preset's real thumbnail (render_thumbnail), rendered once per
-        (formula, coloring) and cached for the process -- presets never change."""
-        st = self.session.settings
-        key = (name, entry.to_formula(), st.color_palette, st.color_scaling, st.color_period)
-        icon = _PRESET_THUMBNAIL_CACHE.get(key)
-        if icon is None:
-            image = render_thumbnail(entry, 0j, st, self.session.render_settings)
-            icon = QIcon(QPixmap.fromImage(image))
-            _PRESET_THUMBNAIL_CACHE[key] = icon
-        return icon
 
     def _refresh_this_map(self) -> None:
         """Info's "This map" section -- computed only while Info is showing
@@ -4572,6 +4762,7 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             for task in pane.pending_tasks.values():
                 task.cancel.cancel()
+        self.thumbnailer.shutdown()
         for panel in self._extra_panels:
             shutdown = getattr(panel, "shutdown", None)
             if callable(shutdown):

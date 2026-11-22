@@ -37,12 +37,13 @@ def _prepare_qt_env() -> None:
 
 
 def _settle(app, window, timeout_s: float = 60.0) -> None:
-    """Process events until no pane has a render in flight (or timeout)."""
+    """Process events until no pane render and no Library thumbnail is in
+    flight (or timeout)."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         app.processEvents()
         busy = any(stage is not None for stage in window._render_stage.values())
-        pending = any(p.pending_tasks for p in window.panes)
+        pending = any(p.pending_tasks for p in window.panes) or window.thumbnailer.pending() > 0
         debouncing = any(t.isActive() for t in window._debounce_timers.values())
         if not busy and not pending and not debouncing:
             break
