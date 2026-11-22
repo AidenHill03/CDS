@@ -155,7 +155,12 @@ def main() -> None:
     # A tiny 1x2 array: row 0 (bottom, per cdx convention) never escapes,
     # row 1 (top) escapes near max_iter -- exercises both the never-escaped
     # flat color AND a real palette lookup in one image.
-    escape_array = np.array([[0.0], [199.0]])   # (height=2, width=1)
+    # "julia" payloads are stacked (values, escaped, labels) and "parameter"
+    # payloads (values, escaped) -- see render_map: the MASK is the escape
+    # status, never value > 0.
+    escape_values = np.array([[0.0], [199.0]])   # (height=2, width=1)
+    escape_mask = np.array([[0.0], [1.0]])
+    escape_array = np.stack([escape_values, escape_mask, np.zeros_like(escape_values)])
 
     img = array_to_qimage(escape_array, "julia", settings, max_iter=200)
     check(img.format() == QImage.Format.Format_RGB888,
@@ -174,9 +179,22 @@ def main() -> None:
           "the never-escaped pixel (array row 0, QImage bottom row) is flat black, not "
           "viridis' own index-0 color")
 
-    img_param = array_to_qimage(escape_array, "parameter", settings, max_iter=200)
+    img_param = array_to_qimage(escape_array[:2], "parameter", settings, max_iter=200)
     check(img_param.format() == QImage.Format.Format_RGB888,
           "parameter mode gets the same escape-time RGB treatment as julia mode")
+
+    # The bubble: an ESCAPED pixel whose smooth value is negative (a fast
+    # escape) is exterior -- a palette colour, never NEVER_ESCAPED_RGB --
+    # and the fastest escape takes palette index 0.
+    bubble = np.stack([np.array([[-1.2, 0.0, 5.0]]), np.array([[1.0, 0.0, 1.0]])])
+    bubble_img = array_to_qimage(bubble, "parameter", settings, max_iter=200)
+    fast_px, never_px = bubble_img.pixelColor(0, 0), bubble_img.pixelColor(1, 0)
+    check((fast_px.red(), fast_px.green(), fast_px.blue())
+          == tuple(int(c) for c in PALETTES["viridis"][0]),
+          "an escaped pixel with smooth value -1.2 is exterior (palette index 0, the "
+          "fastest escape in the frame), not painted as interior")
+    check((never_px.red(), never_px.green(), never_px.blue()) == NEVER_ESCAPED_RGB,
+          "...while the mask-0 pixel next to it is still the never-escaped colour")
 
     # render_map's basin mode returns a STACKED (2, height, width) array --
     # index 0 labels, index 1 the per-pixel iteration count (see
@@ -226,10 +244,8 @@ def main() -> None:
           "settings.color_period reaches basin mode too -- values one period apart land at "
           "the same shading")
 
-    # Stage 2 (corrected): a RATIONAL map's "julia" render is stacked (2,
-    # height, width) -- values then labels -- distinguished from the
-    # certified-polynomial plain-2D case by ndim alone (see
-    # array_to_qimage's own docstring), not a separate flag. GOVERNING
+    # Stage 2 (corrected): a RATIONAL map's "julia" render is stacked (3,
+    # height, width) -- values, escaped (resolved) mask, labels. GOVERNING
     # PRINCIPLE: only the VALUES layer is colored, through the exact same
     # color_escape_time pipeline a plain escape-time array already uses --
     # labels never reach the colorer at all (that's basin mode's own job).
@@ -240,15 +256,16 @@ def main() -> None:
     # proving coloring follows the smooth value like ordinary escape time.
     rational_julia_values = np.array([[0.0, 100.0, 100.0, 199.0]])
     rational_julia_labels = np.array([[0.0, 1.0, 2.0, 1.0]])
-    rational_julia_array = np.stack([rational_julia_values, rational_julia_labels])
-    check(rational_julia_array.shape == (2, 1, 4),
+    rational_julia_array = np.stack([rational_julia_values, (rational_julia_labels > 0) * 1.0,
+                                     rational_julia_labels])
+    check(rational_julia_array.shape == (3, 1, 4),
           "sanity: the stacked rational-julia test array has the expected shape")
     rational_julia_img = array_to_qimage(rational_julia_array, "julia", settings, max_iter=200)
     check(rational_julia_img.format() == QImage.Format.Format_RGB888,
           "rational julia mode also produces RGB, via the SAME color_escape_time path a "
           "certified polynomial's plain array uses")
     check(rational_julia_img.width() == 4 and rational_julia_img.height() == 1,
-          "output dimensions match the STACKED array's own (height, width), not (2, height, width)")
+          "output dimensions match the STACKED array's own (height, width), not (3, height, width)")
     unresolved_j = rational_julia_img.pixelColor(0, 0)
     check((unresolved_j.red(), unresolved_j.green(), unresolved_j.blue()) == NEVER_ESCAPED_RGB,
           "rational julia: an unresolved (value=0) pixel gets color_escape_time's own "
@@ -305,7 +322,8 @@ def main() -> None:
     # Nonzero values one period apart, so both go through the real palette
     # lookup rather than one of them tripping the never-escaped (value==0)
     # short-circuit.
-    wrap_array = np.array([[1.0, 11.0]])
+    wrap_values = np.array([[1.0, 11.0]])
+    wrap_array = np.stack([wrap_values, np.ones_like(wrap_values), np.zeros_like(wrap_values)])
     wrap_img = array_to_qimage(wrap_array, "julia", period_settings, max_iter=200)
     p1, p2 = wrap_img.pixelColor(0, 0), wrap_img.pixelColor(1, 0)
     check((p1.red(), p1.green(), p1.blue()) == (p2.red(), p2.green(), p2.blue()),
@@ -1017,10 +1035,11 @@ def main() -> None:
          ("period = " in pperiod_text or pperiod_text in ("undetermined", "converges to infinity")),
           "parameter_period mode's cursor readout reports one of its own three formats "
           "(period/undetermined/infinity), not escape/basin/potential formatting -- using "
-          "the mandelbrot family here (this mode CURRENTLY only supports relaxed-Newton "
-          "seeds, a documented scope limitation -- see cdx.Renderer.render_parameter_"
-          "period's own doc comment), so this checks the FORMAT stays well-formed and "
-          "does not crash, not that the value is mathematically meaningful for this map")
+          "the mandelbrot family here (seeded from its own free critical point 0 via "
+          "cdx.CriticalPointFamily.FromMap -- relaxed-Newton seeds are used only for maps "
+          "cdx.relaxed_newton_power_n recognises; see app.session.render_map), so this "
+          "checks the FORMAT stays well-formed and does not crash; the values themselves "
+          "are tested in app.test_session")
 
     # Stage 2: a RATIONAL map's "julia" render is stacked too -- the cursor
     # readout must sample it the SAME way basin's own stacked array is
@@ -1103,7 +1122,7 @@ def main() -> None:
     buffer_res = round(400 * overscan_factor)   # 520, exactly -- no rounding noise
     buffer_viewport = cdx.Viewport(pane5.viewport.center,
                                    pane5.viewport.scale * overscan_factor, buffer_res)
-    view5.set_image(np.zeros((buffer_res, buffer_res)), buffer_viewport)
+    view5.set_image(np.zeros((3, buffer_res, buffer_res)), buffer_viewport)   # (values, escaped, labels)
 
     # Cross-check against a fully independent hand computation -- not
     # _pixel_to_complex/_complex_to_buffer_pixel called and trusted, but the
@@ -1490,7 +1509,7 @@ def main() -> None:
     original_set_image = window.image_view.set_image
 
     def tracking_set_image(array, buffer_viewport):
-        seen_sizes.append(array.shape)
+        seen_sizes.append(array.shape[-2:])   # julia payloads are (values, escaped, labels)
         original_set_image(array, buffer_viewport)
 
     window.image_view.set_image = tracking_set_image
@@ -1582,7 +1601,7 @@ def main() -> None:
 
     signals_ref = probe_task.signals
     check(shiboken6.isValid(signals_ref), "sanity: the signals object starts out valid")
-    window._on_full_ready(probe_id, np.zeros((4, 4)), cdx.Viewport())
+    window._on_full_ready(probe_id, np.zeros((3, 4, 4)), cdx.Viewport())
     check(probe_id not in window.pane.pending_tasks,
           "_on_full_ready releases the GUI side's own reference (pops pending_tasks) when "
           "its handler runs")
@@ -1635,7 +1654,7 @@ def main() -> None:
     original_panes = window.panes
     window.panes = [guard_pane]   # so _pane_for_render_id (scans self.panes) can find it
     try:
-        window._on_full_ready(guard_id, np.zeros((4, 4)), cdx.Viewport())   # must not raise
+        window._on_full_ready(guard_id, np.zeros((3, 4, 4)), cdx.Viewport())   # must not raise
         check(True, "_on_full_ready no-ops (doesn't crash) when the pane's widget is already "
                    "torn down, instead of touching a dead C++ object")
     except Exception as exc:

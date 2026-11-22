@@ -33,6 +33,10 @@ def check(cond: bool, what: str) -> None:
         failures += 1
 
 
+def lib_c_preset(name: str):
+    return cdx.FamilyLibrary.with_defaults().find(name)
+
+
 def main() -> None:
     print("=== app.session tests ===")
 
@@ -54,7 +58,8 @@ def main() -> None:
     s.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
 
     julia = s.render(vp, "julia")
-    check(julia.shape == (41, 41), "julia render matches viewport resolution")
+    check(julia.shape == (3, 41, 41),
+          "julia render is STACKED (values, escaped, labels) at the viewport resolution")
 
     s.param = -1 + 0j   # the basilica
     basin = s.render(vp, "basin")
@@ -68,7 +73,8 @@ def main() -> None:
           "every RESOLVED pixel took at least one iteration to get there")
 
     param_plane = s.render(vp, "parameter")
-    check(param_plane.shape == (41, 41), "parameter-plane render matches viewport resolution")
+    check(param_plane.shape == (2, 41, 41),
+          "parameter-plane render is STACKED (values, escaped) at the viewport resolution")
 
     greens_array = s.render(vp, "greens")
     check(greens_array.shape == (41, 41), "greens render matches viewport resolution")
@@ -97,10 +103,12 @@ def main() -> None:
     rational_vp = cdx.Viewport(complex(0, 0), 2.0, 41)
     s_rational.render_settings = cdx.RenderSettings(80, 2.0, 1e-6, 1)
     rational_julia = s_rational.render(rational_vp, "julia")
-    check(rational_julia.shape == (2, 41, 41),
-          "a RATIONAL map's julia render is STACKED: (2, height, width) -- smooth values, "
-          "then basin labels -- the SAME shape basin's own render already has")
-    values, labels = rational_julia[0], rational_julia[1]
+    check(rational_julia.shape == (3, 41, 41),
+          "a RATIONAL map's julia render is STACKED: (3, height, width) -- smooth values, "
+          "escaped (resolved) mask, then basin labels")
+    values, labels = rational_julia[0], rational_julia[2]
+    check(np.array_equal(rational_julia[1] != 0, labels > 0),
+          "for a rational map the escaped mask is exactly 'reached an attractor' (label > 0)")
     check(len(np.unique(labels[labels > 0])) >= 2,
           "Newton z^4-1's Julia render finds more than one basin (more than one root "
           "captures pixels)")
@@ -114,15 +122,18 @@ def main() -> None:
           "at escape_radius=2 vs escape_radius=10 -- through the FULL app dispatch, not "
           "just the bare cdx.Renderer call")
 
-    # A certified polynomial's OWN Julia render must still be plain (unchanged
-    # shape/values) -- the rational path's introduction must not leak into it.
+    # A certified polynomial's Julia render has the SAME stacked shape (the
+    # bubble fix made every escape-time payload (values, escaped, ...); the
+    # old plain-2D shape let the value double as the escape flag). Its
+    # labels layer is all 0: there is no basin concept on that path.
     s_rational.map = cdx.RationalMap.mandelbrot()
     s_rational.param = complex(-0.7269, 0.1889)
     s_rational.render_settings = cdx.RenderSettings(50, 2.0, 1e-6, 0)
     poly_julia = s_rational.render(rational_vp, "julia")
-    check(poly_julia.shape == (41, 41),
-          "ACCEPTANCE: a certified polynomial's julia render is STILL a plain 2D array, "
-          "not stacked -- Stage 2 didn't change its shape or meaning")
+    check(poly_julia.shape == (3, 41, 41) and not np.any(poly_julia[2]),
+          "a certified polynomial's julia render is stacked the same way, labels all 0")
+    check(np.array_equal(poly_julia[1] == 0, poly_julia[0] == 0),
+          "...and at this ordinary view its mask and its nonzero values agree exactly")
 
     # ---- Parameter_basin: counts distinct attracting cycles per parameter ----------
     print("\nrender mode dispatch: Parameter_basin (number of attracting cycles):")
@@ -359,26 +370,277 @@ def main() -> None:
             esc_b.append(e)
     some_bounded = ~(esc_b[0] & esc_b[1])
     none_escape = ~(esc_b[0] | esc_b[1])
-    check(np.mean((imgs_b["slowest"] == 0) == some_bounded) > 0.995,
-          "Slowest is 0 exactly where SOME free orbit stays bounded")
-    check(np.mean((imgs_b["fastest"] == 0) == none_escape) > 0.995,
-          "Fastest is 0 exactly where NO free orbit escapes (the connectedness locus)")
-    check(np.all(imgs_b["slowest"] >= 0) and
-          np.all((imgs_b["slowest"] == 0) | (imgs_b["slowest"] >= imgs_b["fastest"])),
+    # Escape status is the MASK (layer 1), never value > 0 -- see render_map.
+    esc_of = {k: v[1] != 0 for k, v in imgs_b.items()}
+    val_of = {k: v[0] for k, v in imgs_b.items()}
+    check(np.mean(~esc_of["slowest"] == some_bounded) > 0.995,
+          "Slowest is not-escaped exactly where SOME free orbit stays bounded")
+    check(np.mean(~esc_of["fastest"] == none_escape) > 0.995,
+          "Fastest is not-escaped exactly where NO free orbit escapes (the connectedness locus)")
+    check(np.all(val_of["slowest"][esc_of["slowest"]] >= val_of["fastest"][esc_of["slowest"]]),
           "where both escape, Slowest >= Fastest pixel-for-pixel")
-    pc_pair = np.stack([imgs_b["per_critical"] > 0, imgs_b["per_critical_1"] > 0])
+    pc_pair = np.stack([esc_of["per_critical"], esc_of["per_critical_1"]])
     ref_pair = np.stack([esc_b[0], esc_b[1]])
     same_set = ((pc_pair[0] == ref_pair[0]) & (pc_pair[1] == ref_pair[1])) | \
                ((pc_pair[0] == ref_pair[1]) & (pc_pair[1] == ref_pair[0]))
     check(np.mean(same_set) > 0.995,
           "PerCritical 0 and 1 are the two individual free orbits (as an unordered pair)")
-    check(not np.array_equal(imgs_b["slowest"], imgs_b["fastest"]) and
-          not np.array_equal(imgs_b["slowest"], imgs_b["per_critical_1"]),
+    check(not np.array_equal(val_of["slowest"], val_of["fastest"]) and
+          not np.array_equal(val_of["slowest"], val_of["per_critical_1"]),
           "the strategies genuinely differ (they were byte-identical before)")
     for name in ("slowest", "fastest"):
-        img = imgs_b[name]
-        check(np.array_equal(img > 0, np.flipud(img) > 0),
+        m_esc = esc_of[name]
+        check(np.array_equal(m_esc, np.flipud(m_esc)),
               f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
+
+    # ---- The "bubble": escape status is the MASK, never value > 0 -----------------
+    # The smooth value is legitimately <= 0 for fast escapes; when the value
+    # doubled as the "escaped?" flag, z^5 + a at half-width 105 was 99.97%
+    # black and the Mandelbrot plane at half-width 50 was black beyond
+    # |a| = e^4 ~ 54.6 (12%). Both checked through the app's own colouring.
+    print("\nThe bubble: fast escapes are exterior (explicit escaped mask):")
+    from app.color import NEVER_ESCAPED_RGB, color_escape_time
+    a5 = complex(-0.1747, 1.0721)
+    set_bb = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    vp5 = cdx.Viewport(0j, 105.0, 200)
+    st5 = render_map(cdx.RationalMap.multibrot(5), a5, vp5, set_bb, "julia")
+    t5 = np.linspace(-105.0, 105.0, 200)
+    z5 = np.abs(t5[None, :] + 1j * t5[:, None])
+    R5 = max(2.0, cdx.polynomial_escape_radius([a5, 0, 0, 0, 0, 1]))
+    outside = z5 > R5
+    check(bool(np.all(st5[1][outside] == 1.0)),
+          f"z^5 + a at half-width 105: all {int(outside.sum())} pixels with |z0| > R(a) = "
+          f"{R5:.3g} are masked escaped")
+    check(float(st5[0][outside].min()) < 0.0,
+          f"...including the fast escapes whose smooth value is negative (min "
+          f"{st5[0][outside].min():.3f}) -- the value is a shade, not a flag")
+    rgb5 = color_escape_time(st5[0], 200, palette="classic", escaped=st5[1])
+    painted_interior = np.all(rgb5 == np.array(NEVER_ESCAPED_RGB, dtype=np.uint8), axis=-1)
+    check(not np.any(painted_interior[outside]),
+          "...and none of them is coloured as interior (was 99.97% black)")
+    check(bool(np.all(np.isfinite(st5[0]))), "...and every smooth value is finite")
+
+    # Far beyond double range in one step (z^5 at |z0| ~ 1e62 overflows): still
+    # escaped, finite, and ordered -- not -inf, not NaN, not "interior".
+    far = render_map(cdx.RationalMap.multibrot(5), a5, cdx.Viewport(0j, 1e200, 9), set_bb, "julia")
+    far_g = render_map(cdx.RationalMap.multibrot(5), a5, cdx.Viewport(0j, 1e200, 9), set_bb, "greens")
+    check(bool(np.all(far[1] == 1.0) and np.all(np.isfinite(far[0])) and np.all(far_g > 0)
+               and np.all(np.isfinite(far_g))),
+          "|z0| up to 1e200 (first step overflows): escaped, finite smooth value, finite G > 0")
+
+    mb = cdx.RationalMap.mandelbrot()
+    res50 = 400
+    vp50 = cdx.Viewport(0j, 50.0, res50)
+    st50 = render_map(mb, 0j, vp50, set_bb, "parameter")
+    t50 = np.linspace(-50.0, 50.0, res50)
+    c50 = t50[None, :] + 1j * t50[:, None]
+    zz = np.zeros_like(c50)
+    filled = np.ones(c50.shape, dtype=bool)
+    with np.errstate(all="ignore"):
+        for _ in range(200):
+            zz = np.where(filled, zz * zz + c50, zz)
+            filled &= np.abs(zz) <= 2.0
+
+    def dilate(mask):
+        out = mask.copy()
+        out[1:, :] |= mask[:-1, :]
+        out[:-1, :] |= mask[1:, :]
+        out[:, 1:] |= mask[:, :-1]
+        out[:, :-1] |= mask[:, 1:]
+        return out
+
+    black50 = st50[1] == 0.0
+    check(bool(np.all(dilate(filled)[black50]) and np.all(dilate(black50)[filled])),
+          f"Mandelbrot parameter plane, half-width 50: the black set ({int(black50.sum())} px) "
+          f"is the filled set ({int(filled.sum())} px) to within one pixel ring, not "
+          f"everything beyond |a| = e^4")
+    pg50 = render_map(mb, 0j, vp50, set_bb, "parameter_greens")
+    check(bool(np.all(pg50[st50[1] == 1.0] > 0.0)),
+          "parameter_greens: G > 0 on every escaped pixel (no clamp or sentinel reads as 0)")
+
+    # Ordinary views: the mask is exactly the old "value > 0" classification,
+    # so interior/exterior is unchanged wherever no smooth value is negative.
+    ordinary = [("mandelbrot", cdx.RationalMap.mandelbrot(), -0.7269 + 0.1889j, "julia", 0j, 1.6),
+                ("mandelbrot", cdx.RationalMap.mandelbrot(), 0j, "parameter", -0.5 + 0j, 1.5),
+                ("multibrot5", cdx.RationalMap.multibrot(5), 0.3j, "julia", 0j, 1.3),
+                ("z^3+az+1", cdx.RationalMap.from_expression("z^3+a*z+1", "a", {}, "c3"), 0j,
+                 "parameter", 0j, 1.5),
+                ("mcmullen2", lib_c_preset("mcmullen2"), 0j, "parameter", 0j, 0.3),
+                ("newton3", lib_c_preset("newton3"), 0j, "julia", 0j, 1.5)]
+    for name, m_o, a_o, mode_o, c_o, s_o in ordinary:
+        st_o = render_map(m_o, a_o, cdx.Viewport(c_o, s_o, 96), set_bb, mode_o)
+        check(np.array_equal(st_o[1] != 0.0, st_o[0] > 0.0),
+              f"{name} {mode_o} at an ordinary view: escaped mask == old 'value > 0' "
+              f"classification on every pixel")
+        legacy = color_escape_time(st_o[0], 200, palette="classic")
+        masked = color_escape_time(st_o[0], 200, palette="classic", escaped=st_o[1])
+        check(np.array_equal(legacy, masked), f"...and its colours are byte-identical")
+
+    # ---- Smooth escape value: base d, continuous across escape bands ---------------
+    # nu = n + 1 - log_d(log|z_n| / log R). With the old base 2 every band
+    # boundary of z^3 + a jumped by log2(3) - 1 = 0.58 and of z^5 + a by 1.32.
+    # "Away from the boundary of the set": only band crossings where the
+    # field itself is smooth -- the same-band neighbours on BOTH sides change
+    # by < 0.02 per pixel. (Near the Julia set the field is legitimately
+    # rough at any resolution, so a jump there says nothing about seams.)
+    # The integer escape iteration of each pixel comes from numpy.
+    print("\nSmooth escape value is continuous across escape-iteration boundaries (base d):")
+    res_s, sc_s = 400, 3.0
+    t_s = np.linspace(-sc_s, sc_s, res_s)
+    g_s = t_s[None, :] + 1j * t_s[:, None]
+    set_s = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+
+    def escape_iteration(d, a, z0):
+        z = z0.copy()
+        n_esc = np.zeros(z.shape, dtype=int)
+        alive = np.ones(z.shape, dtype=bool)
+        with np.errstate(all="ignore"):
+            for k in range(1, 201):
+                z = np.where(alive, z ** d + a, z)
+                out = alive & (np.abs(z) > 2.0)
+                n_esc[out] = k
+                alive &= ~out
+        return n_esc
+
+    def worst_band_jump(img, n_esc):
+        worst, crossings = 0.0, 0
+        for X, N in ((img, n_esc), (img.T, n_esc.T)):
+            dx = np.diff(X, axis=1)
+            ok = ((N[:, 2:-1] != N[:, 1:-2]) & (N[:, :-3] == N[:, 1:-2]) & (N[:, 3:] == N[:, 2:-1])
+                  & (N[:, 1:-2] > 0) & (N[:, 2:-1] > 0)
+                  & (np.abs(dx[:, :-2]) < 0.02) & (np.abs(dx[:, 2:]) < 0.02))
+            if ok.any():
+                worst = max(worst, float(np.abs(dx[:, 1:-1])[ok].max()))
+                crossings += int(ok.sum())
+        return worst, crossings
+
+    for d in (3, 5):
+        fam_s = cdx.RationalMap.multibrot(d)
+        jul = render_map(fam_s, 0.3j, cdx.Viewport(0j, sc_s, res_s), set_s, "julia")[0]
+        par = render_map(fam_s, 0j, cdx.Viewport(0j, sc_s, res_s), set_s, "parameter")[0]
+        for plane, img, n_esc in (("julia a=0.3i", jul, escape_iteration(d, 0.3j, g_s)),
+                                  ("parameter", par, escape_iteration(d, g_s, np.zeros_like(g_s)))):
+            worst, crossings = worst_band_jump(img, n_esc)
+            check(crossings > 20 and worst <= 0.05,
+                  f"z^{d} + a {plane}: largest jump across an escape band {worst:.4f} "
+                  f"(<= 0.05; {crossings} crossings checked)")
+
+    # ---- Parameter: only FREE critical points drive the strategies (Bug C) -------
+    # z^n + a/z^n has critical points 0 (a double pole, f(0) = inf) and inf (a
+    # superattracting fixed point) besides the 2n free ones z^(2n) = a. Their
+    # orbits are the same for every a; classifying them made Slowest 100% black
+    # and Fastest constant. Reference: numpy iterates the free point a^(1/(2n))
+    # for 200 steps, escape at |z| > 50, "black" = never escaped.
+    #
+    # The rational path is sphere-aware: `parameter` is 0 only where an orbit
+    # never settles on ANY attractor, so a Mandelbrot copy (free orbit captured
+    # by a finite attracting cycle) is shaded, not black. The like-for-like
+    # quantity -- "the free orbit does not reach infinity" -- is
+    # parameter_period's is_infinity == 0; that is what is compared with the
+    # numpy black fraction (+-3 points), and every black `parameter` pixel
+    # must lie inside the numpy black set.
+    print("\nParameter: McMullen z^n + a/z^n uses only its free critical points (Bug C):")
+    lib_c = cdx.FamilyLibrary.with_defaults()
+    res_m, scale_m = 128, 0.3
+    vp_m3 = cdx.Viewport(0j, scale_m, res_m)
+    set_m = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    t_m = np.linspace(-scale_m, scale_m, res_m)
+    a_m = t_m[None, :] + 1j * t_m[:, None]
+    for name, n_m in (("mcmullen2", 2), ("mcmullen3", 3)):
+        fam = lib_c.find(name)
+        free_m = fam.free_critical_points(0.01 + 0.02j)
+        check(len(free_m) == 2 * n_m and all(math.isfinite(abs(z)) and abs(z) > 1e-3 for z in free_m),
+              f"{name}: exactly the {2 * n_m} roots of z^{2 * n_m} = a are free (0 and inf are not)")
+        zr = a_m ** (1.0 / (2 * n_m))
+        alive_m = np.ones(a_m.shape, dtype=bool)
+        with np.errstate(all="ignore"):
+            for _ in range(200):
+                zr = np.where(alive_m, zr ** n_m + a_m / zr ** n_m, zr)
+                alive_m &= np.isfinite(zr) & (np.abs(zr) <= 50.0)
+        ref_black = float(alive_m.mean())
+        slow_st = render_map(fam, 0j, vp_m3, set_m, "parameter", strategy="slowest")
+        slow, black = slow_st[0], slow_st[1] == 0
+        check(np.ptp(slow) > 0 and 0.0 < float(np.mean(black)) < 0.5,
+              f"{name} Slowest is not uniform (black {np.mean(black):.3f}; was 1.000)")
+        check(bool(np.all(alive_m[black])),
+              f"{name}: every black Slowest pixel is black in the numpy reference too")
+        st_m = render_map(fam, 0j, vp_m3, set_m, "parameter_period")
+        bounded = float(np.mean(st_m[2] == 0.0))
+        check(abs(bounded - ref_black) <= 0.03,
+              f"{name}: free orbit misses infinity on {bounded:.4f} of pixels, numpy "
+              f"reference black {ref_black:.4f} (within 3 points)")
+    fast3 = render_map(lib_c.find("mcmullen3"), 0j, vp_m3, set_m, "parameter", strategy="fastest")[0]
+    check(np.ptp(fast3) > 1.0, f"mcmullen3 Fastest is not constant (ptp {np.ptp(fast3):.3g}; was 0)")
+    pb_m = render_map(lib_c.find("mcmullen2"), 0j, cdx.Viewport(0j, scale_m, 33), set_m,
+                      "parameter_basin")
+    check(bool(np.all(pb_m[0] >= 1.0)),
+          "mcmullen2 parameter_basin still counts infinity (it keeps ALL critical points)")
+    # Zero free critical points: Newton's map for z^2 - 1, (z^2 + 1)/(2z), has
+    # only +-1, both superattracting fixed points, and no parameter at all.
+    newton2 = cdx.RationalMap.from_expression("(z^2+1)/(2*z)", "", {}, "newton2")
+    check(newton2.free_critical_points(0.3j) == [], "Newton for z^2 - 1 has no free critical point")
+    nz = render_map(newton2, 0j, cdx.Viewport(0j, 1.0, 21), set_m, "parameter")
+    nz_p = render_map(newton2, 0j, cdx.Viewport(0j, 1.0, 21), set_m, "parameter_period")
+    check(np.all(nz == 0.0) and np.all(nz_p[1] == 1.0),   # values and mask all 0
+          "...so its parameter plane is honestly uniform (0; period undetermined), not a crash")
+
+    # ---- Parameter planes from the free critical orbits vs the reconciled oracle ---
+    # The default path (critical_orbits.hpp) against the old per-pixel
+    # discovery + fixed-point union + reconciliation path, kept behind
+    # Renderer._reconciled_parameter_path as the oracle. Compared quantity:
+    # `parameter` -- the escaped/resolved mask; `parameter_basin` -- the count;
+    # `parameter_period` -- period / undetermined / infinity.
+    print("\nParameter planes: critical-orbit path agrees with the reconciled oracle (128 px):")
+    set_o = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    lib_o = cdx.FamilyLibrary.with_defaults()
+    rn5_o = cdx.RationalMap.from_expression("z - a*(z^5-1)/(5*z^4)", "a", {}, "rn5")
+    fams_o = [("mandelbrot", lib_o.find("mandelbrot"), complex(-0.75, 0), 1.5),
+              ("multibrot3", lib_o.find("multibrot3"), 0j, 1.35),
+              ("multibrot5", lib_o.find("multibrot5"), 0j, 1.25),
+              ("mcmullen2", lib_o.find("mcmullen2"), 0j, 0.3),
+              ("mcmullen3", lib_o.find("mcmullen3"), 0j, 0.3),
+              ("z^3+az+1", cdx.RationalMap.from_expression("z^3+a*z+1", "a", {}, "c3o"), 0j, 1.5),
+              ("relaxed Newton n=5", rn5_o, complex(5, 0), 6.0)]
+
+    def oracle_render(m, c, sc, mode, reconciled):
+        r = cdx.Renderer(map=cdx.Map.custom(m, 0j), viewport=cdx.Viewport(c, sc, 128),
+                         settings=set_o)
+        r._reconciled_parameter_path = reconciled
+        if mode == "parameter":
+            return r.render_parameter(None, cdx.ParameterStrategy.Slowest, 0)[1] != 0
+        if mode == "parameter_basin":
+            return r.render_parameter_basin(None)[0]
+        nn = cdx.relaxed_newton_power_n(m)
+        fam_k = (cdx.CriticalPointFamily.RelaxedNewtonPower if nn is not None
+                 else cdx.CriticalPointFamily.FromMap)
+        per, und, inf_, _mix = r.render_parameter_period(fam_k, nn or 0, None, 0)
+        return np.where(und == 1, -1, np.where(inf_ == 1, -2, per))
+
+    for name, m, c, sc in fams_o:
+        for mode in ("parameter", "parameter_basin", "parameter_period"):
+            new = oracle_render(m, c, sc, mode, False)
+            old = oracle_render(m, c, sc, mode, True)
+            differ = new != old
+            note = ""
+            if name.startswith("relaxed") and mode == "parameter_period":
+                # The reconciled path called infinity only once |z| passed 1e12
+                # inside its 500-step burn-in, i.e. only for |lambda_inf| below
+                # 1e-12^(1/500) = 0.947. Where infinity attracts more slowly it
+                # reported "undetermined": wrong, since lambda_inf = 5/(5 - a) is
+                # closed-form. Those pixels are checked against that formula,
+                # then excluded.
+                t_o = np.linspace(-sc, sc, 128)
+                a_o = (c.real + t_o[None, :]) + 1j * (c.imag + t_o[:, None])
+                lam_inf = np.abs(5.0 / (5.0 - a_o))
+                missed = differ & (old == -1) & (new == -2)
+                check(missed.sum() > 100 and bool(np.all(lam_inf[missed] < 1.0)),
+                      f"relaxed Newton period: all {int(missed.sum())} pixels the old path left "
+                      f"undetermined and the new one sends to infinity have |5/(5-a)| < 1 "
+                      f"(max {lam_inf[missed].max():.4f}): infinity IS attracting there")
+                differ &= ~missed
+                note = " (excluding the old path's infinity misses)"
+            agree = 1.0 - float(differ.mean())
+            check(agree >= 0.995, f"{name} {mode}: {100 * agree:.2f}% of pixels agree{note}")
 
     # ---- critical_index labelling convention (Bug B, part 3) ----------------------
     print("\ncritical_index labelling: continued from a* along a straight segment:")
@@ -419,8 +681,8 @@ def main() -> None:
     set_l = cdx.RenderSettings(150, 2.0, 1e-6, 0)
     vpA = cdx.Viewport(0j, 1.5, 61)          # pixel size 0.05
     vpB = cdx.Viewport(0.25 - 0.5j, 1.0, 41)  # pixel size 0.05, shifted
-    imA = render_map(cub, 0j, vpA, set_l, "parameter", strategy="per_critical", critical_index=1)
-    imB = render_map(cub, 0j, vpB, set_l, "parameter", strategy="per_critical", critical_index=1)
+    imA = render_map(cub, 0j, vpA, set_l, "parameter", strategy="per_critical", critical_index=1)[0]
+    imB = render_map(cub, 0j, vpB, set_l, "parameter", strategy="per_critical", critical_index=1)[0]
 
     def coords(vp):
         s_ = 2.0 * vp.scale / (vp.resolution - 1)
@@ -450,7 +712,7 @@ def main() -> None:
     for k in (0, 1):
         pc = render_map(cub, 0j, vp_x, set_l, "parameter", strategy="per_critical", critical_index=k)
         pp = render_map(cub, 0j, vp_x, set_l, "parameter_period", critical_index=k)
-        escaped_pc = pc > 0
+        escaped_pc = pc[1] != 0
         escaped_pp = pp[2] == 1.0
         decided = (pp[1] == 0.0)                      # period mode resolved this orbit
         agree &= np.mean(escaped_pc[decided] == escaped_pp[decided]) > 0.99

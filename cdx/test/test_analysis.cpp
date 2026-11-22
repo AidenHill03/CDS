@@ -11,6 +11,7 @@
 //     instead of solving for fixed points.
 // =============================================================================
 #include "cdx/analysis.hpp"
+#include "cdx/critical_orbits.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -978,16 +979,19 @@ int main() {
     // ---- Parameter: the unicritical polynomial path is pinned bit-for-bit -----------
     // Reference = the pre-B1 single-orbit loop, re-implemented here from
     // public API only: start at critical_points(p).front() (or 0 for a
-    // recognised shape), escape at |z| > escape_radius, smooth value
-    // n + 2 - log2(log|z|). Every strategy must reproduce it exactly.
+    // recognised shape), escape at |z| > R = max(rho(p), escape_radius)
+    // (rho from the coefficients at p), smooth value
+    // n + 1 - log_d(log|z_n| / log R) evaluated after iterating on to
+    // |z| > 1e8. Every strategy must reproduce it exactly. (Until deferred item 2 this pinned n + 2 - log2(log|z|), the
+    // base-2 form, which bands for d > 2: the pin encoded that banding.)
     std::printf("\nParameter: unicritical polynomials (z^d + a and friends) are pinned "
                "BIT-FOR-BIT to the single-orbit form, for every strategy:\n");
     {
         auto reference = [](const RationalMap& m, const Viewport& v, const RenderSettings& st) {
             Image img(v.resolution, v.resolution);
             const std::optional<Family> fam = recognize_family(m);
-            const double R2 = st.escape_radius * st.escape_radius;
-            const double inv_log2 = 1.0 / std::log(2.0);
+            const double inv_log_d = 1.0 / std::log(static_cast<double>(m.degree(Cplx(0.0, 0.0))));
+            const PolyCoeffsInA fit = m.compile_polynomial_coefficients_in_a();
             const bool cpf = !fam && m.critical_points_constant();
             const Cplx c_fixed = cpf ? m.critical_points(Cplx(1.0, 0.0)).front() : Cplx(0.0, 0.0);
             for (int col = 0; col < v.resolution; ++col) {
@@ -996,15 +1000,39 @@ int main() {
                     const Cplx c0 = fam ? Map::critical_point(*fam, p)
                                         : (cpf ? c_fixed : m.critical_points(p).front());
                     const CompiledMap compiled = fam ? CompiledMap{} : m.compile(p);
+                    // The engine's coefficient source: closed form for a
+                    // recognised shape, the per-render fit otherwise.
+                    std::vector<Cplx> co;
+                    if (fam) m.polynomial_coefficients(p, co);
+                    else fit.eval(p, co);
+                    while (!co.empty() && co.back() == Cplx(0.0, 0.0)) co.pop_back();
+                    std::vector<double> ac;
+                    for (const Cplx& x : co) ac.push_back(std::sqrt(std::norm(x)));
+                    if (fam) { ac.assign(ac.size(), 0.0); ac[0] = std::abs(p); ac.back() = 1.0; }
+                    const double R = polynomial_escape_radius_abs(ac.data(),
+                                                                  static_cast<int>(ac.size()) - 1,
+                                                                  st.escape_radius);
+                    const double R2 = R * R;
+                    const double log_R = 0.5 * std::log(R2);
                     double zr = c0.real(), zi = c0.imag(), out = 0.0;
                     for (int n = 0; n < st.max_iter; ++n) {
                         if (fam) Map::step_with(*fam, p.real(), p.imag(), zr, zi);
                         else compiled.step(zr, zi);
-                        const double m2 = zr * zr + zi * zi;
+                        double m2 = zr * zr + zi * zi;
                         if (m2 > R2) {
-                            const double nu = static_cast<double>(n + 1) + 1.0 -
-                                              std::log(std::log(std::sqrt(m2))) * inv_log2;
-                            out = (nu != nu) ? static_cast<double>(n + 1) : nu;
+                            // Evaluated far out: up to 16 more steps while |z| <= 1e8.
+                            int nn = n + 1;
+                            for (int k = 0; k < 16 && m2 <= 1e16; ++k) {
+                                double nr = zr, ni = zi;
+                                if (fam) Map::step_with(*fam, p.real(), p.imag(), nr, ni);
+                                else compiled.step(nr, ni);
+                                const double nm2 = nr * nr + ni * ni;
+                                if (nm2 != nm2 || nm2 > 1e300) break;
+                                zr = nr; zi = ni; m2 = nm2; ++nn;
+                            }
+                            const double nu = static_cast<double>(nn) + 1.0 -
+                                              std::log(std::log(std::sqrt(m2)) / log_R) * inv_log_d;
+                            out = (nu != nu) ? static_cast<double>(nn) : nu;
                             break;
                         }
                         if (m2 != m2 || m2 > 1e300) { out = static_cast<double>(n + 1); break; }
@@ -1021,6 +1049,8 @@ int main() {
              Viewport{{0.0, 0.0}, 5.0, 41}},
             {"z^3+a (term, recognised), |a| up to 7", RationalMap::multibrot(3),
              Viewport{{0.0, 0.0}, 5.0, 41}},
+            {"z^5+a (term, recognised)", RationalMap::multibrot(5),
+             Viewport{{0.0, 0.0}, 1.25, 41}},
             {"z^2+a (typed, P/Q)", RationalMap::from_expression("z^2+a", "a", {}),
              Viewport{{-0.5, 0.0}, 1.5, 61}},
             {"z^4+a (typed, critical points constant)", RationalMap::from_expression("z^4+a", "a", {}),
@@ -1047,6 +1077,46 @@ int main() {
                          "single-orbit reference", pc.label);
             check(all_same, msg);
         }
+    }
+
+    // ---- Per-render compilation for parameter-plane pixels --------------------------
+    std::printf("\nPer-pixel compilation: compile_into and coefficients-in-a match the direct "
+               "forms:\n");
+    {
+        const RationalMap typed = RationalMap::from_expression("z^2+a", "a", {});
+        const RationalMap lead = RationalMap::from_expression("0.5*z^3+a*z^2+(1-a)*z+1", "a", {});
+        const RationalMap term = RationalMap::multibrot(3);
+        const Cplx as[] = {Cplx(0.0, 0.0), Cplx(-0.75, 0.1), Cplx(3.7, -4.2), Cplx(-11.0, 6.0)};
+        bool fit_ok = true, into_ok = true;
+        for (const RationalMap* m : {&typed, &lead, &term}) {
+            const PolyCoeffsInA fit = m->compile_polynomial_coefficients_in_a();
+            if (!fit.valid) fit_ok = false;
+            CompiledMap reused;
+            for (const Cplx& a : as) {
+                std::vector<Cplx> want, got;
+                m->polynomial_coefficients(a, want);
+                fit.eval(a, got);
+                while (!got.empty() && got.back() == Cplx(0.0, 0.0)) got.pop_back();
+                if (got.size() != want.size()) fit_ok = false;
+                for (std::size_t k = 0; k < want.size() && k < got.size(); ++k) {
+                    if (std::abs(got[k] - want[k]) > 1e-12 * std::max(1.0, std::abs(want[k]))) fit_ok = false;
+                }
+                m->compile_into(a, reused);
+                const CompiledMap fresh = m->compile(a);
+                for (const Cplx& z0 : {Cplx(0.3, 0.2), Cplx(-1.1, 0.7)}) {
+                    double r1 = z0.real(), i1 = z0.imag(), r2 = r1, i2 = i1;
+                    reused.step(r1, i1);
+                    fresh.step(r2, i2);
+                    if (r1 != r2 || i1 != i2) into_ok = false;
+                }
+            }
+        }
+        check(fit_ok, "coefficients fitted as polynomials in a reproduce polynomial_coefficients "
+                      "(to 1e-12) at |a| up to 12, typed and term-based");
+        check(into_ok, "compile_into (buffers reused) steps bit-identically to compile");
+        const RationalMap rat = RationalMap::from_expression("z^2+a/z", "a", {});
+        check(!rat.compile_polynomial_coefficients_in_a().valid,
+              "a map with a pole has no coefficients-in-a fit (valid == false)");
     }
 
     // ---- Certified escape radius (B2) -----------------------------------------------
@@ -2263,6 +2333,11 @@ int main() {
         const Viewport v{{0.0, 0.0}, 3.0, 121};
         const RenderSettings settings{150, 2.0, 1e-6, 1};
         Renderer r(Map::custom(nova), v, settings);
+        // This pins the RECONCILED path's warm-start continuation against its
+        // own cold-only algorithm (below), so it renders through that path:
+        // parameter planes default to the critical-orbit path now, and the
+        // reconciled one is kept as the test oracle.
+        r.set_reconciled_parameter_path(true);
 
         Image unresolved, certain;
         const Image continued = r.render_parameter_basin(nullptr, &unresolved, &certain);
@@ -2335,6 +2410,81 @@ int main() {
         check(some_nonzero && some_zero,
               "Nova's Parameter render (continuation-enabled) still has both resolved and "
               "unresolved pixels -- Stage 1's own sphere-aware detail is preserved");
+    }
+
+    // ---- Critical-orbit period detection (parameter planes, critical_orbits.hpp) ----
+    std::printf("\nCritical-orbit tracking: minimal periods, never a proper multiple:\n");
+    {
+        const RationalMap quad = RationalMap::from_expression("z^2+a", "a", {});
+        CriticalOrbitOptions o;
+        o.budget = 2000;
+        auto track = [&](const RationalMap& m, Cplx a, Cplx z0, bool poly) {
+            const CompiledMap f = m.compile(a);
+            CriticalOrbitOptions oo = o;
+            if (poly) oo.poly_R2 = 4.0 * std::max(1.0, std::abs(a));   // a valid trap for z^2 + a
+            return track_critical_orbit(f, infinity_status(f), z0, oo);
+        };
+        auto is_cycle = [](const CriticalOrbitOutcome& r, int q) {
+            return r.kind == CriticalOrbitOutcome::Kind::Cycle && r.period == q &&
+                   std::abs(r.multiplier) < 1.0;
+        };
+
+        const CriticalOrbitOutcome fp = track(quad, {0.1, 0.1}, {0.0, 0.0}, true);
+        check(is_cycle(fp, 1), "z^2 + 0.1+0.1i from 0: an attracting FIXED point (period 1)");
+
+        const CriticalOrbitOutcome two = track(quad, {-1.0, 0.0}, {0.0, 0.0}, true);
+        check(is_cycle(two, 2), "basilica z^2 - 1 from 0: the superattracting 2-cycle {0, -1}");
+
+        const Cplx airplane(-1.7548776662466927, 0.0);   // superattracting 3-cycle through 0
+        const CriticalOrbitOutcome three = track(quad, airplane, {0.0, 0.0}, true);
+        check(is_cycle(three, 3), "airplane from 0: period 3");
+        // Start one step INTO the cycle, so z_ref (reset at n = 1, 2, 4, ...)
+        // lands on a different cycle point than the critical point itself.
+        const CriticalOrbitOutcome mid = track(quad, airplane, airplane, true);
+        check(is_cycle(mid, 3), "airplane from c (z_ref lands mid-cycle): still period 3, not 6 or 9");
+        const Cplx rabbit(-0.12256116687665361, 0.7448617666197442);
+        const CriticalOrbitOutcome rab = track(quad, rabbit, rabbit * rabbit + rabbit, true);
+        check(is_cycle(rab, 3), "rabbit from f(c) (mid-cycle start): period 3");
+
+        // A fixed point whose multiplier ROTATES by ~1/3 turn: the orbit
+        // closes at p = 3 (|f^3(z) - z| small) long before it closes at p = 1.
+        // The reconciled path's detector reported "period 3" for exactly this
+        // (fixed in find_attractors by reduce_to_minimal_period); here the
+        // refined point must reduce to period 1.
+        const double two_pi = 2.0 * std::acos(-1.0);
+        const Cplx lam = std::polar(0.96, two_pi / 3.0);
+        const RationalMap rot = RationalMap::from_expression("a*z + z^2", "a", {});
+        const CriticalOrbitOutcome r1 = track(rot, lam, -lam / 2.0, false);
+        check(is_cycle(r1, 1) && std::abs(std::abs(r1.multiplier) - 0.96) < 1e-6,
+              "fixed point with multiplier 0.96 e^(2 pi i/3), from the critical point: period 1 "
+              "(|lambda| = 0.96), never 3");
+        const Cplx lam7 = std::polar(0.97, two_pi * 2.0 / 7.0);
+        const CriticalOrbitOutcome r7 = track(rot, lam7, -lam7 / 2.0, false);
+        check(is_cycle(r7, 1), "multiplier 0.97 e^(4 pi i/7): period 1, never 7");
+
+        // Never fabricated: parabolic and Siegel orbits stay undetermined.
+        const CriticalOrbitOutcome para = track(quad, {0.25, 0.0}, {0.0, 0.0}, true);
+        check(!para.resolved(), "z^2 + 1/4 (parabolic fixed point, multiplier 1): undetermined");
+        const Cplx siegel = std::polar(1.0, two_pi * (std::sqrt(5.0) - 1.0) / 2.0);
+        const CriticalOrbitOutcome sg = track(rot, siegel, -siegel / 2.0, false);
+        check(!sg.resolved(), "golden-mean Siegel disc (|lambda| = 1, irrational): undetermined");
+        const CriticalOrbitOutcome par4 = track(quad, {0.25, 0.5}, {0.0, 0.0}, true);
+        check(!par4.resolved(), "0.25 + 0.5i (fixed point multiplier exactly i): undetermined");
+        const CriticalOrbitOutcome esc = track(quad, {0.5, 0.5}, {0.0, 0.0}, true);
+        check(esc.kind == CriticalOrbitOutcome::Kind::Infinity, "0.5 + 0.5i escapes to infinity");
+
+        // Rational: infinity's status from the compiled coefficients.
+        const RationalMap mc = RationalMap::from_expression("z^2 + a/z^2", "a", {});
+        const InfinityStatus is_mc = infinity_status(mc.compile({0.01, 0.0}));
+        check(is_mc.fixed && is_mc.local_degree == 2 && is_mc.attracting(),
+              "z^2 + a/z^2: infinity superattracting, local degree 2");
+        const RationalMap rn = RationalMap::from_expression("z - a*(z^5-1)/(5*z^4)", "a", {});
+        const InfinityStatus is_rn = infinity_status(rn.compile({11.0, 0.0}));
+        check(is_rn.fixed && is_rn.local_degree == 1 &&
+              std::abs(is_rn.multiplier - Cplx(5.0 / (5.0 - 11.0), 0.0)) < 1e-12 && is_rn.attracting(),
+              "relaxed Newton n = 5 at a = 11: infinity fixed, multiplier 5/(5 - a) = -5/6, attracting");
+        const InfinityStatus is_rn1 = infinity_status(rn.compile({1.0, 0.0}));
+        check(is_rn1.fixed && !is_rn1.attracting(), "...and at a = 1 (multiplier 5/4) repelling");
     }
 
     std::printf("\n%s (%d failure%s)\n",

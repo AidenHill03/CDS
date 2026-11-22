@@ -1062,18 +1062,17 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         is_infinity = np.flipud(payload[2])
         rgb = color_parameter_period(periods, undetermined, is_infinity)
         return _rgb_to_qimage(rgb)
-    # A RATIONAL "julia" payload is stacked (values, labels) -- color ONLY
-    # the values layer, through the exact SAME color_escape_time call a
-    # plain (certified-polynomial) payload already goes through below; see
-    # this function's own "GOVERNING PRINCIPLE" paragraph for why labels
-    # never reach the colorer.
-    if mode == "julia" and np.asarray(payload).ndim == 3:
-        payload = payload[0]
-    flipped = np.flipud(payload)
+    # "julia" (values, escaped, labels) and "parameter" (values, escaped)
+    # are always stacked: color the values layer with the ESCAPED MASK
+    # deciding interior vs exterior -- never "value > 0", which painted fast
+    # escapes (smooth value <= 0) as interior. Labels never reach the
+    # colorer; see this function's own "GOVERNING PRINCIPLE" paragraph.
     if mode in ("julia", "parameter"):
-        rgb = color_escape_time(flipped, max_iter, palette=settings.color_palette,
+        rgb = color_escape_time(np.flipud(payload[0]), max_iter,
+                                 palette=settings.color_palette,
                                  scaling=settings.color_scaling,
-                                 period=settings.color_period or None)
+                                 period=settings.color_period or None,
+                                 escaped=np.flipud(payload[1]))
         return _rgb_to_qimage(rgb)
     raise AssertionError(f"unreachable: mode={mode!r}")
 
@@ -1424,6 +1423,10 @@ class ImageView(QWidget):
         # was rendered under, for the cursor readout's sampling.
         self._buffer_payload = None
         self._buffer_mode: str | None = None
+        # True for a RATIONAL map's "julia" payload, whose non-escaped
+        # pixels read "unresolved" (no attractor reached) rather than
+        # "never escaped" -- set in set_image.
+        self._buffer_labelled = False
 
         # ---- overlay-layer registry state (Stage 1) ----------------------------
         # Generic per-layer storage backing EVERY registered OverlayLayer (see
@@ -1565,8 +1568,8 @@ class ImageView(QWidget):
         # for a RATIONAL map's render (Stage 2/Stage 3 -- see render_map/
         # array_to_qimage's own docstrings, distinguished the SAME way
         # there: ndim, not a second flag threaded through).
-        stacked = (mode in ("basin", "parameter_basin", "parameter_period") or
-                  (mode in ("julia", "greens", "parameter_greens") and payload.ndim == 3))
+        stacked = (mode in ("basin", "parameter_basin", "parameter_period", "julia", "parameter") or
+                  (mode in ("greens", "parameter_greens") and payload.ndim == 3))
         if stacked:
             height, width = payload[0].shape
         else:
@@ -1577,14 +1580,16 @@ class ImageView(QWidget):
                           # differently) buffer's own real pixels -- nothing to sample
         raw_row = height - 1 - row_top   # buffer is top-down; the array itself is row-0-bottom
 
-        if mode == "julia" and stacked:
-            value = payload[0][raw_row, col]
-            label = payload[1][raw_row, col]
-            return ("unresolved" if label == 0.0
-                    else f"basin = {int(label)}, approach rate = {value:.4g}")
         if mode in ("julia", "parameter"):
-            value = payload[raw_row, col]
-            return "never escaped" if value == 0.0 else f"escape = {value:.4g}"
+            # (values, escaped[, labels]); the mask is the escape status.
+            value = payload[0][raw_row, col]
+            escaped = payload[1][raw_row, col]
+            label = payload[2][raw_row, col] if mode == "julia" else 0.0
+            if label != 0.0:   # a rational map's resolved pixel: which basin
+                return f"basin = {int(label)}, approach rate = {value:.4g}"
+            if escaped == 0.0:
+                return "unresolved" if self._buffer_labelled else "never escaped"
+            return f"escape = {value:.4g}"
         if mode == "basin":
             label = payload[0][raw_row, col]
             return "unresolved" if label == 0.0 else f"basin = {int(label)}"
@@ -2000,6 +2005,8 @@ class ImageView(QWidget):
         # to match `payload` at this exact point.
         self._buffer_payload = payload
         self._buffer_mode = self.pane.render_mode
+        self._buffer_labelled = (self._buffer_mode == "julia" and
+                                 not cdx.polynomial_escape_certified(self.session.map))
         self.update()
 
     def no_effect_parameter_message(self) -> str | None:

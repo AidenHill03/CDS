@@ -1,9 +1,11 @@
 """app/color.py -- turns a raw render array into an RGB image.
 
 Three input kinds, matching the three things cdx.Renderer actually produces:
-  - ESCAPE-TIME (julia/parameter modes): smooth escape value, 0 = never
-    escaped (see cdx::Renderer::render_julia/render_parameter's own doc
-    comment -- that convention is trusted here, not re-derived).
+  - ESCAPE-TIME (julia/parameter modes): a smooth escape value PLUS an
+    explicit escaped mask (see cdx::Renderer::render_julia/render_parameter
+    and app.session.render_map). The mask decides interior vs exterior;
+    the value is only the shade, and may be any real number -- fast
+    escapes have value <= 0 (see color_escape_time).
   - BASIN (categorical + shading): a label array (0 = unresolved, k = basin
     k, per cdx::Renderer::render_basin), optionally paired with a
     convergence-iteration array for shading.
@@ -230,25 +232,66 @@ def scale_scalar_field(values: np.ndarray, band_width: float = 1.0,
 
 # ---- escape-time ----------------------------------------------------------------------
 
+def escape_shift(values: np.ndarray, escaped: np.ndarray) -> float:
+    """The offset color_escape_time subtracts before scaling:
+    min(0, min value over ESCAPED pixels). 0.0 -- no shift at all -- for
+    every frame whose escaped values are all >= 0, which is every ordinary
+    view, so those keep exactly the colors they always had."""
+    values = np.asarray(values, dtype=float)
+    sel = values[np.asarray(escaped, dtype=bool)]
+    if sel.size == 0:
+        return 0.0
+    lo = float(sel.min())
+    return lo if lo < 0.0 else 0.0
+
+
 def color_escape_time(values: np.ndarray, max_iter: int, palette: str = "viridis",
-                       scaling: str = "log1p", period: float | None = None) -> np.ndarray:
+                       scaling: str = "log1p", period: float | None = None,
+                       escaped: np.ndarray | None = None) -> np.ndarray:
     """The full escape-time coloring pipeline: raw smooth-escape values
-    -> an (H, W, 3) uint8 RGB image. 0 always means "never escaped" (see
-    module docstring) and always gets NEVER_ESCAPED_RGB, never a palette
-    color -- including palette index 0, which is a real escape-value
-    color, not a stand-in for "no data."
+    -> an (H, W, 3) uint8 RGB image. `escaped` (same shape, nonzero =
+    escaped) decides interior vs exterior: non-escaped pixels always get
+    NEVER_ESCAPED_RGB, never a palette color -- including palette index 0,
+    which is a real escape-value color, not a stand-in for "no data."
+
+    NEGATIVE VALUES. The smooth value nu = n + 1 - log_d(log|z_n|/log R) is
+    legitimately <= 0 for a fast escape (z^5 + a: nu ~ -0.2 at |z_0| ~ 150;
+    under the old base-2 formula nu = -1.2 at |z_0| = 6.3). Treating
+    "value > 0" as "escaped" painted every such pixel black -- the "bubble"
+    of fake interior around z^5 + a at half-width 105. So:
+      * log1p scaling (no period): shift by escape_shift(values, escaped)
+        = min(0, min nu over escaped pixels), then log1p(nu - shift) /
+        log1p(max_iter - shift). The fastest escape in the frame gets
+        palette index 0 and shading stays monotonic. When no escaped value
+        is negative the shift is 0 and the result is exactly the
+        unshifted, reference-anchored scale_log1p (comparable across
+        renders). Only frames that actually contain nu < 0 shift, and then
+        only by how far below 0 they reach.
+      * log1p with a period: np.mod(nu, period) is already well-defined and
+        continuous for negative nu, so no shift is needed there.
+      * histogram: rank-based, so the sign of nu is irrelevant; the mask
+        selects which pixels are ranked.
+
+    `escaped=None` is a legacy fallback for callers holding only a value
+    array: it treats value != 0 as escaped (0 is what the engine writes for
+    a non-escaped pixel), which is right except for an escaped pixel whose
+    value is exactly 0.0.
     """
     if scaling not in SCALING_MODES:
         raise ValueError(f"unknown scaling {scaling!r}; must be one of {SCALING_MODES}")
     if palette not in PALETTES:
         raise ValueError(f"unknown palette {palette!r}; must be one of {PALETTE_NAMES}")
     values = np.asarray(values, dtype=float)
-    escaped = values > 0.0
+    mask = (values != 0.0) if escaped is None else (np.asarray(escaped) != 0)
     if scaling == "log1p":
-        t = scale_log1p(values, max_iter, period)
+        if period is not None and period > 0:
+            t = scale_log1p(np.mod(values, period), max_iter, period)
+        else:
+            shift = escape_shift(values, mask)
+            t = scale_log1p(values - shift, max_iter - shift)
     else:
-        t = scale_histogram_eq(values, escaped)
-    return _apply_palette(t, escaped, PALETTES[palette], NEVER_ESCAPED_RGB)
+        t = scale_histogram_eq(values, mask)
+    return _apply_palette(t, mask, PALETTES[palette], NEVER_ESCAPED_RGB)
 
 
 # ---- basin: categorical hue + optional convergence-speed shading ----------------------

@@ -649,21 +649,28 @@ PYBIND11_MODULE(cdx, m) {
              "Recentre on target and divide the half-width by factor.")
         .def_property_readonly("precision_floor", &Renderer::precision_floor,
              "Smallest half-width the double grid still resolves.")
+        .def_property("_reconciled_parameter_path", &Renderer::reconciled_parameter_path,
+             &Renderer::set_reconciled_parameter_path,
+             "INTERNAL, not a user setting: True switches parameter / parameter_basin / "
+             "parameter_period back to the old per-pixel attractor-reconciliation path, "
+             "kept only as a test oracle and for A/B timing (see Renderer::"
+             "set_reconciled_parameter_path).")
 
         .def("render_julia",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
                 const std::vector<Cycle>& cycles) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 Image labels;
-                 py::array_t<double> values_arr, labels_arr;
+                 Image labels, escaped;
+                 py::array_t<double> values_arr, labels_arr, escaped_arr;
                  {
                      py::gil_scoped_release release;   // let other threads run
-                     Image img = r.render_julia(cp, cycles, &labels);
+                     Image img = r.render_julia(cp, cycles, &labels, &escaped);
                      py::gil_scoped_acquire acquire;
                      values_arr = image_to_numpy(std::move(img));
                      labels_arr = image_to_numpy(std::move(labels));
+                     escaped_arr = image_to_numpy(std::move(escaped));
                  }
-                 return py::make_tuple(values_arr, labels_arr);
+                 return py::make_tuple(values_arr, labels_arr, escaped_arr);
              },
              py::arg("cancel") = nullptr, py::arg("cycles") = std::vector<Cycle>{},
              "Julia set of the bound map -- TWO PATHS (see Renderer::render_julia's "
@@ -677,7 +684,10 @@ PYBIND11_MODULE(cdx, m) {
              "0 = unresolved; labels = which attractor's Cycle.id each pixel "
              "reached, 0 = unresolved) -- the SAME (primary, shading-channel) "
              "split render_basin already returns, for the SAME reason (per-basin "
-             "hue + rate-based shading). Pass a CancelToken to make this "
+             "hue + rate-based shading). Returns (values, labels, escaped): `escaped` "
+             "is 1.0 where the pixel escaped/resolved -- THE escape status; the "
+             "smooth value is a shade only and may be <= 0 for fast escapes. "
+             "Pass a CancelToken to make this "
              "interruptible from another thread; on cancellation the (partial) "
              "result should be discarded, not displayed.")
 
@@ -685,14 +695,16 @@ PYBIND11_MODULE(cdx, m) {
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
                 ParameterStrategy strategy, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::array_t<double> arr;
+                 Image escaped;
+                 py::array_t<double> arr, escaped_arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter(cp, strategy, critical_index);
+                     Image img = r.render_parameter(cp, strategy, critical_index, &escaped);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
+                     escaped_arr = image_to_numpy(std::move(escaped));
                  }
-                 return arr;
+                 return py::make_tuple(arr, escaped_arr);
              },
              py::arg("cancel") = nullptr, py::arg("strategy") = ParameterStrategy::Slowest,
              py::arg("critical_index") = 0,
@@ -708,7 +720,11 @@ PYBIND11_MODULE(cdx, m) {
              "set (fixed point, cycle, or infinity), and `strategy` (a "
              "ParameterStrategy) combines their smooth chordal rates into the "
              "one value each pixel gets; escape_radius plays no role there at "
-             "all. `critical_index` only matters for ParameterStrategy.PerCritical.")
+             "all. `critical_index` only matters for ParameterStrategy.PerCritical. "
+             "Returns (values, escaped): `escaped` is 1.0 where the pixel escaped/"
+             "resolved under `strategy` (Slowest: every free orbit; Fastest: any; "
+             "PerCritical: the selected one) -- THE escape status; values may be "
+             "any real number (0 where not escaped).")
 
         .def("render_parameter_basin",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {

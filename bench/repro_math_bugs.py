@@ -11,6 +11,11 @@ Bug B: "parameter" on z^3 + a z + 1 (centre 0, scale 1.5) -- do the three
        f_a and every strategy symmetric in the critical points must be too)?
 
 --save TAG writes PNGs to bench/out/<TAG>_*.png (bench/out is git-ignored).
+Bug C: "parameter" on the McMullen presets z^n + a/z^n (centre 0, half-width
+       0.3) -- Slowest must not be all black, Fastest must not be constant,
+       and the black fraction must match a numpy reference that iterates the
+       free critical point a^(1/(2n)).
+
 Everything goes through app.session.render_map, the app's own dispatch.
 """
 
@@ -84,11 +89,12 @@ def cubic():
 def seam_fraction(img, view):
     """Fraction of pixels with Re a in [-1.5, -0.45] whose bounded/escaped
     status differs from the conjugate pixel's (row r <-> row res-1-r)."""
-    res = img.shape[0]
+    esc = img[1] != 0          # a "parameter" payload is (values, escaped)
+    res = esc.shape[0]
     re = view.center.real - view.scale + 2 * view.scale / (res - 1) * np.arange(res)
     cols = (re >= -1.5) & (re <= -0.45)
-    a = img[:, cols] > 0
-    b = np.flipud(img)[:, cols] > 0
+    a = esc[:, cols]
+    b = np.flipud(esc)[:, cols]
     return float(np.mean(a != b))
 
 
@@ -101,7 +107,7 @@ def bug_b(res, save_tag):
         t, img = timed(lambda: render_map(m, 0j, vp, settings(), "parameter", strategy=strat),
                        repeat=1)
         imgs[strat] = img
-        print(f"  {strat:>12}: {t:6.2f} s, black fraction {np.mean(img == 0):.3f}, "
+        print(f"  {strat:>12}: {t:6.2f} s, black fraction {np.mean(img[1] == 0):.3f}, "
               f"conjugation-asymmetric fraction (Re a in [-1.5,-0.45]) {seam_fraction(img, vp):.4f}")
     if "per_critical" in imgs:
         t1, img1 = timed(lambda: render_map(m, 0j, vp, settings(), "parameter",
@@ -142,7 +148,9 @@ def save_param_pngs(imgs, vp, prefix):
            vp.center.imag - vp.scale, vp.center.imag + vp.scale]
     fig, axes = plt.subplots(1, len(imgs), figsize=(4.2 * len(imgs), 4.4))
     for ax, (name, img) in zip(np.atleast_1d(axes), imgs.items()):
-        shade = np.where(img > 0, np.log1p(np.abs(img)), np.nan)
+        vals, esc = img[0], img[1] != 0        # (values, escaped): the mask is the status
+        lo = min(0.0, float(vals[esc].min())) if esc.any() else 0.0
+        shade = np.where(esc, np.log1p(vals - lo), np.nan)
         ax.imshow(shade, origin="lower", extent=ext, cmap="magma")
         ax.set_facecolor("black")
         ax.set_title(name)
@@ -175,6 +183,38 @@ def save_period_png(save_tag, res=300):
     print(f"  saved {path}")
 
 
+def mcmullen_reference(n, vp, max_iter=200, bailout=50.0):
+    """Never-escaped mask for z^n + a/z^n from the free critical point
+    a^(1/(2n)) (numpy; row 0 at the bottom, like cdx)."""
+    res = vp.resolution
+    t = np.linspace(-vp.scale, vp.scale, res)
+    a = (vp.center.real + t)[None, :] + 1j * (vp.center.imag + t)[:, None]
+    z = a ** (1.0 / (2 * n))
+    alive = np.ones(a.shape, bool)
+    with np.errstate(all="ignore"):
+        for _ in range(max_iter):
+            z = np.where(alive, z ** n + a / z ** n, z)
+            alive &= np.isfinite(z) & (np.abs(z) <= bailout)
+    return alive
+
+
+def bug_c(save_tag="", res=128):
+    print("Bug C: McMullen parameter plane, centre 0, half-width 0.3")
+    lib = cdx.FamilyLibrary.with_defaults()
+    vp = cdx.Viewport(0j, 0.3, res)
+    for name, n in (("mcmullen2", 2), ("mcmullen3", 3)):
+        m = lib.find(name)
+        ref = mcmullen_reference(n, vp)
+        imgs = {}
+        for st in ("slowest", "fastest"):
+            img = render_map(m, 0j, vp, settings(), "parameter", strategy=st)
+            imgs[f"{name} {st}"] = img
+            print(f"  {name:9s} {st:8s} black={np.mean(img[1] == 0):.3f} "
+                  f"ptp={np.ptp(img[0]):.4g}  (numpy ref black={ref.mean():.3f})")
+        if save_tag:
+            save_param_pngs(imgs, vp, f"{save_tag}_bugC_{name}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--save", default="")
@@ -185,6 +225,7 @@ def main():
     if args.save:
         save_period_png(args.save)
     bug_b(min(args.res, 400), args.save)
+    bug_c(args.save)
     if not args.skip_timings:
         timings(args.res)
 

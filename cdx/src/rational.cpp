@@ -683,6 +683,123 @@ CompiledMap RationalMap::compile(Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
+// CompiledMap cold-path companions -- see the header.
+// -----------------------------------------------------------------------------
+namespace {
+Cplx horner(const std::vector<double>& re, const std::vector<double>& im, Cplx z, Cplx* d) {
+    Cplx v(0.0, 0.0), dv(0.0, 0.0);
+    for (std::size_t k = re.size(); k-- > 0;) {
+        dv = dv * z + v;
+        v = v * z + Cplx(re[k], im[k]);
+    }
+    if (d) *d = dv;
+    return v;
+}
+int top_nonzero(const std::vector<double>& re, const std::vector<double>& im) {
+    for (std::size_t k = re.size(); k-- > 0;) if (re[k] != 0.0 || im[k] != 0.0) return static_cast<int>(k);
+    return -1;
+}
+}  // namespace
+
+Cplx CompiledMap::eval_c(Cplx z) const {
+    double zr = z.real(), zi = z.imag();
+    step(zr, zi);
+    return {zr, zi};
+}
+
+Cplx CompiledMap::deriv_c(Cplx z) const {
+    if (is_pq_) {
+        Cplx dp, dq;
+        const Cplx p = horner(pr_, pi_, z, &dp);
+        const Cplx q = horner(qr_, qi_, z, &dq);
+        if (q == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        return (dp * q - p * dq) / (q * q);
+    }
+    Cplx d(0.0, 0.0);
+    for (const auto& t : poly_) {
+        if (t.exponent == 0) continue;
+        d += Cplx(t.cr, t.ci) * static_cast<double>(t.exponent) *
+             std::pow(z, static_cast<double>(t.exponent - 1));
+    }
+    for (const auto& t : pole_) {
+        const Cplx w = z - Cplx(t.lr, t.li);
+        if (w == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        d -= Cplx(t.sr, t.si) * static_cast<double>(t.order) / std::pow(w, t.order + 1);
+    }
+    return d;
+}
+
+void CompiledMap::infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier,
+                                 Cplx& image) const {
+    fixed = false;
+    local_degree = 1;
+    multiplier = Cplx(1.0, 0.0);
+    image = Cplx(0.0, 0.0);
+    int k;                // deg P - deg Q (f ~ c z^k at infinity)
+    Cplx lead_ratio;      // c
+    if (is_pq_) {
+        const int dp = top_nonzero(pr_, pi_), dq = top_nonzero(qr_, qi_);
+        if (dp < 0 || dq < 0) return;
+        k = dp - dq;
+        lead_ratio = Cplx(pr_[static_cast<std::size_t>(dp)], pi_[static_cast<std::size_t>(dp)]) /
+                     Cplx(qr_[static_cast<std::size_t>(dq)], qi_[static_cast<std::size_t>(dq)]);
+    } else {
+        // Pole terms vanish at infinity; the highest-exponent poly terms decide.
+        k = std::numeric_limits<int>::min();
+        Cplx c(0.0, 0.0);
+        for (const auto& t : poly_) {
+            if (t.cr == 0.0 && t.ci == 0.0) continue;
+            if (t.exponent > k) { k = t.exponent; c = Cplx(t.cr, t.ci); }
+            else if (t.exponent == k) c += Cplx(t.cr, t.ci);
+        }
+        if (k == std::numeric_limits<int>::min() || c == Cplx(0.0, 0.0)) return;
+        lead_ratio = c;
+    }
+    if (k >= 2) { fixed = true; local_degree = k; multiplier = Cplx(0.0, 0.0); return; }
+    if (k == 1) { fixed = true; local_degree = 1; multiplier = Cplx(1.0, 0.0) / lead_ratio; return; }
+    image = k == 0 ? lead_ratio : Cplx(0.0, 0.0);
+}
+
+void RationalMap::compile_into(Cplx a, CompiledMap& c) const {
+    c.poly_.clear();
+    c.pole_.clear();
+    c.pr_.clear();
+    c.pi_.clear();
+    c.qr_.clear();
+    c.qi_.clear();
+    if (pq_) {
+        c.is_pq_ = true;
+        thread_local std::map<std::string, Cplx> params;
+        if (pq_param_.empty()) params.clear();
+        else if (params.size() != 1 || params.begin()->first != pq_param_) params = {{pq_param_, a}};
+        else params.begin()->second = a;
+        for (const auto& coeff : pq_->P.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.pr_.push_back(v.real());
+            c.pi_.push_back(v.imag());
+        }
+        for (const auto& coeff : pq_->Q.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.qr_.push_back(v.real());
+            c.qi_.push_back(v.imag());
+        }
+        return;
+    }
+    c.is_pq_ = false;
+    for (const auto& t : poly_) {
+        if (!t.enabled) continue;
+        const Cplx coeff = t.effective_coeff(a);
+        c.poly_.push_back({coeff.real(), coeff.imag(), t.exponent});
+    }
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        const Cplx loc = t.effective_location(a);
+        const Cplx str = t.effective_strength(a);
+        c.pole_.push_back({loc.real(), loc.imag(), str.real(), str.imag(), t.order});
+    }
+}
+
+// -----------------------------------------------------------------------------
 int RationalMap::degree(Cplx a) const {
     if (pq_) {
         const auto params = pq_binding(pq_param_, a);
@@ -1147,7 +1264,7 @@ double min_separation(const std::vector<Cplx>& pts, std::size_t i) {
 }
 }  // namespace
 
-void DerivNumeratorInA::eval(Cplx a, std::vector<Cplx>& out) const {
+void PolyCoeffsInA::eval(Cplx a, std::vector<Cplx>& out) const {
     out.resize(static_cast<std::size_t>(z_terms));
     for (int k = 0; k < z_terms; ++k) {
         const Cplx* c = &coef[static_cast<std::size_t>(k * a_terms)];
@@ -1157,14 +1274,20 @@ void DerivNumeratorInA::eval(Cplx a, std::vector<Cplx>& out) const {
     }
 }
 
-DerivNumeratorInA RationalMap::compile_deriv_numerator_in_a() const {
+namespace {
+// Fits sample(a) -- a coefficient vector in z whose entries are polynomials
+// in a -- from 16 samples on |a| = 1, and accepts the fit only if it
+// reproduces sample() at four other parameters (|a| up to ~4) to 1e-10
+// relative. See PolyCoeffsInA.
+template <typename Sample>
+PolyCoeffsInA fit_coeffs_in_a(Sample&& sample) {
     constexpr int M = 16;
-    DerivNumeratorInA f;
+    PolyCoeffsInA f;
     std::vector<std::vector<Cplx>> samples(M);
     std::size_t zt = 0;
     const double two_pi = 2.0 * std::acos(-1.0);
     for (int m = 0; m < M; ++m) {
-        samples[static_cast<std::size_t>(m)] = deriv_numerator_poly(std::polar(1.0, two_pi * m / M));
+        if (!sample(std::polar(1.0, two_pi * m / M), samples[static_cast<std::size_t>(m)])) return f;
         zt = std::max(zt, samples[static_cast<std::size_t>(m)].size());
     }
     if (zt == 0) return f;
@@ -1200,9 +1323,9 @@ DerivNumeratorInA RationalMap::compile_deriv_numerator_in_a() const {
 
     // Verify away from the sampling circle, including |a| ~ 4.
     const Cplx checks[4] = {Cplx(0.0, 0.0), Cplx(0.3711, 0.2179), Cplx(2.3, -1.7), Cplx(-4.1, 0.6)};
-    std::vector<Cplx> got;
+    std::vector<Cplx> got, want;
     for (const Cplx& a : checks) {
-        std::vector<Cplx> want = deriv_numerator_poly(a);
+        if (!sample(a, want)) { f.valid = false; return f; }
         want.resize(zt, Cplx(0.0, 0.0));
         f.valid = true;
         f.eval(a, got);
@@ -1213,6 +1336,21 @@ DerivNumeratorInA RationalMap::compile_deriv_numerator_in_a() const {
         }
     }
     return f;
+}
+}  // namespace
+
+DerivNumeratorInA RationalMap::compile_deriv_numerator_in_a() const {
+    return fit_coeffs_in_a([this](Cplx a, std::vector<Cplx>& out) {
+        out = deriv_numerator_poly(a);
+        return true;
+    });
+}
+
+PolyCoeffsInA RationalMap::compile_polynomial_coefficients_in_a() const {
+    if (!is_polynomial_structurally()) return {};
+    return fit_coeffs_in_a([this](Cplx a, std::vector<Cplx>& out) {
+        return polynomial_coefficients(a, out);
+    });
 }
 
 CriticalLabelBase RationalMap::critical_label_base() const {

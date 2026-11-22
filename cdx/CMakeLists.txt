@@ -15,7 +15,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 # ---- core library -----------------------------------------------------------
-add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/composed.cpp)
+add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/composed.cpp src/critical_orbits.cpp)
 target_include_directories(cdx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 find_package(Threads REQUIRED)

@@ -180,6 +180,10 @@ struct FreeCriticalStructure {
 //      the collapse tolerance (1e-9 relative).
 //   4. Free critical points that are not tracked roots -- infinity and
 //      pole copies, both closed-form -- follow, in (Re, Im) order.
+// Labels index the FREE critical points only (FreeCriticalStructure): a
+// structurally pre-fixed point -- infinity for a polynomial, or 0 and
+// infinity for z^n + a/z^n -- never gets a label, so critical_index 0 can
+// never silently mean "infinity", whose orbit is the same for every a.
 // So the cuts are the rays from each collision point pointing directly
 // away from a*, and they do not move when the user pans or zooms. If a
 // continuation fails outright (the segment passes within ~1e-7 of a
@@ -198,14 +202,20 @@ struct FreeCriticalStructure {
 // parser only admits rational expressions and clears denominators in a too,
 // so the coefficients are always polynomial in a; what fails is degree
 // >= 16 in a, which 16 samples cannot capture.)
-struct DerivNumeratorInA {
+//
+// The same fit serves any per-`a` coefficient vector that is polynomial in
+// a: RationalMap::compile_polynomial_coefficients_in_a fits f's OWN
+// coefficients (polynomial_coefficients) so the certified escape radius can
+// be computed per parameter pixel without the expression evaluator.
+struct PolyCoeffsInA {
     bool valid = false;
     int  z_terms = 0;                 // number of z-coefficients
     int  a_terms = 0;                 // number of a-coefficients per z-coefficient
     std::vector<Cplx> coef;           // coef[k * a_terms + j] multiplies a^j z^k
-    // N_a's coefficients (ascending in z) into `out`, resized to z_terms.
+    // The coefficients (ascending in z) at `a` into `out`, resized to z_terms.
     void eval(Cplx a, std::vector<Cplx>& out) const;
 };
+using DerivNumeratorInA = PolyCoeffsInA;
 
 struct CriticalLabelBase {
     bool  constant = false;           // critical points do not move: labels are just `points`
@@ -254,6 +264,19 @@ public:
     // render, so free after the first), the same reasoning this class's
     // own doc comment already applies to that branch.
     inline void step(double& zr, double& zi) const;
+
+    // Cold-path companions (Newton refinement and multipliers in
+    // critical_orbits.cpp -- a few dozen calls per orbit, not per step):
+    // f(z) and f'(z) in std::complex, and infinity's status read off the
+    // compiled coefficients (see InfinityStatus, critical_orbits.hpp).
+    // eval_c maps a pole to (1e300, 0), the same sentinel step() uses.
+    Cplx eval_c(Cplx z) const;
+    Cplx deriv_c(Cplx z) const;
+    // f(inf) == inf? If so, local degree there (>= 2: superattracting) and
+    // the multiplier in the w = 1/z chart (0 when superattracting). If not,
+    // `image` is f(inf) (the leading-coefficient ratio when deg P == deg Q,
+    // else 0).
+    void infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier, Cplx& image) const;
 
 private:
     friend class RationalMap;
@@ -577,6 +600,11 @@ public:
     // render_parameter: for one pixel's worth of iterations). See
     // CompiledMap's own doc comment for what this buys over plain eval().
     CompiledMap compile(Cplx a) const;
+    // compile(a) into `out`, reusing out's buffers (and a per-thread
+    // parameter binding): no allocation once `out` has been filled once.
+    // Bit-identical to compile(a). For per-PIXEL callers (the parameter
+    // planes), where compile(a)'s allocations were most of the overhead.
+    void compile_into(Cplx a, CompiledMap& out) const;
 
     // --- structure ----------------------------------------------------------
     // Degree as a rational map of the sphere: max(deg numerator, deg
@@ -754,6 +782,9 @@ public:
     // returns false if the continuation failed.
     CriticalLabelBase critical_label_base() const;
     DerivNumeratorInA compile_deriv_numerator_in_a() const;
+    // polynomial_coefficients(a) as polynomials in a (see PolyCoeffsInA);
+    // valid == false when the map is not a polynomial or the fit fails.
+    PolyCoeffsInA compile_polynomial_coefficients_in_a() const;
     std::vector<Cplx> critical_point_labels(Cplx a, const CriticalLabelBase& base) const;
     std::vector<Cplx> critical_point_labels(Cplx a) const;
     bool continue_critical_labels(const CriticalLabelBase& base, Cplx from_a,
