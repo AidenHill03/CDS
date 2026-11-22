@@ -1017,10 +1017,11 @@ def main() -> None:
          ("period = " in pperiod_text or pperiod_text in ("undetermined", "converges to infinity")),
           "parameter_period mode's cursor readout reports one of its own three formats "
           "(period/undetermined/infinity), not escape/basin/potential formatting -- using "
-          "the mandelbrot family here (this mode CURRENTLY only supports relaxed-Newton "
-          "seeds, a documented scope limitation -- see cdx.Renderer.render_parameter_"
-          "period's own doc comment), so this checks the FORMAT stays well-formed and "
-          "does not crash, not that the value is mathematically meaningful for this map")
+          "the mandelbrot family here (seeded from its own free critical point 0 via "
+          "cdx.CriticalPointFamily.FromMap -- relaxed-Newton seeds are used only for maps "
+          "cdx.relaxed_newton_power_n recognises; see app.session.render_map), so this "
+          "checks the FORMAT stays well-formed and does not crash; the values themselves "
+          "are tested in app.test_session")
 
     # Stage 2: a RATIONAL map's "julia" render is stacked too -- the cursor
     # readout must sample it the SAME way basin's own stacked array is
