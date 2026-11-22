@@ -682,6 +682,84 @@ CompiledMap RationalMap::compile(Cplx a) const {
     return c;
 }
 
+// -----------------------------------------------------------------------------
+// CompiledMap cold-path companions -- see the header.
+// -----------------------------------------------------------------------------
+namespace {
+Cplx horner(const std::vector<double>& re, const std::vector<double>& im, Cplx z, Cplx* d) {
+    Cplx v(0.0, 0.0), dv(0.0, 0.0);
+    for (std::size_t k = re.size(); k-- > 0;) {
+        dv = dv * z + v;
+        v = v * z + Cplx(re[k], im[k]);
+    }
+    if (d) *d = dv;
+    return v;
+}
+int top_nonzero(const std::vector<double>& re, const std::vector<double>& im) {
+    for (std::size_t k = re.size(); k-- > 0;) if (re[k] != 0.0 || im[k] != 0.0) return static_cast<int>(k);
+    return -1;
+}
+}  // namespace
+
+Cplx CompiledMap::eval_c(Cplx z) const {
+    double zr = z.real(), zi = z.imag();
+    step(zr, zi);
+    return {zr, zi};
+}
+
+Cplx CompiledMap::deriv_c(Cplx z) const {
+    if (is_pq_) {
+        Cplx dp, dq;
+        const Cplx p = horner(pr_, pi_, z, &dp);
+        const Cplx q = horner(qr_, qi_, z, &dq);
+        if (q == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        return (dp * q - p * dq) / (q * q);
+    }
+    Cplx d(0.0, 0.0);
+    for (const auto& t : poly_) {
+        if (t.exponent == 0) continue;
+        d += Cplx(t.cr, t.ci) * static_cast<double>(t.exponent) *
+             std::pow(z, static_cast<double>(t.exponent - 1));
+    }
+    for (const auto& t : pole_) {
+        const Cplx w = z - Cplx(t.lr, t.li);
+        if (w == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        d -= Cplx(t.sr, t.si) * static_cast<double>(t.order) / std::pow(w, t.order + 1);
+    }
+    return d;
+}
+
+void CompiledMap::infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier,
+                                 Cplx& image) const {
+    fixed = false;
+    local_degree = 1;
+    multiplier = Cplx(1.0, 0.0);
+    image = Cplx(0.0, 0.0);
+    int k;                // deg P - deg Q (f ~ c z^k at infinity)
+    Cplx lead_ratio;      // c
+    if (is_pq_) {
+        const int dp = top_nonzero(pr_, pi_), dq = top_nonzero(qr_, qi_);
+        if (dp < 0 || dq < 0) return;
+        k = dp - dq;
+        lead_ratio = Cplx(pr_[static_cast<std::size_t>(dp)], pi_[static_cast<std::size_t>(dp)]) /
+                     Cplx(qr_[static_cast<std::size_t>(dq)], qi_[static_cast<std::size_t>(dq)]);
+    } else {
+        // Pole terms vanish at infinity; the highest-exponent poly terms decide.
+        k = std::numeric_limits<int>::min();
+        Cplx c(0.0, 0.0);
+        for (const auto& t : poly_) {
+            if (t.cr == 0.0 && t.ci == 0.0) continue;
+            if (t.exponent > k) { k = t.exponent; c = Cplx(t.cr, t.ci); }
+            else if (t.exponent == k) c += Cplx(t.cr, t.ci);
+        }
+        if (k == std::numeric_limits<int>::min() || c == Cplx(0.0, 0.0)) return;
+        lead_ratio = c;
+    }
+    if (k >= 2) { fixed = true; local_degree = k; multiplier = Cplx(0.0, 0.0); return; }
+    if (k == 1) { fixed = true; local_degree = 1; multiplier = Cplx(1.0, 0.0) / lead_ratio; return; }
+    image = k == 0 ? lead_ratio : Cplx(0.0, 0.0);
+}
+
 void RationalMap::compile_into(Cplx a, CompiledMap& c) const {
     c.poly_.clear();
     c.pole_.clear();

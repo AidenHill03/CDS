@@ -649,6 +649,12 @@ PYBIND11_MODULE(cdx, m) {
              "Recentre on target and divide the half-width by factor.")
         .def_property_readonly("precision_floor", &Renderer::precision_floor,
              "Smallest half-width the double grid still resolves.")
+        .def_property("_reconciled_parameter_path", &Renderer::reconciled_parameter_path,
+             &Renderer::set_reconciled_parameter_path,
+             "INTERNAL, not a user setting: True switches parameter / parameter_basin / "
+             "parameter_period back to the old per-pixel attractor-reconciliation path, "
+             "kept only as a test oracle and for A/B timing (see Renderer::"
+             "set_reconciled_parameter_path).")
 
         .def("render_julia",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,

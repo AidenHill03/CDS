@@ -265,6 +265,19 @@ public:
     // own doc comment already applies to that branch.
     inline void step(double& zr, double& zi) const;
 
+    // Cold-path companions (Newton refinement and multipliers in
+    // critical_orbits.cpp -- a few dozen calls per orbit, not per step):
+    // f(z) and f'(z) in std::complex, and infinity's status read off the
+    // compiled coefficients (see InfinityStatus, critical_orbits.hpp).
+    // eval_c maps a pole to (1e300, 0), the same sentinel step() uses.
+    Cplx eval_c(Cplx z) const;
+    Cplx deriv_c(Cplx z) const;
+    // f(inf) == inf? If so, local degree there (>= 2: superattracting) and
+    // the multiplier in the w = 1/z chart (0 when superattracting). If not,
+    // `image` is f(inf) (the leading-coefficient ratio when deg P == deg Q,
+    // else 0).
+    void infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier, Cplx& image) const;
+
 private:
     friend class RationalMap;
     bool is_pq_ = false;

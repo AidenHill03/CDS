@@ -38,13 +38,15 @@ are studying.
 - `roots` — Aberth–Ehrlich polynomial root finder
 - `renderer` — Julia / parameter / basin / Green's rendering
 - `analysis` — `find_attractors`, `wada_diagnostic`, `hausdorff_distance`
+- `critical_orbits` — `track_critical_orbit`: one free critical orbit, followed
+  with inline period detection (the parameter planes' engine)
 
 Test by mathematical property (symmetries, Riemann–Hurwitz counts, metric
 identities), never by golden image.
 
 #### Parameter-plane conventions
 
-Every parameter-plane mode agrees on four things. The definitions live in
+Every parameter-plane mode agrees on five things. The definitions live in
 `cdx/rational.hpp` (`FreeCriticalStructure`, `CriticalLabelBase`) and
 `cdx/analysis.hpp` (`polynomial_escape_radius`); this is the summary.
 
@@ -64,11 +66,31 @@ Every parameter-plane mode agrees on four things. The definitions live in
   the collision, so some cut is unavoidable. This convention puts the cuts on
   the rays from each collision point pointing directly away from a*. They do
   not move when you pan or zoom.
+- **Parameter planes follow the free critical orbits; full attractor
+  reconciliation is single-parameter only.** Every attracting cycle attracts a
+  critical point (Fatou), and a pre-fixed critical point's attractor is known
+  in closed form, so following the free orbits finds every attracting cycle
+  that matters. `parameter` (rational), `parameter_basin` and
+  `parameter_period` run `track_critical_orbit` per pixel and per free
+  critical point (`cdx/critical_orbits.hpp`): escape to ∞ (certified radius
+  for a polynomial; ∞'s multiplier read off the compiled coefficients for a
+  rational map), otherwise Brent periodicity checking, reduction to the
+  minimal period, Newton refinement of f^q(z) − z, and the multiplier test
+  |λ| < 1 − 10⁻⁶. Neutral, parabolic, Siegel, or out of budget is reported
+  undetermined, never guessed. No fixed-point solve, attractor discovery,
+  algebraic union or reconciliation sweep runs per pixel.
+  `complete_attractors` and the reconciliation code serve single-parameter
+  uses: Facts, dynamical `basin`, overlays. The old per-pixel path survives
+  only behind `Renderer::set_reconciled_parameter_path`, as a test oracle and
+  for A/B timing, not as a user setting.
+- **Escape status is a mask.** `julia` and `parameter` return an explicit
+  escaped/resolved mask next to the smooth value. The value is only a shade,
+  and is legitimately ≤ 0 for fast escapes.
 - **Strategies.** Several free orbits are combined the same way for a
-  polynomial and a rational map. Slowest is 0 iff some orbit does not settle;
-  otherwise it takes the largest smooth value. Fastest is 0 iff none settles
-  (for a polynomial, that is the connectedness locus); otherwise it takes the
-  smallest. PerCritical uses only the `critical_index` orbit. A unicritical
+  polynomial and a rational map. Slowest is unescaped iff some orbit does not
+  settle; otherwise it takes the largest smooth value. Fastest is unescaped
+  iff none settles (for a polynomial, that is the connectedness locus);
+  otherwise it takes the smallest. PerCritical uses only the `critical_index` orbit. A unicritical
   polynomial (z^d + a) has one orbit and ignores the strategy, and its
   single-orbit path is pinned bit-for-bit in the tests.
 - **"Certified" escape.** `polynomial_escape_certified` means "no poles, so ∞

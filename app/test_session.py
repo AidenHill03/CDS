@@ -584,6 +584,64 @@ def main() -> None:
     check(np.all(nz == 0.0) and np.all(nz_p[1] == 1.0),   # values and mask all 0
           "...so its parameter plane is honestly uniform (0; period undetermined), not a crash")
 
+    # ---- Parameter planes from the free critical orbits vs the reconciled oracle ---
+    # The default path (critical_orbits.hpp) against the old per-pixel
+    # discovery + fixed-point union + reconciliation path, kept behind
+    # Renderer._reconciled_parameter_path as the oracle. Compared quantity:
+    # `parameter` -- the escaped/resolved mask; `parameter_basin` -- the count;
+    # `parameter_period` -- period / undetermined / infinity.
+    print("\nParameter planes: critical-orbit path agrees with the reconciled oracle (128 px):")
+    set_o = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    lib_o = cdx.FamilyLibrary.with_defaults()
+    rn5_o = cdx.RationalMap.from_expression("z - a*(z^5-1)/(5*z^4)", "a", {}, "rn5")
+    fams_o = [("mandelbrot", lib_o.find("mandelbrot"), complex(-0.75, 0), 1.5),
+              ("multibrot3", lib_o.find("multibrot3"), 0j, 1.35),
+              ("multibrot5", lib_o.find("multibrot5"), 0j, 1.25),
+              ("mcmullen2", lib_o.find("mcmullen2"), 0j, 0.3),
+              ("mcmullen3", lib_o.find("mcmullen3"), 0j, 0.3),
+              ("z^3+az+1", cdx.RationalMap.from_expression("z^3+a*z+1", "a", {}, "c3o"), 0j, 1.5),
+              ("relaxed Newton n=5", rn5_o, complex(5, 0), 6.0)]
+
+    def oracle_render(m, c, sc, mode, reconciled):
+        r = cdx.Renderer(map=cdx.Map.custom(m, 0j), viewport=cdx.Viewport(c, sc, 128),
+                         settings=set_o)
+        r._reconciled_parameter_path = reconciled
+        if mode == "parameter":
+            return r.render_parameter(None, cdx.ParameterStrategy.Slowest, 0)[1] != 0
+        if mode == "parameter_basin":
+            return r.render_parameter_basin(None)[0]
+        nn = cdx.relaxed_newton_power_n(m)
+        fam_k = (cdx.CriticalPointFamily.RelaxedNewtonPower if nn is not None
+                 else cdx.CriticalPointFamily.FromMap)
+        per, und, inf_, _mix = r.render_parameter_period(fam_k, nn or 0, None, 0)
+        return np.where(und == 1, -1, np.where(inf_ == 1, -2, per))
+
+    for name, m, c, sc in fams_o:
+        for mode in ("parameter", "parameter_basin", "parameter_period"):
+            new = oracle_render(m, c, sc, mode, False)
+            old = oracle_render(m, c, sc, mode, True)
+            differ = new != old
+            note = ""
+            if name.startswith("relaxed") and mode == "parameter_period":
+                # The reconciled path called infinity only once |z| passed 1e12
+                # inside its 500-step burn-in, i.e. only for |lambda_inf| below
+                # 1e-12^(1/500) = 0.947. Where infinity attracts more slowly it
+                # reported "undetermined": wrong, since lambda_inf = 5/(5 - a) is
+                # closed-form. Those pixels are checked against that formula,
+                # then excluded.
+                t_o = np.linspace(-sc, sc, 128)
+                a_o = (c.real + t_o[None, :]) + 1j * (c.imag + t_o[:, None])
+                lam_inf = np.abs(5.0 / (5.0 - a_o))
+                missed = differ & (old == -1) & (new == -2)
+                check(missed.sum() > 100 and bool(np.all(lam_inf[missed] < 1.0)),
+                      f"relaxed Newton period: all {int(missed.sum())} pixels the old path left "
+                      f"undetermined and the new one sends to infinity have |5/(5-a)| < 1 "
+                      f"(max {lam_inf[missed].max():.4f}): infinity IS attracting there")
+                differ &= ~missed
+                note = " (excluding the old path's infinity misses)"
+            agree = 1.0 - float(differ.mean())
+            check(agree >= 0.995, f"{name} {mode}: {100 * agree:.2f}% of pixels agree{note}")
+
     # ---- critical_index labelling convention (Bug B, part 3) ----------------------
     print("\ncritical_index labelling: continued from a* along a straight segment:")
     cub = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_l")

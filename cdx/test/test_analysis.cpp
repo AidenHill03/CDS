@@ -11,6 +11,7 @@
 //     instead of solving for fixed points.
 // =============================================================================
 #include "cdx/analysis.hpp"
+#include "cdx/critical_orbits.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -2332,6 +2333,11 @@ int main() {
         const Viewport v{{0.0, 0.0}, 3.0, 121};
         const RenderSettings settings{150, 2.0, 1e-6, 1};
         Renderer r(Map::custom(nova), v, settings);
+        // This pins the RECONCILED path's warm-start continuation against its
+        // own cold-only algorithm (below), so it renders through that path:
+        // parameter planes default to the critical-orbit path now, and the
+        // reconciled one is kept as the test oracle.
+        r.set_reconciled_parameter_path(true);
 
         Image unresolved, certain;
         const Image continued = r.render_parameter_basin(nullptr, &unresolved, &certain);
@@ -2404,6 +2410,81 @@ int main() {
         check(some_nonzero && some_zero,
               "Nova's Parameter render (continuation-enabled) still has both resolved and "
               "unresolved pixels -- Stage 1's own sphere-aware detail is preserved");
+    }
+
+    // ---- Critical-orbit period detection (parameter planes, critical_orbits.hpp) ----
+    std::printf("\nCritical-orbit tracking: minimal periods, never a proper multiple:\n");
+    {
+        const RationalMap quad = RationalMap::from_expression("z^2+a", "a", {});
+        CriticalOrbitOptions o;
+        o.budget = 2000;
+        auto track = [&](const RationalMap& m, Cplx a, Cplx z0, bool poly) {
+            const CompiledMap f = m.compile(a);
+            CriticalOrbitOptions oo = o;
+            if (poly) oo.poly_R2 = 4.0 * std::max(1.0, std::abs(a));   // a valid trap for z^2 + a
+            return track_critical_orbit(f, infinity_status(f), z0, oo);
+        };
+        auto is_cycle = [](const CriticalOrbitOutcome& r, int q) {
+            return r.kind == CriticalOrbitOutcome::Kind::Cycle && r.period == q &&
+                   std::abs(r.multiplier) < 1.0;
+        };
+
+        const CriticalOrbitOutcome fp = track(quad, {0.1, 0.1}, {0.0, 0.0}, true);
+        check(is_cycle(fp, 1), "z^2 + 0.1+0.1i from 0: an attracting FIXED point (period 1)");
+
+        const CriticalOrbitOutcome two = track(quad, {-1.0, 0.0}, {0.0, 0.0}, true);
+        check(is_cycle(two, 2), "basilica z^2 - 1 from 0: the superattracting 2-cycle {0, -1}");
+
+        const Cplx airplane(-1.7548776662466927, 0.0);   // superattracting 3-cycle through 0
+        const CriticalOrbitOutcome three = track(quad, airplane, {0.0, 0.0}, true);
+        check(is_cycle(three, 3), "airplane from 0: period 3");
+        // Start one step INTO the cycle, so z_ref (reset at n = 1, 2, 4, ...)
+        // lands on a different cycle point than the critical point itself.
+        const CriticalOrbitOutcome mid = track(quad, airplane, airplane, true);
+        check(is_cycle(mid, 3), "airplane from c (z_ref lands mid-cycle): still period 3, not 6 or 9");
+        const Cplx rabbit(-0.12256116687665361, 0.7448617666197442);
+        const CriticalOrbitOutcome rab = track(quad, rabbit, rabbit * rabbit + rabbit, true);
+        check(is_cycle(rab, 3), "rabbit from f(c) (mid-cycle start): period 3");
+
+        // A fixed point whose multiplier ROTATES by ~1/3 turn: the orbit
+        // closes at p = 3 (|f^3(z) - z| small) long before it closes at p = 1.
+        // The reconciled path's detector reported "period 3" for exactly this
+        // (fixed in find_attractors by reduce_to_minimal_period); here the
+        // refined point must reduce to period 1.
+        const double two_pi = 2.0 * std::acos(-1.0);
+        const Cplx lam = std::polar(0.96, two_pi / 3.0);
+        const RationalMap rot = RationalMap::from_expression("a*z + z^2", "a", {});
+        const CriticalOrbitOutcome r1 = track(rot, lam, -lam / 2.0, false);
+        check(is_cycle(r1, 1) && std::abs(std::abs(r1.multiplier) - 0.96) < 1e-6,
+              "fixed point with multiplier 0.96 e^(2 pi i/3), from the critical point: period 1 "
+              "(|lambda| = 0.96), never 3");
+        const Cplx lam7 = std::polar(0.97, two_pi * 2.0 / 7.0);
+        const CriticalOrbitOutcome r7 = track(rot, lam7, -lam7 / 2.0, false);
+        check(is_cycle(r7, 1), "multiplier 0.97 e^(4 pi i/7): period 1, never 7");
+
+        // Never fabricated: parabolic and Siegel orbits stay undetermined.
+        const CriticalOrbitOutcome para = track(quad, {0.25, 0.0}, {0.0, 0.0}, true);
+        check(!para.resolved(), "z^2 + 1/4 (parabolic fixed point, multiplier 1): undetermined");
+        const Cplx siegel = std::polar(1.0, two_pi * (std::sqrt(5.0) - 1.0) / 2.0);
+        const CriticalOrbitOutcome sg = track(rot, siegel, -siegel / 2.0, false);
+        check(!sg.resolved(), "golden-mean Siegel disc (|lambda| = 1, irrational): undetermined");
+        const CriticalOrbitOutcome par4 = track(quad, {0.25, 0.5}, {0.0, 0.0}, true);
+        check(!par4.resolved(), "0.25 + 0.5i (fixed point multiplier exactly i): undetermined");
+        const CriticalOrbitOutcome esc = track(quad, {0.5, 0.5}, {0.0, 0.0}, true);
+        check(esc.kind == CriticalOrbitOutcome::Kind::Infinity, "0.5 + 0.5i escapes to infinity");
+
+        // Rational: infinity's status from the compiled coefficients.
+        const RationalMap mc = RationalMap::from_expression("z^2 + a/z^2", "a", {});
+        const InfinityStatus is_mc = infinity_status(mc.compile({0.01, 0.0}));
+        check(is_mc.fixed && is_mc.local_degree == 2 && is_mc.attracting(),
+              "z^2 + a/z^2: infinity superattracting, local degree 2");
+        const RationalMap rn = RationalMap::from_expression("z - a*(z^5-1)/(5*z^4)", "a", {});
+        const InfinityStatus is_rn = infinity_status(rn.compile({11.0, 0.0}));
+        check(is_rn.fixed && is_rn.local_degree == 1 &&
+              std::abs(is_rn.multiplier - Cplx(5.0 / (5.0 - 11.0), 0.0)) < 1e-12 && is_rn.attracting(),
+              "relaxed Newton n = 5 at a = 11: infinity fixed, multiplier 5/(5 - a) = -5/6, attracting");
+        const InfinityStatus is_rn1 = infinity_status(rn.compile({1.0, 0.0}));
+        check(is_rn1.fixed && !is_rn1.attracting(), "...and at a = 1 (multiplier 5/4) repelling");
     }
 
     std::printf("\n%s (%d failure%s)\n",

@@ -375,6 +375,17 @@ public:
     // Convenience: zoom the viewport toward a point by a factor (>1 zooms in).
     void zoom(Cplx target, double factor);
 
+    // INTERNAL -- not a user setting. Parameter planes (`parameter` on a
+    // rational map, `parameter_basin`, `parameter_period`) follow the FREE
+    // critical orbits with inline period detection (critical_orbits.hpp).
+    // `true` switches back to the old per-pixel path -- attractor discovery
+    // with burn-in and closure detection, union with the solved fixed
+    // points, reconciliation sweep, then classification
+    // (complete_attractors_from_seeds / per_seed_outcomes) -- kept ONLY as a
+    // test oracle and for A/B timing.
+    void set_reconciled_parameter_path(bool on) { reconciled_parameter_path_ = on; }
+    bool reconciled_parameter_path() const { return reconciled_parameter_path_; }
+
     // --- render modes --------------------------------------------------------
     //
     // Every mode below takes an optional `cancel`: a caller-owned flag,
@@ -837,6 +848,14 @@ private:
                                                     const std::atomic<bool>* cancel) const;
     Image render_parameter_rational(ParameterStrategy strategy, int critical_index,
                                     Image& escaped, const std::atomic<bool>* cancel) const;
+    // The critical-orbit paths (default) -- see set_reconciled_parameter_path.
+    Image render_parameter_rational_orbits(ParameterStrategy strategy, int critical_index,
+                                           Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_parameter_basin_orbits(const std::atomic<bool>* cancel, Image* unresolved,
+                                        Image* certain) const;
+    Image render_parameter_period_orbits(CriticalPointFamily seed_family, int n,
+                                         const std::atomic<bool>* cancel, Image* undetermined,
+                                         Image* is_infinity, int critical_index, Image* mixed) const;
 
     // render_greens' own two paths, same split rationale as render_julia's.
     Image render_greens_polynomial(const std::atomic<bool>* cancel) const;
@@ -853,6 +872,7 @@ private:
     Map            map_;
     Viewport       view_;
     RenderSettings settings_;
+    bool           reconciled_parameter_path_ = false;   // see set_reconciled_parameter_path
 };
 
 }  // namespace cdx

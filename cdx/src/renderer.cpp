@@ -4,6 +4,7 @@
 #include "cdx/renderer.hpp"
 
 #include "cdx/analysis.hpp"   // polynomial_escape_certified -- see Map::escape_certified below
+#include "cdx/critical_orbits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1200,6 +1201,8 @@ Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int crit
 // own distinct_critical_points here).
 Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critical_index,
                                           Image& escaped, const std::atomic<bool>* cancel) const {
+    if (!reconciled_parameter_path_)
+        return render_parameter_rational_orbits(strategy, critical_index, escaped, cancel);
     const int res = view_.resolution;
     Image img(res, res);
     escaped = Image(res, res);
@@ -1393,6 +1396,7 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrat
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved,
                                        Image* certain) const {
+    if (!reconciled_parameter_path_) return render_parameter_basin_orbits(cancel, unresolved, certain);
     const int res = view_.resolution;
     Image img(res, res);
     if (unresolved) *unresolved = Image(res, res);
@@ -1501,6 +1505,9 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
                                         const std::atomic<bool>* cancel, Image* undetermined,
                                         Image* is_infinity, int critical_index,
                                         Image* mixed) const {
+    if (!reconciled_parameter_path_)
+        return render_parameter_period_orbits(seed_family, n, cancel, undetermined, is_infinity,
+                                              critical_index, mixed);
     const int res = view_.resolution;
     Image img(res, res);
     if (undetermined) *undetermined = Image(res, res);
@@ -1574,6 +1581,357 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
                 }
             }
 
+            img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
+            if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
+            if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+            if (mixed) mixed->at(col, row) = mixed_flag ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// -----------------------------------------------------------------------------
+// Parameter planes from the FREE critical orbits alone (critical_orbits.hpp).
+// The default for `parameter` on a rational map, `parameter_basin` and
+// `parameter_period`; the reconciled per-pixel path above is kept behind
+// set_reconciled_parameter_path as a test oracle and for A/B timing only.
+// Full attractor reconciliation (complete_attractors) stays for single-
+// parameter uses: Facts, dynamical basin, overlays.
+// -----------------------------------------------------------------------------
+namespace {
+
+// Iterations a parameter-plane orbit gets in parameter_basin / parameter_
+// period: the budget the reconciled path's discovery had per orbit (burn-in
+// + a closure window + the weakly-attracting extension + its window), so a
+// slowly-attracting cycle the old path resolved is not given up on sooner.
+// `parameter` uses settings.max_iter instead, the budget its classification
+// always had.
+int discovery_budget(int max_iter) {
+    const FindAttractorsOptions o;
+    return std::max(max_iter, o.burn_in + o.max_period + o.extended_max_period + o.max_period);
+}
+
+bool same_point(Cplx a, Cplx b) { return a == b || (a != a && b != b); }
+
+// The rational-map representation the orbit tracker needs, for a Map that
+// may be a built-in family with no RationalMap behind it (never the app).
+const RationalMap* orbit_map(const Map& m, std::optional<RationalMap>& synthesized) {
+    if (m.custom_map()) return m.custom_map();
+    switch (m.family()) {
+        case Family::McMullen2: synthesized = RationalMap::mcmullen(2); break;
+        case Family::McMullen3: synthesized = RationalMap::mcmullen(3); break;
+        case Family::Newton3:   synthesized = RationalMap::newton_cubic(); break;
+        case Family::Quadratic: synthesized = RationalMap::mandelbrot(); break;
+        case Family::Cubic:     synthesized = RationalMap::multibrot(3); break;
+        case Family::Quintic:   synthesized = RationalMap::multibrot(5); break;
+        default: return nullptr;
+    }
+    return &*synthesized;
+}
+
+}  // namespace
+
+Image Renderer::render_parameter_rational_orbits(ParameterStrategy strategy, int critical_index,
+                                                 Image& escaped,
+                                                 const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    escaped = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    std::optional<RationalMap> synthesized;
+    const RationalMap* rmap = orbit_map(map_, synthesized);
+    if (!rmap) return img;
+
+    const bool cp_fixed = custom && custom->critical_points_constant();
+    const FreeCriticalStructure free_s =
+        custom ? custom->free_critical_structure() : FreeCriticalStructure{};
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0),
+                                                custom->distinct_critical_points(Cplx(1.0, 0.0)), free_s)
+                 : std::vector<Cplx>{};
+    const bool labelled = custom && strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base = labelled ? custom->critical_label_base() : CriticalLabelBase{};
+
+    CriticalOrbitOptions opts;
+    opts.budget = settings_.max_iter;
+    opts.tol = settings_.tol;
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> tracked;
+            if (labelled) {
+                const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
+                if (!lab.empty()) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(lab.size()) - 1);
+                    tracked.push_back(lab[static_cast<std::size_t>(idx)]);
+                }
+            } else if (cp_fixed) {
+                tracked = fixed_free;
+            } else if (custom) {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                prev_ordinary = cc.ordinary_raw;
+                tracked = custom->free_critical_points(p, cc.distinct, free_s);
+            } else {
+                tracked.push_back(map_.critical_point_at(p));
+            }
+            if (tracked.empty()) continue;   // no free critical point: honest 0, not escaped
+
+            rmap->compile_into(p, compiled);
+            const InfinityStatus inf = infinity_status(compiled);
+
+            bool px_resolved = false;
+            double out = 0.0;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {   // resolved iff EVERY free orbit is
+                    double worst = -std::numeric_limits<double>::infinity();
+                    px_resolved = true;
+                    for (const Cplx& c0 : tracked) {
+                        const CriticalOrbitOutcome o = track_critical_orbit(compiled, inf, c0, opts);
+                        if (!o.resolved()) { px_resolved = false; break; }
+                        worst = std::max(worst, o.nu);
+                    }
+                    out = px_resolved ? worst : 0.0;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {   // resolved iff ANY free orbit is
+                    double best = std::numeric_limits<double>::infinity();
+                    for (const Cplx& c0 : tracked) {
+                        const CriticalOrbitOutcome o = track_critical_orbit(compiled, inf, c0, opts);
+                        if (o.resolved()) { px_resolved = true; best = std::min(best, o.nu); }
+                    }
+                    out = px_resolved ? best : 0.0;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    const int idx = labelled ? 0
+                        : std::clamp(critical_index, 0, static_cast<int>(tracked.size()) - 1);
+                    const CriticalOrbitOutcome o =
+                        track_critical_orbit(compiled, inf, tracked[static_cast<std::size_t>(idx)], opts);
+                    px_resolved = o.resolved();
+                    out = px_resolved ? o.nu : 0.0;
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+            escaped.at(col, row) = px_resolved ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// parameter_basin from the free critical orbits. The count is
+//   (attractors of the STRUCTURALLY pre-fixed critical points, in closed
+//    form: infinity when it attracts, each finite target w = f(c) with
+//    |f'(w)| < 1)
+// + (distinct attracting cycles the free orbits reach, deduplicated against
+//    those and against each other by chordal distance between cycle point
+//    sets).
+// Every pre-fixed critical point's orbit is the same for every a, so its
+// attractor (if any) is known without iterating; every OTHER attracting
+// cycle attracts a free critical point (Fatou). `unresolved` = free orbits
+// left undetermined (neutral / parabolic / Siegel / out of budget).
+// `certain` keeps its meaning -- attractors in the count known ONLY
+// algebraically, injected by the fixed-point union, never reached by a
+// critical orbit -- and is therefore always 0 here: nothing is injected.
+// A structural attractor is where a pre-fixed critical point's own orbit
+// goes, which the reconciled path counted as "found by critical seeding",
+// not certain.
+Image Renderer::render_parameter_basin_orbits(const std::atomic<bool>* cancel, Image* unresolved,
+                                              Image* certain) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (unresolved) *unresolved = Image(res, res);
+    if (certain) *certain = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    if (!custom) return img;   // as the reconciled path: no RationalMap, honest zeros
+
+    const bool poly = map_.escape_certified();
+    const std::optional<Family> recognized = recognize_family(*custom);
+    const PolyCoeffsInA esc_fit =
+        (poly && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_crit_pts =
+        cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+    const FreeCriticalStructure free_s = custom->free_critical_structure();
+
+    CriticalOrbitOptions opts;
+    opts.budget = discovery_budget(settings_.max_iter);
+    opts.tol = settings_.tol;
+    constexpr double kSame = 1e-6;   // chordal: the reconciled path's dedupe tolerance
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary, scratch;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit_pts;
+            if (cp_fixed) {
+                crit_pts = fixed_crit_pts;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                crit_pts = cc.distinct;
+                prev_ordinary = cc.ordinary_raw;
+            }
+            const std::vector<Cplx> free_pts = custom->free_critical_points(p, crit_pts, free_s);
+
+            custom->compile_into(p, compiled);
+            const InfinityStatus inf = infinity_status(compiled);
+            CriticalOrbitOptions o = opts;
+            if (poly) {
+                const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                                   &esc_fit, &scratch);
+                o.poly_R2 = esc.R2;
+            }
+
+            // Structural attractors: where the pre-fixed critical points go.
+            bool inf_attractor = false;
+            std::vector<Cplx> finite_attractors;
+            for (const Cplx& c : crit_pts) {
+                bool is_free = false;
+                for (const Cplx& f : free_pts) if (same_point(c, f)) { is_free = true; break; }
+                if (is_free) continue;
+                bool to_inf = true;   // infinity itself, or a pole (-> infinity)
+                if (std::isfinite(c.real()) && std::isfinite(c.imag())) {
+                    for (const Cplx& e : free_s.excluded_finite) {
+                        if (std::abs(c - e) < 1e-4 * std::max(1.0, std::abs(e))) { to_inf = false; break; }
+                    }
+                }
+                if (to_inf) { inf_attractor = poly || inf.attracting(); continue; }
+                const Cplx w = compiled.eval_c(c);
+                if (!(std::isfinite(w.real()) && std::isfinite(w.imag())) || std::norm(w) > 1e280) {
+                    inf_attractor = poly || inf.attracting();
+                    continue;
+                }
+                if (!(std::abs(compiled.deriv_c(w)) < 1.0)) continue;   // target not attracting
+                bool dup = false;
+                for (const Cplx& a : finite_attractors) if (chordal_distance(a.real(), a.imag(), w.real(), w.imag()) < kSame) dup = true;
+                if (!dup) finite_attractors.push_back(w);
+            }
+
+            std::vector<CriticalOrbitOutcome> found;
+            int unresolved_n = 0;
+            for (const Cplx& c0 : free_pts) {
+                CriticalOrbitOutcome out = track_critical_orbit(compiled, inf, c0, o);
+                if (!out.resolved()) { ++unresolved_n; continue; }
+                if (out.kind == CriticalOrbitOutcome::Kind::Infinity) { inf_attractor = true; continue; }
+                bool dup = false;
+                if (out.period == 1) {
+                    for (const Cplx& a : finite_attractors) {
+                        if (chordal_distance(a.real(), a.imag(), out.cycle[0].real(), out.cycle[0].imag()) < kSame)
+                            dup = true;
+                    }
+                }
+                for (const CriticalOrbitOutcome& f : found) if (!dup && same_attractor(f, out, kSame)) dup = true;
+                if (!dup) found.push_back(std::move(out));
+            }
+            const int count = (inf_attractor ? 1 : 0) + static_cast<int>(finite_attractors.size()) +
+                              static_cast<int>(found.size());
+            img.at(col, row) = static_cast<double>(count);
+            if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);
+            // certain: always 0 (see the header comment) -- the image is zeroed above.
+        }
+    }, cancel);
+    return img;
+}
+
+// parameter_period from the free critical orbits: the period of the cycle
+// the TRACKED critical orbit lands on -- seeds exactly as the reconciled
+// path (FromMap: the labelled free critical points, critical_index
+// selecting; RelaxedNewtonPower: the closed form, first resolved wins) --
+// classified by track_critical_orbit instead of per_seed_outcomes.
+Image Renderer::render_parameter_period_orbits(CriticalPointFamily seed_family, int n,
+                                               const std::atomic<bool>* cancel, Image* undetermined,
+                                               Image* is_infinity, int critical_index,
+                                               Image* mixed) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (undetermined) *undetermined = Image(res, res);
+    if (is_infinity) *is_infinity = Image(res, res);
+    if (mixed) *mixed = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    if (!custom) {
+        if (undetermined) for (double& v : undetermined->data) v = 1.0;
+        return img;
+    }
+
+    const bool from_map = seed_family == CriticalPointFamily::FromMap;
+    const CriticalLabelBase label_base =
+        from_map ? custom->critical_label_base() : CriticalLabelBase{};
+    const bool poly = map_.escape_certified();
+    const std::optional<Family> recognized = recognize_family(*custom);
+    const PolyCoeffsInA esc_fit =
+        (poly && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+
+    CriticalOrbitOptions opts;
+    opts.budget = discovery_budget(settings_.max_iter);
+    opts.tol = settings_.tol;
+    constexpr double kSame = 1e-6;   // the reconciled path's same_cycle tolerance
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
+            const std::vector<Cplx> seeds = from_map ? custom->critical_point_labels(a, label_base)
+                                                     : tracked_seeds(seed_family, n, a);
+            int period = 0;
+            bool inf_flag = false, resolved_any = false, mixed_flag = false;
+            if (!seeds.empty()) {
+                custom->compile_into(a, compiled);
+                const InfinityStatus inf = infinity_status(compiled);
+                CriticalOrbitOptions o = opts;
+                if (poly) {
+                    o.poly_R2 = poly_escape(map_, recognized, a, settings_.escape_radius, &esc_fit,
+                                            &scratch).R2;
+                }
+                if (from_map) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(seeds.size()) - 1);
+                    std::vector<CriticalOrbitOutcome> outs;
+                    outs.reserve(seeds.size());
+                    for (const Cplx& s0 : seeds) outs.push_back(track_critical_orbit(compiled, inf, s0, o));
+                    const CriticalOrbitOutcome& sel = outs[static_cast<std::size_t>(idx)];
+                    if (sel.resolved()) {
+                        period = sel.period;
+                        inf_flag = sel.kind == CriticalOrbitOutcome::Kind::Infinity;
+                        resolved_any = true;
+                    }
+                    const CriticalOrbitOutcome* first = nullptr;
+                    for (const CriticalOrbitOutcome& oc : outs) {
+                        if (!oc.resolved()) continue;
+                        if (!first) { first = &oc; continue; }
+                        if (!same_attractor(*first, oc, kSame)) { mixed_flag = true; break; }
+                    }
+                } else {
+                    // First resolved wins. The closed-form seeds are images of
+                    // each other under z -> omega z, which conjugates N_a to
+                    // itself (N_a(omega z) = omega N_a(z)), so their fates agree
+                    // in exact arithmetic: seed 0 plus ONE tie-break seed for a
+                    // numerical straggler, not all n -- an undetermined pixel
+                    // (40% of the default relaxed-Newton view) otherwise ran the
+                    // full budget n times over.
+                    const std::size_t n_try = std::min<std::size_t>(seeds.size(), 2);
+                    for (std::size_t k = 0; k < n_try; ++k) {
+                        const Cplx& s0 = seeds[k];
+                        const CriticalOrbitOutcome oc = track_critical_orbit(compiled, inf, s0, o);
+                        if (oc.resolved()) {
+                            period = oc.period;
+                            inf_flag = oc.kind == CriticalOrbitOutcome::Kind::Infinity;
+                            resolved_any = true;
+                            break;
+                        }
+                    }
+                }
+            }
             img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
             if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
             if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
