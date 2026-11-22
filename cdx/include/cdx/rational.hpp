@@ -180,6 +180,10 @@ struct FreeCriticalStructure {
 //      the collapse tolerance (1e-9 relative).
 //   4. Free critical points that are not tracked roots -- infinity and
 //      pole copies, both closed-form -- follow, in (Re, Im) order.
+// Labels index the FREE critical points only (FreeCriticalStructure): a
+// structurally pre-fixed point -- infinity for a polynomial, or 0 and
+// infinity for z^n + a/z^n -- never gets a label, so critical_index 0 can
+// never silently mean "infinity", whose orbit is the same for every a.
 // So the cuts are the rays from each collision point pointing directly
 // away from a*, and they do not move when the user pans or zooms. If a
 // continuation fails outright (the segment passes within ~1e-7 of a

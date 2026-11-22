@@ -279,12 +279,16 @@ std::optional<int> relaxed_newton_power_n(const RationalMap& m);
 // critical orbit escape to infinity" -- see render_parameter's own doc
 // comment for why THIS version (sphere-aware, any attractor, not just
 // infinity) fixes the gap that made the earlier one useless on a Nova-like
-// family. A CERTIFIED polynomial with SEVERAL free critical points (e.g.
+// family. Every strategy combines only the FREE critical orbits
+// (RationalMap::free_critical_points; Bug C): including a structurally
+// pre-fixed one (whose orbit is the same for every a) makes Slowest blank
+// and Fastest constant. A CERTIFIED polynomial with SEVERAL free critical points (e.g.
 // z^3 + a z + 1, critical points +-sqrt(-a/3)) uses the same three
 // semantics, with "settles" meaning "escapes to infinity" (see
 // render_parameter); a unicritical one (z^d + a) has one orbit and ignores
 // the strategy. Also meaningless for a non-Custom built-in RATIONAL family
-// (McMullen2/McMullen3/Newton3), which keeps using its existing single-
+// (McMullen2/McMullen3/Newton3 with no RationalMap behind it -- never the
+// app, which always wraps a RationalMap), which keeps using its existing single-
 // representative critical point (see Map::critical_point's own doc
 // comment) for the same reason Map::critical_point already gave: every
 // finite critical point of that SPECIFIC family shares escape/capture
@@ -466,19 +470,23 @@ public:
     //   escape to infinity" -- useless for a family (Nova-like ones)
     //   whose interesting parameter structure is FINITE attracting
     //   cycles, which just ran every pixel to max_iter and returned a
-    //   uniform plane. THIS path fixes exactly that gap: every free
+    //   uniform plane. THIS path fixes exactly that gap: every FREE
     //   critical point at that pixel's parameter (RationalMap::
-    //   distinct_critical_points, UNFILTERED -- deliberately including
-    //   any pole-related one, unlike render_parameter_period's own
-    //   family-specific "free" subset, since a pole-related critical
-    //   orbit failing to settle is exactly as informative here as any
-    //   other) has its own orbit classified against the FULL sphere-
+    //   free_critical_points, the one rule every parameter-plane mode
+    //   shares -- see FreeCriticalStructure) has its own orbit
+    //   classified against the FULL sphere-
     //   aware attractor set at that parameter (complete_attractors_
     //   from_seeds -- fixed point, cycle, OR infinity, not just infinity
     //   alone -- see that function's own doc comment), via the SAME
     //   classify_rational_orbit smooth-chordal-rate machinery render_
     //   julia_rational/render_greens_rational/render_parameter_greens_
-    //   rational already use (nothing bespoke here either). `strategy`
+    //   rational already use (nothing bespoke here either). Structurally
+    //   pre-fixed critical points are NOT classified (Bug C): for the
+    //   McMullen maps z^n + a/z^n they are 0 (a double pole, f(0) = inf)
+    //   and inf (a superattracting fixed point), whose orbits are the same
+    //   for every a -- classifying them made Slowest all-zero and Fastest
+    //   constant. They still seed attractor discovery. A map with no free
+    //   critical point at all renders all-zero (a has no effect). `strategy`
     //   (ParameterStrategy, see its own doc comment) combines the
     //   resulting per-critical-point smooth values into the one value
     //   this pixel gets; `critical_index` only matters for
@@ -499,6 +507,10 @@ public:
     // Parameter_basin: each pixel is a parameter value a; the pixel value
     // is the NUMBER OF DISTINCT ATTRACTING CYCLES the map has at that a
     // (infinity counts as one when it's the limit of a critical orbit).
+    // Deliberately seeds from ALL critical points, NOT just the free ones
+    // (FreeCriticalStructure): a structurally pre-fixed critical point
+    // such as infinity for z^n + a/z^n is still an attractor, and a count
+    // of attractors must include it.
     // Escape-radius-free -- this is a genuine multi-attractor question,
     // the one render_parameter's own retired Stage 4 detour was trying to
     // answer before being pulled back to plain escape-time (see its own

@@ -380,6 +380,64 @@ def main() -> None:
         check(np.array_equal(img > 0, np.flipud(img) > 0),
               f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
 
+    # ---- Parameter: only FREE critical points drive the strategies (Bug C) -------
+    # z^n + a/z^n has critical points 0 (a double pole, f(0) = inf) and inf (a
+    # superattracting fixed point) besides the 2n free ones z^(2n) = a. Their
+    # orbits are the same for every a; classifying them made Slowest 100% black
+    # and Fastest constant. Reference: numpy iterates the free point a^(1/(2n))
+    # for 200 steps, escape at |z| > 50, "black" = never escaped.
+    #
+    # The rational path is sphere-aware: `parameter` is 0 only where an orbit
+    # never settles on ANY attractor, so a Mandelbrot copy (free orbit captured
+    # by a finite attracting cycle) is shaded, not black. The like-for-like
+    # quantity -- "the free orbit does not reach infinity" -- is
+    # parameter_period's is_infinity == 0; that is what is compared with the
+    # numpy black fraction (+-3 points), and every black `parameter` pixel
+    # must lie inside the numpy black set.
+    print("\nParameter: McMullen z^n + a/z^n uses only its free critical points (Bug C):")
+    lib_c = cdx.FamilyLibrary.with_defaults()
+    res_m, scale_m = 128, 0.3
+    vp_m3 = cdx.Viewport(0j, scale_m, res_m)
+    set_m = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    t_m = np.linspace(-scale_m, scale_m, res_m)
+    a_m = t_m[None, :] + 1j * t_m[:, None]
+    for name, n_m in (("mcmullen2", 2), ("mcmullen3", 3)):
+        fam = lib_c.find(name)
+        free_m = fam.free_critical_points(0.01 + 0.02j)
+        check(len(free_m) == 2 * n_m and all(math.isfinite(abs(z)) and abs(z) > 1e-3 for z in free_m),
+              f"{name}: exactly the {2 * n_m} roots of z^{2 * n_m} = a are free (0 and inf are not)")
+        zr = a_m ** (1.0 / (2 * n_m))
+        alive_m = np.ones(a_m.shape, dtype=bool)
+        with np.errstate(all="ignore"):
+            for _ in range(200):
+                zr = np.where(alive_m, zr ** n_m + a_m / zr ** n_m, zr)
+                alive_m &= np.isfinite(zr) & (np.abs(zr) <= 50.0)
+        ref_black = float(alive_m.mean())
+        slow = render_map(fam, 0j, vp_m3, set_m, "parameter", strategy="slowest")
+        check(np.ptp(slow) > 0 and 0.0 < float(np.mean(slow == 0)) < 0.5,
+              f"{name} Slowest is not uniform (black {np.mean(slow == 0):.3f}; was 1.000)")
+        check(bool(np.all(alive_m[slow == 0])),
+              f"{name}: every black Slowest pixel is black in the numpy reference too")
+        st_m = render_map(fam, 0j, vp_m3, set_m, "parameter_period")
+        bounded = float(np.mean(st_m[2] == 0.0))
+        check(abs(bounded - ref_black) <= 0.03,
+              f"{name}: free orbit misses infinity on {bounded:.4f} of pixels, numpy "
+              f"reference black {ref_black:.4f} (within 3 points)")
+    fast3 = render_map(lib_c.find("mcmullen3"), 0j, vp_m3, set_m, "parameter", strategy="fastest")
+    check(np.ptp(fast3) > 1.0, f"mcmullen3 Fastest is not constant (ptp {np.ptp(fast3):.3g}; was 0)")
+    pb_m = render_map(lib_c.find("mcmullen2"), 0j, cdx.Viewport(0j, scale_m, 33), set_m,
+                      "parameter_basin")
+    check(bool(np.all(pb_m[0] >= 1.0)),
+          "mcmullen2 parameter_basin still counts infinity (it keeps ALL critical points)")
+    # Zero free critical points: Newton's map for z^2 - 1, (z^2 + 1)/(2z), has
+    # only +-1, both superattracting fixed points, and no parameter at all.
+    newton2 = cdx.RationalMap.from_expression("(z^2+1)/(2*z)", "", {}, "newton2")
+    check(newton2.free_critical_points(0.3j) == [], "Newton for z^2 - 1 has no free critical point")
+    nz = render_map(newton2, 0j, cdx.Viewport(0j, 1.0, 21), set_m, "parameter")
+    nz_p = render_map(newton2, 0j, cdx.Viewport(0j, 1.0, 21), set_m, "parameter_period")
+    check(np.all(nz == 0.0) and np.all(nz_p[1] == 1.0),
+          "...so its parameter plane is honestly uniform (0; period undetermined), not a crash")
+
     # ---- critical_index labelling convention (Bug B, part 3) ----------------------
     print("\ncritical_index labelling: continued from a* along a straight segment:")
     cub = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_l")

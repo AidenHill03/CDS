@@ -1021,6 +1021,8 @@ int main() {
              Viewport{{0.0, 0.0}, 5.0, 41}},
             {"z^3+a (term, recognised), |a| up to 7", RationalMap::multibrot(3),
              Viewport{{0.0, 0.0}, 5.0, 41}},
+            {"z^5+a (term, recognised)", RationalMap::multibrot(5),
+             Viewport{{0.0, 0.0}, 1.25, 41}},
             {"z^2+a (typed, P/Q)", RationalMap::from_expression("z^2+a", "a", {}),
              Viewport{{-0.5, 0.0}, 1.5, 61}},
             {"z^4+a (typed, critical points constant)", RationalMap::from_expression("z^4+a", "a", {}),

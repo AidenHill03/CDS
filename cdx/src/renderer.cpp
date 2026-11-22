@@ -1017,9 +1017,17 @@ Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int crit
 // git-history context (the reverted "AllCaptured/FastestCapture/PerCritical"
 // attempt this generalizes correctly).
 //
-// Custom map: every free critical point (RationalMap::distinct_critical_
-// points(a), UNFILTERED) is classified against complete_attractors_from_
-// seeds' own discovery at that SAME seed list -- one extra find_attractors
+// Custom map: every FREE critical point (RationalMap::free_critical_points
+// -- the one shared rule, FreeCriticalStructure; Bug C) is classified
+// against complete_attractors_from_seeds' own discovery, which still seeds
+// from EVERY distinct critical point. Classifying the structurally pre-fixed
+// ones too was Bug C: for z^n + a/z^n the list holds 0 (a double pole,
+// f(0) = inf) and inf (superattracting, fixed) for every a. Under Slowest an
+// unresolved orbit through the pole blanked every pixel; under Fastest inf
+// resolved at the same speed everywhere and made the plane constant. With
+// zero free critical points (a has no effect on any critical orbit) every
+// pixel is 0 -- the same honest uniform plane the app already reports as
+// "a has no effect". Discovery runs at that SAME seed list -- one extra find_attractors
 // pass per pixel beyond what render_parameter_basin already pays, since the
 // two methods answer different questions (a count vs a per-critical smooth
 // rate) and neither can be derived from the other's own return shape alone.
@@ -1047,6 +1055,12 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const std::vector<Cplx> fixed_crit_pts =
         cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+    // The free/pre-fixed split is structural: once per render (Bug C).
+    const FreeCriticalStructure free_s =
+        custom ? custom->free_critical_structure() : FreeCriticalStructure{};
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0), fixed_crit_pts, free_s)
+                 : std::vector<Cplx>{};
 
     std::optional<RationalMap> synthesized;
     const RationalMap* discovery_map = custom;
@@ -1087,17 +1101,23 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
 
-            std::vector<Cplx> crit_pts;
+            std::vector<Cplx> crit_pts;   // every distinct critical point: discovery seeds
+            std::vector<Cplx> free_pts;   // the free ones: what the strategies classify
             if (custom && cp_fixed) {
                 crit_pts = fixed_crit_pts;
+                free_pts = fixed_free;
             } else if (custom) {
                 const ContinuedCriticalPoints cc =
                     custom->distinct_critical_points_continued(p, prev_ordinary);
                 crit_pts = cc.distinct;
                 prev_ordinary = cc.ordinary_raw;
+                free_pts = custom->free_critical_points(p, crit_pts, free_s);
             } else {
                 crit_pts.push_back(map_.critical_point_at(p));
+                free_pts = crit_pts;
             }
+            // No free critical point: nothing here depends on a. Honest 0.
+            if (free_pts.empty()) { img.at(col, row) = 0.0; continue; }
 
             std::vector<Cplx> fp_raw_next;
             const std::vector<Cycle> cycles = complete_attractors_from_seeds(
@@ -1123,7 +1143,7 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
 
             // PerCritical (Custom): classify only the selected LABELLED free
             // critical point. Discovery above still seeds from every one.
-            std::vector<Cplx> tracked = crit_pts;
+            std::vector<Cplx> tracked = free_pts;
             if (labelled) {
                 const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
                 tracked.clear();
