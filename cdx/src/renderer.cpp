@@ -701,6 +701,56 @@ PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, 
 }
 }  // namespace
 
+namespace {
+// The smooth escape value for a certified polynomial of degree d, at the
+// first (1-based) iteration n with |z_n| > R:
+//     nu = n + 1 - log_d( (log|z_n| + offset) / log R )
+// (offset = log|a_d|/(d-1), 0 for a monic map -- see PolyEscape). Because
+// log|z_{n+1}| ~ d log|z_n| far out, nu is continuous across escape-
+// iteration boundaries for every d; the old base-2 form was continuous only
+// for d = 2 and banded by log2(d) - 1 elsewhere (0.58 for z^3 + a, 1.32 for
+// z^5 + a). nu is NOT positive in general: an orbit that starts far outside
+// R gets nu < 1 and, far enough out, nu < 0 (as it already could in base
+// 2). Degenerate log R <= 0 (a user radius below 1 with a
+// certified radius of ~1) normalises by log 2 instead -- a constant shift,
+// still continuous.
+//
+// FAR-OUT EVALUATION. The formula is exactly continuous only if
+// log|z_{n+1}| = d log|z_n|, i.e. in the limit |z| -> inf. At |z| ~ R = 2
+// the lower-order terms are not negligible (z^3 + a at |a| ~ 2: |a^3 + a|
+// ranges over [6, 10]), which left a seam of up to 0.14 on the first band.
+// So escape is DECIDED at R (certified), but nu is EVALUATED after
+// iterating on until |z| > kSmoothFar (at most kSmoothExtra more steps,
+// stopping early if the next step would overflow), with n counting those
+// steps too. Same formula; its error falls like |a|/|z|^d. The extra steps
+// cost a handful of iterations on escaping pixels only.
+constexpr double kSmoothFar2  = 1e16;   // |z| > 1e8
+constexpr int    kSmoothExtra = 16;
+
+inline double smooth_escape(int n, double m2, const PolyEscape& esc, double inv_log_d) {
+    double log_R = 0.5 * std::log(esc.R2);
+    if (!(log_R > 0.0)) log_R = std::log(2.0);
+    const double nu = static_cast<double>(n) + 1.0 -
+                      std::log((std::log(std::sqrt(m2)) + esc.offset) / log_R) * inv_log_d;
+    return is_bad(nu) ? static_cast<double>(n) : nu;
+}
+
+// smooth_escape after the far-out continuation above. (zr, zi) is z_n, the
+// first iterate past R; `step` advances it in place.
+template <typename Step>
+inline double smooth_escape_far(int n, double zr, double zi, double m2, Step&& step,
+                                const PolyEscape& esc, double inv_log_d) {
+    for (int k = 0; k < kSmoothExtra && m2 <= kSmoothFar2; ++k) {
+        double nr = zr, ni = zi;
+        step(nr, ni);
+        const double nm2 = nr * nr + ni * ni;
+        if (is_bad(nm2) || nm2 > kHuge) break;   // keep the last finite iterate
+        zr = nr; zi = ni; m2 = nm2; ++n;
+    }
+    return smooth_escape(n, m2, esc, inv_log_d);
+}
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
@@ -718,7 +768,7 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
         map_, jcustom ? recognize_family(*jcustom) : std::nullopt, map_.param(),
         settings_.escape_radius);
     const double R2 = esc.R2;
-    const double inv_log2 = 1.0 / std::log(2.0);
+    const double inv_log_d = 1.0 / std::log(static_cast<double>(map_.degree()));
     Image img(res, res);
 
     // `a` = map_.param() is fixed for the WHOLE render, so the step plan --
@@ -738,9 +788,9 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {                       // per-pixel early exit
-                    const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
-                    out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
+                    out = smooth_escape_far(n + 1, zr, zi, m2,
+                                            [&](double& r, double& i) { plan.step(r, i); },
+                                            esc, inv_log_d);
                     break;
                 }
                 if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
@@ -835,7 +885,6 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
 Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
-    const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
     // The parameter here is the PIXEL, not map_.param() -- everything below
@@ -860,6 +909,9 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
     const PolyCoeffsInA esc_fit =
         (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+    const int degree = recognized ? Map(*recognized, Cplx(0.0, 0.0)).degree()
+                                  : custom ? custom->degree(Cplx(0.0, 0.0)) : map_.degree();
+    const double inv_log_d = 1.0 / std::log(static_cast<double>(degree));
 
     parallel_columns([&](int col) {
         std::vector<Cplx> scratch;
@@ -889,9 +941,11 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
                 const double m2 = zr * zr + zi * zi;
 
                 if (m2 > R2) {
-                    const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
-                    out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
+                    out = smooth_escape_far(n + 1, zr, zi, m2, [&](double& r, double& i) {
+                        if (recognized) Map::step_with(*recognized, p.real(), p.imag(), r, i);
+                        else if (custom) compiled.step(r, i);
+                        else map_.step_with_param(p, r, i);
+                    }, esc, inv_log_d);
                     break;
                 }
                 if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
@@ -916,10 +970,9 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
 // the derivative numerator, as render_parameter_rational does), or computed
 // once when they do not move at all (critical_points_constant()).
 //
-// Smooth value: n + 2 - log(log|z_n| + log|a_d|/(d-1)) / log d at the
-// first n with |z_n| > R, R the certified radius (see PolyEscape) -- the
-// degree-d, leading-coefficient-aware form of the unicritical path's
-// base-2 formula (continuous across escape bands for every d).
+// Smooth value: smooth_escape, n + 1 - log_d((log|z_n| + offset)/log R) at
+// the first n with |z_n| > R, R the certified radius (see PolyEscape) --
+// the same formula as the unicritical path.
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_polynomial_multicritical(
     ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
@@ -943,8 +996,7 @@ Image Renderer::render_parameter_polynomial_multicritical(
         per_critical ? custom->critical_label_base() : CriticalLabelBase{};
 
     // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
-    // escape value (> 0 by construction: n + 2 - log_d(log|z|) with |z|
-    // barely past R is about n + 2).
+    // escape value (see smooth_escape -- not necessarily > 0).
     auto escape_value = [&](const CompiledMap& compiled, const PolyEscape& esc, Cplx c0,
                             bool& escaped) {
         const double R2 = esc.R2;
@@ -955,9 +1007,9 @@ Image Renderer::render_parameter_polynomial_multicritical(
             const double m2 = zr * zr + zi * zi;
             if (m2 > R2) {
                 escaped = true;
-                const double nu = static_cast<double>(n + 2) -
-                                  std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log_d;
-                return is_bad(nu) ? static_cast<double>(n + 1) : nu;
+                return smooth_escape_far(n + 1, zr, zi, m2,
+                                         [&](double& r, double& i) { compiled.step(r, i); },
+                                         esc, inv_log_d);
             }
             if (is_bad(m2) || m2 > kHuge) { escaped = true; return static_cast<double>(n + 1); }
         }

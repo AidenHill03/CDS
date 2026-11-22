@@ -398,9 +398,10 @@ public:
     //   parameter -- a PROOF that |z| > rho escapes (see analysis.hpp). A
     //   bare user radius is not one: 0.1 z^2 has bounded orbits through
     //   |z| = 5, which an R = 2 cutoff called escaped. Value is the smooth
-    //   escape count n + 2 - log(log|z| + log|a_d|/(d-1))/log 2 (the
-    //   offset is 0 for a monic map, so z^d + a is bit-for-bit unchanged),
-    //   or 0 for orbits that never escaped.
+    //   escape count nu = n + 1 - log_d((log|z_n| + log|a_d|/(d-1)) / log R)
+    //   at the first n with |z_n| > R, d the degree (continuous across
+    //   escape-iteration boundaries for every d; the offset is 0 for a monic
+    //   map), or 0 for orbits that never escaped.
     //
     //   RATIONAL (has poles -- infinity may be repelling, attracting, or
     //   not even fixed; a fixed escape radius is not a validated trap in

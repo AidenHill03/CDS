@@ -978,16 +978,19 @@ int main() {
     // ---- Parameter: the unicritical polynomial path is pinned bit-for-bit -----------
     // Reference = the pre-B1 single-orbit loop, re-implemented here from
     // public API only: start at critical_points(p).front() (or 0 for a
-    // recognised shape), escape at |z| > escape_radius, smooth value
-    // n + 2 - log2(log|z|). Every strategy must reproduce it exactly.
+    // recognised shape), escape at |z| > R = max(rho(p), escape_radius)
+    // (rho from the coefficients at p), smooth value
+    // n + 1 - log_d(log|z_n| / log R) evaluated after iterating on to
+    // |z| > 1e8. Every strategy must reproduce it exactly. (Until deferred item 2 this pinned n + 2 - log2(log|z|), the
+    // base-2 form, which bands for d > 2: the pin encoded that banding.)
     std::printf("\nParameter: unicritical polynomials (z^d + a and friends) are pinned "
                "BIT-FOR-BIT to the single-orbit form, for every strategy:\n");
     {
         auto reference = [](const RationalMap& m, const Viewport& v, const RenderSettings& st) {
             Image img(v.resolution, v.resolution);
             const std::optional<Family> fam = recognize_family(m);
-            const double R2 = st.escape_radius * st.escape_radius;
-            const double inv_log2 = 1.0 / std::log(2.0);
+            const double inv_log_d = 1.0 / std::log(static_cast<double>(m.degree(Cplx(0.0, 0.0))));
+            const PolyCoeffsInA fit = m.compile_polynomial_coefficients_in_a();
             const bool cpf = !fam && m.critical_points_constant();
             const Cplx c_fixed = cpf ? m.critical_points(Cplx(1.0, 0.0)).front() : Cplx(0.0, 0.0);
             for (int col = 0; col < v.resolution; ++col) {
@@ -996,15 +999,39 @@ int main() {
                     const Cplx c0 = fam ? Map::critical_point(*fam, p)
                                         : (cpf ? c_fixed : m.critical_points(p).front());
                     const CompiledMap compiled = fam ? CompiledMap{} : m.compile(p);
+                    // The engine's coefficient source: closed form for a
+                    // recognised shape, the per-render fit otherwise.
+                    std::vector<Cplx> co;
+                    if (fam) m.polynomial_coefficients(p, co);
+                    else fit.eval(p, co);
+                    while (!co.empty() && co.back() == Cplx(0.0, 0.0)) co.pop_back();
+                    std::vector<double> ac;
+                    for (const Cplx& x : co) ac.push_back(std::sqrt(std::norm(x)));
+                    if (fam) { ac.assign(ac.size(), 0.0); ac[0] = std::abs(p); ac.back() = 1.0; }
+                    const double R = polynomial_escape_radius_abs(ac.data(),
+                                                                  static_cast<int>(ac.size()) - 1,
+                                                                  st.escape_radius);
+                    const double R2 = R * R;
+                    const double log_R = 0.5 * std::log(R2);
                     double zr = c0.real(), zi = c0.imag(), out = 0.0;
                     for (int n = 0; n < st.max_iter; ++n) {
                         if (fam) Map::step_with(*fam, p.real(), p.imag(), zr, zi);
                         else compiled.step(zr, zi);
-                        const double m2 = zr * zr + zi * zi;
+                        double m2 = zr * zr + zi * zi;
                         if (m2 > R2) {
-                            const double nu = static_cast<double>(n + 1) + 1.0 -
-                                              std::log(std::log(std::sqrt(m2))) * inv_log2;
-                            out = (nu != nu) ? static_cast<double>(n + 1) : nu;
+                            // Evaluated far out: up to 16 more steps while |z| <= 1e8.
+                            int nn = n + 1;
+                            for (int k = 0; k < 16 && m2 <= 1e16; ++k) {
+                                double nr = zr, ni = zi;
+                                if (fam) Map::step_with(*fam, p.real(), p.imag(), nr, ni);
+                                else compiled.step(nr, ni);
+                                const double nm2 = nr * nr + ni * ni;
+                                if (nm2 != nm2 || nm2 > 1e300) break;
+                                zr = nr; zi = ni; m2 = nm2; ++nn;
+                            }
+                            const double nu = static_cast<double>(nn) + 1.0 -
+                                              std::log(std::log(std::sqrt(m2)) / log_R) * inv_log_d;
+                            out = (nu != nu) ? static_cast<double>(nn) : nu;
                             break;
                         }
                         if (m2 != m2 || m2 > 1e300) { out = static_cast<double>(n + 1); break; }

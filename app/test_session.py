@@ -380,6 +380,55 @@ def main() -> None:
         check(np.array_equal(img > 0, np.flipud(img) > 0),
               f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
 
+    # ---- Smooth escape value: base d, continuous across escape bands ---------------
+    # nu = n + 1 - log_d(log|z_n| / log R). With the old base 2 every band
+    # boundary of z^3 + a jumped by log2(3) - 1 = 0.58 and of z^5 + a by 1.32.
+    # "Away from the boundary of the set": only band crossings where the
+    # field itself is smooth -- the same-band neighbours on BOTH sides change
+    # by < 0.02 per pixel. (Near the Julia set the field is legitimately
+    # rough at any resolution, so a jump there says nothing about seams.)
+    # The integer escape iteration of each pixel comes from numpy.
+    print("\nSmooth escape value is continuous across escape-iteration boundaries (base d):")
+    res_s, sc_s = 400, 3.0
+    t_s = np.linspace(-sc_s, sc_s, res_s)
+    g_s = t_s[None, :] + 1j * t_s[:, None]
+    set_s = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+
+    def escape_iteration(d, a, z0):
+        z = z0.copy()
+        n_esc = np.zeros(z.shape, dtype=int)
+        alive = np.ones(z.shape, dtype=bool)
+        with np.errstate(all="ignore"):
+            for k in range(1, 201):
+                z = np.where(alive, z ** d + a, z)
+                out = alive & (np.abs(z) > 2.0)
+                n_esc[out] = k
+                alive &= ~out
+        return n_esc
+
+    def worst_band_jump(img, n_esc):
+        worst, crossings = 0.0, 0
+        for X, N in ((img, n_esc), (img.T, n_esc.T)):
+            dx = np.diff(X, axis=1)
+            ok = ((N[:, 2:-1] != N[:, 1:-2]) & (N[:, :-3] == N[:, 1:-2]) & (N[:, 3:] == N[:, 2:-1])
+                  & (N[:, 1:-2] > 0) & (N[:, 2:-1] > 0)
+                  & (np.abs(dx[:, :-2]) < 0.02) & (np.abs(dx[:, 2:]) < 0.02))
+            if ok.any():
+                worst = max(worst, float(np.abs(dx[:, 1:-1])[ok].max()))
+                crossings += int(ok.sum())
+        return worst, crossings
+
+    for d in (3, 5):
+        fam_s = cdx.RationalMap.multibrot(d)
+        jul = render_map(fam_s, 0.3j, cdx.Viewport(0j, sc_s, res_s), set_s, "julia")
+        par = render_map(fam_s, 0j, cdx.Viewport(0j, sc_s, res_s), set_s, "parameter")
+        for plane, img, n_esc in (("julia a=0.3i", jul, escape_iteration(d, 0.3j, g_s)),
+                                  ("parameter", par, escape_iteration(d, g_s, np.zeros_like(g_s)))):
+            worst, crossings = worst_band_jump(img, n_esc)
+            check(crossings > 20 and worst <= 0.05,
+                  f"z^{d} + a {plane}: largest jump across an escape band {worst:.4f} "
+                  f"(<= 0.05; {crossings} crossings checked)")
+
     # ---- Parameter: only FREE critical points drive the strategies (Bug C) -------
     # z^n + a/z^n has critical points 0 (a double pole, f(0) = inf) and inf (a
     # superattracting fixed point) besides the 2n free ones z^(2n) = a. Their
