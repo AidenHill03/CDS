@@ -611,6 +611,15 @@ class LibraryPanel(QWidget):
             return
         self._do_save_as(text.strip())
 
+    def save_as(self, name: str) -> str | None:
+        """Saves the current map under `name` (made unique with " (2)", ...
+        if taken) without asking -- the family builder's "Save as family".
+        Returns the name used, or None on failure (message in the panel)."""
+        from app.family_builder import unique_name
+        name = unique_name(name, self.session.library.names())
+        self._do_save_as(name)
+        return name if self.session.library.find(name) is not None else None
+
     def _do_save_as(self, name: str) -> None:
         try:
             self.session.save_to_library(name)

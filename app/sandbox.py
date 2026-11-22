@@ -3266,6 +3266,7 @@ class SandboxWindow(QMainWindow):
         self.settings_dock = TabbedDock("Equations & Settings", "SettingsDock", "bottom", self,
                                         heading="Equations & Settings")
         self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
+        self.equation_panel.set_save_family_handler(self.library_panel.save_as)
         # The active parameter's value field IS the old toolbar `a =` field.
         self.equation_panel.set_active_field(self.param_field)
         self.equation_tab = QWidget(self)
@@ -4341,6 +4342,9 @@ class SandboxWindow(QMainWindow):
         # Re-asks every row: anything missing or out of date (a family saved
         # over with a new formula, a new framing) renders in the background.
         self.library_panel.refresh_previews()
+        # A save renames the current map into a family: the chip's
+        # "custom" becomes that name.
+        self._refresh_map_chip()
 
     def current_parameter_view(self) -> tuple[complex, float] | None:
         """The parameter plane's framing as the user sees it now: the focused

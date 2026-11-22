@@ -4,7 +4,10 @@ Builds the full app (with any research-module panels that are built)
 offscreen at 1389x868 (a 13" MacBook's usable screen) and 1100x720 (the
 minimum window size), waits for the renders to finish, and saves
 QWidget.grab() images of: both workspaces, each sidebar tab, each dock tab,
-Single view, and the collapsed sidebar.
+Single view, and the collapsed sidebar; then (at the first size) the top
+bar's map chip with long typeset formulas (the Kim-type operator, and the
+Halley · Laguerre L4 preset), the Equation tab's live preview, and the
+Build popover.
 
     PYTHONPATH=cdx/build python tools/snapshot_ui.py [--out DIR]
 
@@ -115,6 +118,37 @@ def main() -> None:
                 window.show_workspace(key)
                 grab(f"{tag}-workspace-{key}")
         window.show_workspace("explore")
+
+    # ---- typeset formulas and the family builder (first size) -------------------
+    w, h = SIZES[0]
+    tag = f"{w}x{h}"
+    window.reset_layout()
+    window.resize(w, h)
+    _settle(app, window)
+    kim = ("z^3*(2*(a-1)+a^2 +4*(a-1)*z+2*(a-1)*z^2)/"
+           "((2*(a-1) + 4*(a-1)*z + (a^2+2*a-2)*z^2)^2)")
+
+    def grab_widget(name: str, widget) -> None:
+        _settle(app, window)
+        path = out / f"{name}.png"
+        widget.grab().save(str(path))
+        saved.append(path)
+
+    window.settings_dock.reveal(window.equation_panel)
+    window.equation_panel.apply_expression(kim)
+    window.equation_panel.flush_preview()
+    grab_widget(f"{tag}-chip-kim", window.top_bar)
+    grab(f"{tag}-equation-preview-kim")
+    window.library_panel.load_family("Halley · Laguerre L₄")
+    window.equation_panel.flush_preview()
+    grab_widget(f"{tag}-chip-halley-laguerre4", window.top_bar)
+    grab(f"{tag}-equation-preview-halley-laguerre4")
+    from app.family_builder import BuilderChoice
+    pop = window.equation_panel.builder()
+    pop.set_choice(BuilderChoice(poly="hermite", degree=5, map_kind="relaxed_newton"))
+    window.equation_panel.open_builder()
+    grab_widget(f"{tag}-build-popover", pop)
+    pop.hide()
 
     for path in saved:
         print(path)

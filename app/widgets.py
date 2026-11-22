@@ -566,7 +566,11 @@ class MapChip(QPushButton):
         return QSize(hint.width(), max(theme.CONTROL_HEIGHT, hint.height()))
 
     def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
+        # The formula may elide down to a short stub; the top bar caps the
+        # chip to the room its other controls leave (TopBar._fit_chip).
+        m = self.layout().contentsMargins()
+        w = m.left() + m.right() + self.name_label.sizeHint().width() + self.layout().spacing() + 90
+        return QSize(min(w, self.sizeHint().width()), self.sizeHint().height())
 
 
 # ---- top bar -----------------------------------------------------------------------------
@@ -624,6 +628,35 @@ class TopBar(QWidget):
         self.export_button = QPushButton("Export", self)
         self.export_button.setProperty("role", "primary")
         layout.addWidget(self.export_button)
+
+    def _fit_chip(self) -> None:
+        """Caps the map chip to the width the other controls leave at their
+        preferred sizes, so a long formula elides inside the chip instead of
+        squeezing the workspace/view switches."""
+        layout = self.layout()
+        m = layout.contentsMargins()
+        others = 0
+        visible = 0
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            w = item.widget()
+            if w is None or w is self.map_chip or not w.isVisibleTo(self):
+                continue
+            others += w.sizeHint().width()
+            visible += 1
+        room = self.width() - m.left() - m.right() - others - layout.spacing() * (visible + 1)
+        cap = max(self.map_chip.minimumSizeHint().width(), room)
+        if self.map_chip.maximumWidth() != cap:
+            self.map_chip.setMaximumWidth(cap)
+
+    def resizeEvent(self, event) -> None:   # noqa: N802
+        self._fit_chip()
+        super().resizeEvent(event)
+
+    def event(self, e) -> bool:
+        if e.type() == QEvent.Type.LayoutRequest:
+            self._fit_chip()
+        return super().event(e)
 
     def set_render_status(self, text: str, busy: bool) -> None:
         self.status_label.setText(text)

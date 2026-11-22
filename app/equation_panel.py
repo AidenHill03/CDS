@@ -56,6 +56,8 @@ lines), so this needed no changes to keep working across the P/Q switch.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
@@ -103,7 +105,15 @@ class EquationPanel(QWidget):
         # Return applies (the field validates live; Return commits).
         self._formula_edit.returnPressed.connect(self._apply)
         eq_row.addWidget(self._formula_edit, 1)
+        # Build ▾: maps from classical polynomials (app/build_popover.py).
+        self._build_button = QPushButton("Build ▾")
+        self._build_button.setToolTip("Build a map from a classical polynomial "
+                                       "(Newton, Halley, ... on Hermite, Legendre, ...)")
+        self._build_button.clicked.connect(self.open_builder)
+        eq_row.addWidget(self._build_button)
         left.addLayout(eq_row)
+        self._builder = None
+        self._save_family: Callable[[str], str | None] | None = None
 
         # Live typeset preview of what is being typed (debounced). On a parse
         # error the last good preview stays, greyed, and the error shows below.
@@ -195,6 +205,38 @@ class EquationPanel(QWidget):
         bar = self._preview_scroll.horizontalScrollBar()
         extra = bar.sizeHint().height() if self._preview.width() > self._preview_scroll.viewport().width() else 0
         self._preview_scroll.setFixedHeight(self._preview.sizeHint().height() + extra + 2)
+
+    # ---- family builder --------------------------------------------------------------
+    def set_save_family_handler(self, handler: Callable[[str], str | None]) -> None:
+        """`handler(name)` saves the CURRENT map to the Library under `name`
+        and returns the name used (or None) -- wired by SandboxWindow."""
+        self._save_family = handler
+        if self._builder is not None:
+            self._builder.save_button.setVisible(True)
+
+    def builder(self):
+        """The Build popover (created on first use)."""
+        if self._builder is None:
+            from app.build_popover import BuildPopover
+            self._builder = BuildPopover(self.apply_expression, self._save_built, self)
+            self._builder.save_button.setVisible(self._save_family is not None)
+        return self._builder
+
+    def open_builder(self) -> None:
+        self.builder().popup_below(self._build_button)
+
+    def apply_expression(self, text: str) -> bool:
+        """Puts `text` in the f(z) field and applies it (as Return would).
+        True if the map was replaced."""
+        before = self.session.map
+        self._formula_edit.setText(text)   # live parse: parameter UI follows
+        self._apply()
+        return self.session.map is not before
+
+    def _save_built(self, expression: str, name: str) -> bool:
+        if self._save_family is None or not self.apply_expression(expression):
+            return False
+        return self._save_family(name) is not None
 
     def preview(self) -> FormulaView:
         """The live typeset preview under f(z) = (for tests and snapshots)."""

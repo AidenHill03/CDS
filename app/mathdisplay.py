@@ -1297,7 +1297,9 @@ class FormulaView(QWidget):
             if self._node is None:
                 return QSize(round(self._px * 6), h)
             c = layout_compact(self._node, self._px, 1e9, h)
-            w = math.ceil(c.box.w) + 2
+            # + layout_compact's own slack (2 px + 0.08 em), so the natural
+            # width fits without eliding.
+            w = math.ceil(c.box.w + 2.0 + 0.08 * self._px) + 1
             if self._max_natural_width:
                 w = min(w, self._max_natural_width)
             return QSize(w, h)

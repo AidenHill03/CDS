@@ -28,6 +28,12 @@ from pathlib import Path
 from app.session import DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE
 from app.settings import family_meta_path_for
 
+
+def _builder_views() -> dict[str, tuple[complex, float]]:
+    from app.family_builder import preset_parameter_views
+    return preset_parameter_views()
+
+
 PRESET_PARAMETER_VIEWS: dict[str, tuple[complex, float]] = {
     "mandelbrot": (complex(-0.75, 0.0), 1.5),
     "multibrot3": (complex(0.0, 0.0), 1.35),
@@ -35,6 +41,8 @@ PRESET_PARAMETER_VIEWS: dict[str, tuple[complex, float]] = {
     "mcmullen2": (complex(0.0, 0.0), 0.3),
     "mcmullen3": (complex(0.0, 0.0), 0.3),
 }
+# The family builder's presets that have a parameter (app.family_builder.PRESETS).
+PRESET_PARAMETER_VIEWS.update(_builder_views())
 
 DEFAULT_VIEW: tuple[complex, float] = (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE)
 
