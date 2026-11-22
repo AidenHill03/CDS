@@ -483,6 +483,37 @@ PYBIND11_MODULE(cdx, m) {
           "when actually building a map, exposed standalone for live-typing "
           "feedback before committing to that.");
 
+    m.def("parse_rational_info", [](const std::string& source) {
+              CanonicalRational cr;
+              std::string error;
+              if (!parse_rational(source, cr, error)) throw std::invalid_argument(error);
+              py::dict d;
+              d["parameters"] = cr.parameters;
+              d["warnings"] = cr.warnings;
+              d["degree_p"] = static_cast<int>(cr.P.coeffs.size()) - 1;
+              d["degree_q"] = static_cast<int>(cr.Q.coeffs.size()) - 1;
+              return d;
+          }, py::arg("source"),
+          "Like parse_rational_parameters, but returns a dict: 'parameters', "
+          "'warnings' (non-fatal parse notes, e.g. a special polynomial of "
+          "degree above 25), and the STRUCTURAL degrees 'degree_p'/'degree_q' "
+          "of the canonical numerator/denominator (-1 for the zero "
+          "polynomial; no common-factor cancellation).");
+
+    m.def("parse_rational_coefficients",
+          [](const std::string& source, const std::map<std::string, Cplx>& params) {
+              CanonicalRational cr;
+              std::string error;
+              if (!parse_rational(source, cr, error)) throw std::invalid_argument(error);
+              std::vector<Cplx> P, Q;
+              for (const auto& c : cr.P.coeffs) P.push_back(c->eval(params));
+              for (const auto& c : cr.Q.coeffs) Q.push_back(c->eval(params));
+              return py::make_tuple(P, Q);
+          }, py::arg("source"), py::arg("params") = std::map<std::string, Cplx>{},
+          "(P, Q): the canonical numerator and denominator coefficients "
+          "(ascending powers of z), each evaluated with `params` bound "
+          "(unbound parameters evaluate as 0). For tests and diagnostics.");
+
     // ---- ComposedMap (cdx/composed.hpp) ----------------------------------------
     py::class_<ComposedStage>(m, "ComposedStage")
         .def(py::init([](const RationalMap& map, Cplx param, int repeat) {

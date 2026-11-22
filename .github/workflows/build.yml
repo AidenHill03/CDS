@@ -30,7 +30,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pybind11 pyinstaller
+          pip install -r requirements.txt -r requirements-dev.txt pybind11 pyinstaller
 
       # Headless Qt6 on a bare Ubuntu runner needs these system libraries
       # even to LOAD the xcb platform plugin, let alone show a window --
@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for exe in cdx_test cdx_test_expr cdx_test_rational cdx_test_roots cdx_test_custom cdx_test_analysis cdx_test_composed; do
+          for exe in cdx_test cdx_test_expr cdx_test_rational cdx_test_roots cdx_test_custom cdx_test_analysis cdx_test_composed cdx_test_special_polys; do
             found=""
             for candidate in "cdx/build/$exe" "cdx/build/$exe.exe" "cdx/build/Release/$exe.exe" "cdx/build/Debug/$exe.exe"; do
               if [ -f "$candidate" ]; then found="$candidate"; break; fi
@@ -160,6 +160,8 @@ jobs:
         run: |
           export QT_QPA_PLATFORM_PLUGIN_PATH="${{ steps.qt_plugins.outputs.path }}"
           set -e
+          echo "=== cdx/test/test_special_polys.py (sympy oracle) ==="
+          python cdx/test/test_special_polys.py
           for mod in app.test_about_dialog app.test_color app.test_complex_field app.test_controls \
                      app.test_facts_panel app.test_library_panel app.test_metadata_header \
                      app.test_orbit_panel app.test_orbit_tracker app.test_render_cache \

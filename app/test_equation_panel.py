@@ -72,6 +72,20 @@ def main() -> None:
           "incomplete syntax also marks the field invalid")
     check(session.map is before, "still untouched")
 
+    # ---- special polynomials: parse warning above degree 25 ---------------------------
+    print("\nspecial-polynomial degree warning:")
+    panel._formula_edit.setText("z - hermite(25, z)/d(hermite(25, z))")
+    check(panel.warning_text() == "" and panel._error_label.text() == "",
+          "hermite(25, ...) parses with no warning")
+    panel._formula_edit.setText("z - hermite(30, z)/d(hermite(30, z))")
+    check("degree above 25" in panel.warning_text() and not panel._formula_edit.property("invalid"),
+          "hermite(30, ...) shows a WARNING (not an error): " + panel.warning_text().splitlines()[0][:60])
+    panel._formula_edit.setText("hermite(41, z)")
+    check(panel._formula_edit.property("invalid") is True and panel.warning_text() == ""
+          and "at most 40" in panel._error_label.text(),
+          "hermite(41, ...) is an error, and the warning is cleared")
+    check(session.map is before, "still untouched")
+
     # ---- live validation: valid syntax clears the error and updates the param UI -------
     print("\nlive validation (valid syntax, new parameter list):")
     panel._formula_edit.setText("z^2 + b/z")

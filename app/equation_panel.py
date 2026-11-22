@@ -105,6 +105,13 @@ class EquationPanel(QWidget):
         self._error_label.setProperty("role", "error")
         left.addWidget(self._error_label)
 
+        # Non-fatal parser notes (e.g. a special polynomial above degree 25).
+        self._warning_label = QLabel()
+        self._warning_label.setWordWrap(True)
+        self._warning_label.setProperty("role", "caption")
+        self._warning_label.hide()
+        left.addWidget(self._warning_label)
+
         undo_text = controls.key_sequence_label(controls.key_sequences("app.undo")[0])
         self._hint_label = QLabel(f"Press Return to apply · {undo_text} undoes")
         self._hint_label.setProperty("role", "caption")
@@ -268,6 +275,10 @@ class EquationPanel(QWidget):
         self._current_params = params
         self._rebuild_param_ui(active, fixed)
         self._error_label.setText("")
+        try:
+            self._set_warnings(list(cdx.parse_rational_info(self.session.map.to_formula())["warnings"]))
+        except ValueError:
+            self._set_warnings([])
         self._undo_button.setEnabled(bool(self._undo_stack))
         self._redo_button.setEnabled(bool(self._redo_stack))
 
@@ -298,13 +309,24 @@ class EquationPanel(QWidget):
         self._rebuild_param_table()
 
     # ---- live validation: syntax + parameter list, NOT applied to session.map ----------
+    def _set_warnings(self, warnings: list[str]) -> None:
+        self._warning_label.setText("\n".join(f"Warning: {w}" for w in warnings))
+        self._warning_label.setVisible(bool(warnings))
+
+    def warning_text(self) -> str:
+        """The parser warnings currently shown (empty when none)."""
+        return self._warning_label.text() if self._warning_label.isVisibleTo(self) else ""
+
     def _on_formula_text_changed(self, text: str) -> None:
         try:
-            params = cdx.parse_rational_parameters(text)
+            info = cdx.parse_rational_info(text)
         except ValueError as e:
             theme.set_invalid(self._formula_edit, True)
             self._error_label.setText(str(e))
+            self._set_warnings([])
             return
+        params = list(info["parameters"])
+        self._set_warnings(list(info["warnings"]))
         theme.set_invalid(self._formula_edit, False)
         self._error_label.setText("")
         if params == self._current_params:
