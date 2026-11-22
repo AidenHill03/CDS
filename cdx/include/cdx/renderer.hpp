@@ -315,11 +315,11 @@ enum class ParameterStrategy {
     // FASTEST (0 only if NONE of them resolve at all) -- "how quickly
     // does structure emerge here," rather than "is everything nice here."
     Fastest,
-    // Track exactly ONE distinct critical point's own orbit (selected by
-    // render_parameter's own `critical_index`, into the SAME distinct_
-    // critical_points(a) ordering for every pixel -- clamped into range
-    // per pixel, since how many free critical points there are can itself
-    // vary with `a`), ignoring the rest entirely -- gives one
+    // Track exactly ONE free critical point's own orbit: the one
+    // `critical_index` selects under the labelling convention
+    // (CriticalLabelBase, rational.hpp -- the same numbering every mode
+    // and RationalMap::critical_point_labels use; clamped into range per
+    // pixel), ignoring the rest entirely -- gives one
     // independent, classical-Mandelbrot-style render per critical point,
     // for a caller that wants to let the user flip between them rather
     // than see them pre-combined.

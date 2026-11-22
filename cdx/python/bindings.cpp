@@ -166,9 +166,9 @@ PYBIND11_MODULE(cdx, m) {
               "0 only if none of the free critical orbits settle, else the "
               "FASTEST-to-settle orbit's own smooth value.")
         .value("PerCritical", ParameterStrategy::PerCritical,
-              "Tracks exactly one distinct critical point's own orbit, selected "
-              "by critical_index into distinct_critical_points(a)'s own ordering "
-              "(clamped into range per pixel), ignoring the rest.");
+              "Tracks exactly one free critical point's own orbit: the one "
+              "critical_index selects in RationalMap.critical_point_labels(a) "
+              "order (clamped into range per pixel), ignoring the rest.");
 
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")

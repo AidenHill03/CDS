@@ -32,7 +32,11 @@ MANDEL_CASES = [
     (-1.7549 + 0j, "3"),
     (-1.1 + 0.2j, "2"),
     (-0.1226 + 0.7449j, "3"),
-    (0.25 + 0.5j, "escapes"),
+    # 0.25+0.5i is the root of the period-4 bulb (fixed point i/2, multiplier
+    # exactly i): parabolic, so the honest answer is "undetermined". The
+    # original write-up listed it as "escapes" -- what the wrong seeds said.
+    (0.25 + 0.5j, "undetermined"),
+    (0.5 + 0.5j, "escapes"),
 ]
 
 
