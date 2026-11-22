@@ -42,6 +42,48 @@ are studying.
 Test by mathematical property (symmetries, Riemann–Hurwitz counts, metric
 identities), never by golden image.
 
+#### Parameter-plane conventions
+
+Every parameter-plane mode agrees on four things. The definitions live in
+`cdx/rational.hpp` (`FreeCriticalStructure`, `CriticalLabelBase`) and
+`cdx/analysis.hpp` (`polynomial_escape_radius`); this is the summary.
+
+- **Free critical points.** A mode iterates only the *free* critical points.
+  A critical point is structurally pre-fixed, and dropped, when at three
+  generic parameters it sits at the same place and is fixed, or maps onto
+  the same fixed point. Examples: ∞ for every polynomial, and a pole of order
+  ≥ 2 when ∞ is fixed, such as z = 0 for relaxed Newton. The split is computed
+  once per render.
+- **`critical_index`: one labelling everywhere.** The index means the same
+  free critical point in `parameter` (PerCritical, polynomial or rational),
+  in `parameter_period` (FromMap), and in
+  `RationalMap.critical_point_labels(a)` (for the Facts panel). The free
+  critical points are sorted by (Re, Im) at a fixed base parameter
+  a* = 0.618 + 0.382i (nudged off any collision), then continued along the
+  straight segment a* → a. Colliding critical points swap when you go round
+  the collision, so some cut is unavoidable. This convention puts the cuts on
+  the rays from each collision point pointing directly away from a*. They do
+  not move when you pan or zoom.
+- **Strategies.** Several free orbits are combined the same way for a
+  polynomial and a rational map. Slowest is 0 iff some orbit does not settle;
+  otherwise it takes the largest smooth value. Fastest is 0 iff none settles
+  (for a polynomial, that is the connectedness locus); otherwise it takes the
+  smallest. PerCritical uses only the `critical_index` orbit. A unicritical
+  polynomial (z^d + a) has one orbit and ignores the strategy, and its
+  single-orbit path is pinned bit-for-bit in the tests.
+- **"Certified" escape.** `polynomial_escape_certified` means "no poles, so ∞
+  is superattracting". The *radius* comes from the coefficients: every
+  polynomial escape-time path escapes at max(ρ, `escape_radius`). Here ρ is
+  the positive root of |a_d| r^d − Σ_{k<d} |a_k| r^k − r, recomputed per pixel
+  in the parameter plane. Past ρ every orbit provably escapes. A user radius
+  on its own is not a proof: 0.1 z² + a has bounded orbits through |z| = 10.
+  For z^d + a at the default radius 2, the result is unchanged.
+
+`parameter_period` seeds from the map's own free critical points
+(`CriticalPointFamily::FromMap`). The closed-form relaxed-Newton seeds are
+used only when `relaxed_newton_power_n` recognises the map structurally.
+`find_attractors` reduces every detected cycle to its minimal period.
+
 ### `app/` — the sandbox
 
 The application a user actually operates. Owns mutable session state; the

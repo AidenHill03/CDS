@@ -204,14 +204,15 @@ def main() -> None:
     omega_1 = complex(math.cos(2 * math.pi / n), math.sin(2 * math.pi / n))
     a_1 = n - (n - 1) * omega_1
     tiny_vp = cdx.Viewport(a_1, 0.001, 3)
-    periods, undetermined, is_infinity = s_pp.render(tiny_vp, "parameter_period")
+    periods, undetermined, is_infinity, _mixed = s_pp.render(tiny_vp, "parameter_period")
     check(periods[1, 1] == 6.0 and undetermined[1, 1] == 0.0 and is_infinity[1, 1] == 0.0,
           "a_1 = n-(n-1)*omega_1 reports period 6 through the full Session.render "
           "dispatch, matching the engine-level validation anchor exactly")
 
     # Exterior |a-n| > n -- the infinity class, not undetermined.
     exterior_vp = cdx.Viewport(complex(3 * n, 0.0), 0.001, 3)
-    periods_ext, undetermined_ext, is_infinity_ext = s_pp.render(exterior_vp, "parameter_period")
+    periods_ext, undetermined_ext, is_infinity_ext, _ = s_pp.render(exterior_vp,
+                                                                      "parameter_period")
     check(is_infinity_ext[1, 1] == 1.0 and undetermined_ext[1, 1] == 0.0,
           "well outside |a-n|=n reports the infinity class")
 
@@ -219,11 +220,242 @@ def main() -> None:
     # genuinely CHANGING across the plane -- the period-coloring analogue of
     # Parameter_basin's own "not a uniform plane" check above.
     wide_pp_vp = cdx.Viewport(complex(n, 0.0), n + 1.0, 61)
-    periods_wide, undetermined_wide, _is_inf_wide = s_pp.render(wide_pp_vp, "parameter_period")
+    periods_wide, undetermined_wide, _is_inf_wide, _ = s_pp.render(wide_pp_vp,
+                                                                   "parameter_period")
     resolved_periods = set(periods_wide[undetermined_wide == 0.0].flatten().tolist())
     check(len(resolved_periods - {0.0}) >= 2,
           "a real render shows more than one DISTINCT period value -- a genuine "
           "classification, not a flat plane")
+
+    check(cdx.relaxed_newton_power_n(relaxed_newton) == n,
+          "relaxed_newton_power_n recognises the family -- the closed-form seeds are used")
+
+    # ---- Parameter_period on maps that are NOT relaxed Newton (Bug A) -----------
+    print("\nParameter_period: every other map tracks its OWN free critical points:")
+    mandel = cdx.RationalMap.mandelbrot()
+    check(cdx.relaxed_newton_power_n(mandel) is None and
+          cdx.relaxed_newton_power_n(cdx.RationalMap.from_expression("z^2+a", "a", {})) is None,
+          "z^2 + a is not mistaken for relaxed Newton (term-based or typed)")
+    pp_settings = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+
+    def mandel_period_at(a):
+        st = render_map(mandel, 0j, cdx.Viewport(a, 1e-9, 3), pp_settings, "parameter_period")
+        if st[2][1, 1] == 1.0:
+            return "escapes"
+        if st[1][1, 1] == 1.0:
+            return "undetermined"
+        return int(st[0][1, 1])
+
+    # 0.25+0.5i is the ROOT of the period-4 bulb (c = mu/2 - mu^2/4 at mu = i):
+    # its fixed point i/2 has multiplier exactly i, so the critical orbit
+    # creeps parabolically toward it and never resolves -- "undetermined" is
+    # the honest answer, not "escapes". 0.5+0.5i genuinely escapes.
+    for a, want in [(0j, 1), (-1 + 0j, 2), (-1.31 + 0j, 4), (-1.7549 + 0j, 3),
+                    (-1.1 + 0.2j, 2), (-0.1226 + 0.7449j, 3), (0.25 + 0.5j, "undetermined"),
+                    (0.5 + 0.5j, "escapes")]:
+        got = mandel_period_at(a)
+        check(got == want, f"Mandelbrot parameter_period at a={a}: {got} (want {want})")
+
+    # Default view vs an independent plain-numpy reference: iterate z = 0 for
+    # 1500 steps, then look for a return within 1e-7, up to period 40.
+    res = 360
+    vp_m = cdx.Viewport(complex(-0.75, 0.0), 1.5, res)
+    st = render_map(mandel, 0j, vp_m, pp_settings, "parameter_period")
+    s_px = 2 * 1.5 / (res - 1)
+    cols = -0.75 - 1.5 + s_px * np.arange(res)
+    rows = -1.5 + s_px * np.arange(res)
+    c = cols[None, :] + 1j * rows[:, None]
+    z = np.zeros_like(c)
+    alive = np.ones(c.shape, dtype=bool)
+    with np.errstate(over="ignore", invalid="ignore"):
+        for _ in range(1500):
+            z = np.where(alive, z * z + c, z)
+            alive &= np.abs(z) <= 2.0
+        ref_period = np.zeros(c.shape, dtype=int)
+        w = z.copy()
+        for p in range(1, 41):
+            w = w * w + c
+            hit = alive & (ref_period == 0) & (np.abs(w - z) < 1e-7)
+            ref_period[hit] = p
+    interior = ref_period > 0
+    agree = np.mean(st[0][interior] == ref_period[interior])
+    check(interior.sum() > 1000 and agree >= 0.99,
+          f"default Mandelbrot view, 360 px: {agree:.4f} of the {interior.sum()} reference-"
+          "interior pixels get the reference period (>= 0.99)")
+    check(float(np.mean(st[2][interior] == 1.0)) < 0.001,
+          "...and essentially none of the true interior is reported 'escapes' (was 20.6%)")
+
+    # Relaxed Newton n = 5: FromMap (the map's own free critical points, the
+    # one critical_index selects) agrees with the closed-form seeds.
+    rn5 = cdx.RationalMap.from_expression("z - a*(z^5-1)/(5*z^4)", "a", {}, "rn5")
+    check(cdx.relaxed_newton_power_n(rn5) == 5, "the other written form of relaxed Newton is "
+          "recognised too (evaluation-based, not a pattern match)")
+    agree_all = True
+    for a in (1.0 + 0.3j, 5 - 4 * complex(math.cos(2 * math.pi / 5), math.sin(2 * math.pi / 5)),
+              5 - 4 * complex(math.cos(4 * math.pi / 5), math.sin(4 * math.pi / 5)), 18 + 0j):
+        r = cdx.Renderer(map=cdx.Map.custom(rn5, 0j), viewport=cdx.Viewport(a, 1e-6, 3),
+                         settings=pp_settings)
+        closed = r.render_parameter_period(cdx.CriticalPointFamily.RelaxedNewtonPower, 5)
+        for idx in range(5):
+            frm = r.render_parameter_period(cdx.CriticalPointFamily.FromMap, 0, None, idx)
+            for k in range(3):
+                if not np.array_equal(closed[k], frm[k]):
+                    agree_all = False
+    check(agree_all, "relaxed Newton n=5 at four parameters (periods 1, 5, 5, infinity): "
+          "FromMap with every critical_index gives exactly the closed-form result")
+
+    # z^3 + a z + 1, two free critical points. In this window no pixel has
+    # both orbits bounded, so "both on the same cycle" means both escape --
+    # an independent numpy escape test per critical point decides it.
+    cubic = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic")
+    res_c = 61
+    vp_c = cdx.Viewport(0j, 1.5, res_c)
+    st_c = render_map(cubic, 0j, vp_c, pp_settings, "parameter_period")
+    s_c = 2 * 1.5 / (res_c - 1)
+    ac = (-1.5 + s_c * np.arange(res_c))[None, :] + 1j * (-1.5 + s_c * np.arange(res_c))[:, None]
+    escaped = []
+    with np.errstate(over="ignore", invalid="ignore"):
+        for sign in (1, -1):
+            zc = sign * np.sqrt(-ac / 3 + 0j)
+            esc = np.zeros(ac.shape, dtype=bool)
+            for _ in range(500):
+                zc = np.where(esc, zc, zc ** 3 + ac * zc + 1)
+                esc |= np.abs(zc) > 1e6
+            escaped.append(esc)
+    both_escape = escaped[0] & escaped[1]
+    one_escapes = escaped[0] ^ escaped[1]
+    check(both_escape.sum() > 100 and np.all(st_c[3][both_escape] == 0.0),
+          f"z^3+az+1: mixed is 0 on all {both_escape.sum()} pixels where both free orbits "
+          "reach the same cycle (infinity)")
+    check(one_escapes.sum() > 20 and np.mean(st_c[3][one_escapes] == 1.0) > 0.95,
+          "...and 1 where one escapes and the other is captured by a finite cycle")
+    st_c1 = render_map(cubic, 0j, vp_c, pp_settings, "parameter_period", critical_index=1)
+    check(not np.array_equal(st_c[2], st_c1[2]),
+          "critical_index selects which free orbit parameter_period reports")
+
+    # ---- Parameter: multi-critical polynomials (Bug B, part 1) --------------------
+    print("\nParameter: z^3 + a z + 1 iterates BOTH free critical orbits, per strategy:")
+    cubic_b = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_b")
+    res_b, scale_b = 120, 1.5
+    vp_b = cdx.Viewport(0j, scale_b, res_b)
+    set_b = cdx.RenderSettings(200, 2.0, 1e-6, 0)
+    imgs_b = {name: render_map(cubic_b, 0j, vp_b, set_b, "parameter", strategy=name)
+              for name in ("slowest", "fastest", "per_critical")}
+    imgs_b["per_critical_1"] = render_map(cubic_b, 0j, vp_b, set_b, "parameter",
+                                          strategy="per_critical", critical_index=1)
+    s_b = 2 * scale_b / (res_b - 1)
+    a_b = (-scale_b + s_b * np.arange(res_b))[None, :] + 1j * (-scale_b + s_b * np.arange(res_b))[:, None]
+    # Independent reference: does each of +-sqrt(-a/3) escape |z| > R within
+    # max_iter? (The R used here is the render's own; whether R is itself a
+    # valid bound is part 2's concern, not this check's.)
+    esc_b = []
+    with np.errstate(over="ignore", invalid="ignore"):
+        for sign in (1, -1):
+            zb = sign * np.sqrt(-a_b / 3 + 0j)
+            e = np.zeros(a_b.shape, dtype=bool)
+            for _ in range(200):
+                zb = np.where(e, zb, zb ** 3 + a_b * zb + 1)
+                e |= np.abs(zb) > 2.0
+            esc_b.append(e)
+    some_bounded = ~(esc_b[0] & esc_b[1])
+    none_escape = ~(esc_b[0] | esc_b[1])
+    check(np.mean((imgs_b["slowest"] == 0) == some_bounded) > 0.995,
+          "Slowest is 0 exactly where SOME free orbit stays bounded")
+    check(np.mean((imgs_b["fastest"] == 0) == none_escape) > 0.995,
+          "Fastest is 0 exactly where NO free orbit escapes (the connectedness locus)")
+    check(np.all(imgs_b["slowest"] >= 0) and
+          np.all((imgs_b["slowest"] == 0) | (imgs_b["slowest"] >= imgs_b["fastest"])),
+          "where both escape, Slowest >= Fastest pixel-for-pixel")
+    pc_pair = np.stack([imgs_b["per_critical"] > 0, imgs_b["per_critical_1"] > 0])
+    ref_pair = np.stack([esc_b[0], esc_b[1]])
+    same_set = ((pc_pair[0] == ref_pair[0]) & (pc_pair[1] == ref_pair[1])) | \
+               ((pc_pair[0] == ref_pair[1]) & (pc_pair[1] == ref_pair[0]))
+    check(np.mean(same_set) > 0.995,
+          "PerCritical 0 and 1 are the two individual free orbits (as an unordered pair)")
+    check(not np.array_equal(imgs_b["slowest"], imgs_b["fastest"]) and
+          not np.array_equal(imgs_b["slowest"], imgs_b["per_critical_1"]),
+          "the strategies genuinely differ (they were byte-identical before)")
+    for name in ("slowest", "fastest"):
+        img = imgs_b[name]
+        check(np.array_equal(img > 0, np.flipud(img) > 0),
+              f"{name}: symmetric under a -> conj(a) (real coefficients) -- no seam on Im a = 0")
+
+    # ---- critical_index labelling convention (Bug B, part 3) ----------------------
+    print("\ncritical_index labelling: continued from a* along a straight segment:")
+    cub = cdx.RationalMap.from_expression("z^3 + a*z + 1", "a", {}, "cubic_l")
+    a_star = 0.618 + 0.382j
+
+    # The old seam: Im a = 0, Re a in [-1.5, -0.45]. Labels must not jump there.
+    eps = 1e-7
+    worst = 0.0
+    for x in np.linspace(-1.5, -0.05, 60):
+        up = cub.critical_point_labels(complex(x, eps))
+        dn = cub.critical_point_labels(complex(x, -eps))
+        worst = max(worst, max(abs(u - d) for u, d in zip(up, dn)))
+    check(worst < 1e-5, f"labels are continuous across Im a = 0 for Re a < 0 "
+                        f"(largest change across the axis {worst:.2g})")
+
+    # The ONLY discontinuity: the ray from the collision at a = 0 pointing
+    # directly away from a*. Walk a circle around 0; the labels may swap
+    # exactly once, at angle arg(-a*).
+    n_samp = 720
+    ang = 2 * np.pi * np.arange(n_samp) / n_samp
+    labs = [cub.critical_point_labels(0.5 * complex(math.cos(t), math.sin(t))) for t in ang]
+    jumps = []
+    for i in range(n_samp):
+        l0, l1 = labs[i], labs[(i + 1) % n_samp]
+        if abs(l0[0] - l1[0]) > abs(l0[0] - l1[1]):     # label 0 landed nearer old label 1
+            jumps.append(ang[i] + np.pi / n_samp)        # midpoint of the sample interval
+    predicted = (math.atan2(-a_star.imag, -a_star.real)) % (2 * np.pi)
+    check(len(jumps) == 1 and abs(((jumps[0] - predicted + np.pi) % (2 * np.pi)) - np.pi)
+          <= 2 * np.pi / n_samp,
+          f"around |a| = 0.5 the labels swap exactly once ({len(jumps)} found), on the ray "
+          f"from 0 directly away from a* (angle {math.degrees(predicted):.1f} deg)")
+    check(all(len(l) == 2 for l in labs), "two free critical points at every sample")
+
+    # Viewport independence: the same parameter gets the same PerCritical
+    # value in two different viewports (pixels whose coordinates coincide
+    # exactly, computed with the engine's own Viewport.coord formula).
+    set_l = cdx.RenderSettings(150, 2.0, 1e-6, 0)
+    vpA = cdx.Viewport(0j, 1.5, 61)          # pixel size 0.05
+    vpB = cdx.Viewport(0.25 - 0.5j, 1.0, 41)  # pixel size 0.05, shifted
+    imA = render_map(cub, 0j, vpA, set_l, "parameter", strategy="per_critical", critical_index=1)
+    imB = render_map(cub, 0j, vpB, set_l, "parameter", strategy="per_critical", critical_index=1)
+
+    def coords(vp):
+        s_ = 2.0 * vp.scale / (vp.resolution - 1)
+        idx = np.arange(vp.resolution)
+        return vp.center.real - vp.scale + s_ * idx, vp.center.imag - vp.scale + s_ * idx
+
+    xa, ya = coords(vpA)
+    xb, yb = coords(vpB)
+    pairs = 0
+    same = True
+    for cb, xv in enumerate(xb):
+        ca = np.nonzero(xa == xv)[0]
+        if not len(ca):
+            continue
+        for rb, yv in enumerate(yb):
+            ra = np.nonzero(ya == yv)[0]
+            if not len(ra):
+                continue
+            pairs += 1
+            same &= bool(imA[ra[0], ca[0]] == imB[rb, cb])
+    check(pairs >= 100 and same, f"PerCritical is identical at the {pairs} parameters the two "
+                                 "viewports share -- labels do not depend on the viewport")
+
+    # critical_index selects the same orbit in "parameter" and "parameter_period".
+    vp_x = cdx.Viewport(-0.6 + 0.2j, 0.6, 31)
+    agree = True
+    for k in (0, 1):
+        pc = render_map(cub, 0j, vp_x, set_l, "parameter", strategy="per_critical", critical_index=k)
+        pp = render_map(cub, 0j, vp_x, set_l, "parameter_period", critical_index=k)
+        escaped_pc = pc > 0
+        escaped_pp = pp[2] == 1.0
+        decided = (pp[1] == 0.0)                      # period mode resolved this orbit
+        agree &= np.mean(escaped_pc[decided] == escaped_pp[decided]) > 0.99
+    check(agree, "critical_index k is the same free critical point in parameter (PerCritical) "
+                 "and parameter_period")
 
     # ---- render cache -----------------------------------------------------------
     print("\nrender cache:")
@@ -578,9 +810,11 @@ def main() -> None:
     broken_cycles = cdx.find_attractors(nova, a_repro)
     period9_present = any(len(c.points) == 9 and abs(c.points[0] - target) < 1e-3
                           for c in broken_cycles)
-    check(period9_present,
-          "cdx.find_attractors alone still mislabels this point as a period-9 cycle "
-          "(pre-existing behavior, unchanged by this fix)")
+    # Used to assert the mislabel was still present; find_attractors now
+    # reduces closures to their minimal period, so it is gone at the source.
+    check(not period9_present,
+          "cdx.find_attractors no longer mislabels this point as a period-9 cycle "
+          "(minimal-period reduction in find_attractors)")
 
     target_ac = next((ac for ac in facts_nova.attracting_cycles
                       if len(ac.points) == 1 and abs(ac.points[0] - target) < 1e-3), None)

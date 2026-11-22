@@ -143,6 +143,29 @@ std::optional<Family> recognize_family(const RationalMap& m) {
 }
 
 // -----------------------------------------------------------------------------
+// relaxed_newton_power_n -- see the header. Evaluation-based rather than a
+// term/P-Q pattern match, so "z - a*(z^n-1)/(n*z^(n-1))" and
+// "((n-a)*z^n + a)/(n*z^(n-1))" (and a term-based build) all qualify.
+// -----------------------------------------------------------------------------
+std::optional<int> relaxed_newton_power_n(const RationalMap& m) {
+    const Cplx as[3] = {Cplx(0.3711, 0.2179), Cplx(1.4183, -0.6127), Cplx(-0.5813, 0.4417)};
+    const Cplx zs[3] = {Cplx(0.8123, 0.3391), Cplx(-0.4417, 1.1309), Cplx(1.7071, -0.9133)};
+    const int n = m.degree(as[0]);
+    if (n < 2) return std::nullopt;
+    for (const Cplx& a : as) {
+        if (m.degree(a) != n) return std::nullopt;
+        for (const Cplx& z : zs) {
+            const Cplx zn1 = std::pow(z, n - 1);
+            const Cplx want = ((static_cast<double>(n) - a) * zn1 * z + a) /
+                              (static_cast<double>(n) * zn1);
+            const Cplx got = m.eval(z, a);
+            if (!(std::abs(got - want) <= 1e-9 * std::max(1.0, std::abs(want)))) return std::nullopt;
+        }
+    }
+    return n;
+}
+
+// -----------------------------------------------------------------------------
 // Map
 // -----------------------------------------------------------------------------
 Map Map::composed(ComposedMap m) {
@@ -610,6 +633,58 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 }
 }  // namespace
 
+namespace {
+// Per-parameter escape data for a CERTIFIED polynomial (B2): R2 is the
+// squared escape radius max(rho(p), settings.escape_radius)^2 -- rho is
+// polynomial_escape_radius, a proof that |z| > R escapes -- and `offset`
+// is log|a_d| / (d - 1), the Boettcher-coordinate correction that keeps the
+// smooth value and Green's function right for a non-unit leading
+// coefficient (G(z) ~ (log|z_n| + offset) / d^n). Monic maps get offset
+// exactly 0.0, and x + 0.0 == x, so their arithmetic is bit-for-bit
+// unchanged.
+struct PolyEscape {
+    double R2 = 4.0;
+    double offset = 0.0;
+};
+
+PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, Cplx p,
+                       double r_user) {
+    PolyEscape out;
+    const RationalMap* custom = map.custom_map();
+    std::optional<Family> fam = recognized;
+    if (!custom) fam = map.family();
+    if (fam) {   // z^d + p: |coeffs| = [|p|, 0, ..., 0, 1]
+        const int d = Map(*fam, Cplx(0.0, 0.0)).degree();
+        double c[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (d >= 2 && d < 8) {
+            c[0] = std::abs(p);
+            c[d] = 1.0;
+            const double R = polynomial_escape_radius_abs(c, d, r_user);
+            out.R2 = R * R;
+            return out;
+        }
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    std::vector<Cplx> coeffs;
+    if (!custom->polynomial_coefficients(p, coeffs) || coeffs.size() < 3) {
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    const int d = static_cast<int>(coeffs.size()) - 1;
+    double stack[16];
+    std::vector<double> heap;
+    double* c = stack;
+    if (d >= 16) { heap.resize(static_cast<std::size_t>(d) + 1); c = heap.data(); }
+    for (int k = 0; k <= d; ++k) c[k] = std::abs(coeffs[static_cast<std::size_t>(k)]);
+    const double R = polynomial_escape_radius_abs(c, d, r_user);
+    out.R2 = R * R;
+    const double lead = c[d];
+    out.offset = lead == 1.0 ? 0.0 : std::log(lead) / static_cast<double>(d - 1);
+    return out;
+}
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
@@ -622,7 +697,11 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 // just conventional).
 Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
-    const double R2 = settings_.escape_radius * settings_.escape_radius;
+    const RationalMap* jcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, jcustom ? recognize_family(*jcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double R2 = esc.R2;
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
@@ -644,7 +723,7 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
 
                 if (m2 > R2) {                       // per-pixel early exit
                     const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
+                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
                     out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
                     break;
                 }
@@ -738,9 +817,8 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // correct here because a CERTIFIED polynomial's infinity is ALWAYS
 // superattracting, so a fixed |z| > escape_radius test is a provably
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
-Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) const {
+Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
-    const double R2  = settings_.escape_radius * settings_.escape_radius;
     const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
 
@@ -776,6 +854,8 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
             double out = 0.0;
 
             const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            const double R2 = esc.R2;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
@@ -789,7 +869,7 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
 
                 if (m2 > R2) {
                     const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
+                                      std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log2;
                     out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
                     break;
                 }
@@ -799,6 +879,136 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
         }
     }, cancel);
     return img;
+}
+
+
+// -----------------------------------------------------------------------------
+// Several free critical points (B1). Every free critical orbit is iterated
+// per pixel and combined with the SAME ParameterStrategy semantics the
+// rational path uses -- see ParameterStrategy's own doc comment:
+//   Slowest     0 iff SOME free orbit stays bounded, else the largest smooth
+//               escape value (the slowest orbit to leave);
+//   Fastest     0 iff NO free orbit escapes (the connectedness locus), else
+//               the smallest smooth escape value;
+//   PerCritical the orbit critical_index selects (clamped into range).
+// Critical points are continued down each column (warm-started Newton on
+// the derivative numerator, as render_parameter_rational does), or computed
+// once when they do not move at all (critical_points_constant()).
+//
+// Smooth value: n + 2 - log(log|z_n| + log|a_d|/(d-1)) / log d at the
+// first n with |z_n| > R, R the certified radius (see PolyEscape) -- the
+// degree-d, leading-coefficient-aware form of the unicritical path's
+// base-2 formula (continuous across escape bands for every d).
+// -----------------------------------------------------------------------------
+Image Renderer::render_parameter_polynomial_multicritical(
+    ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
+    const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    const RationalMap* custom = map_.custom_map();
+
+    const double inv_log_d = 1.0 / std::log(static_cast<double>(custom->degree(Cplx(0.0, 0.0))));
+
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0),
+                                                custom->distinct_critical_points(Cplx(1.0, 0.0)),
+                                                free_s)
+                 : std::vector<Cplx>{};
+    // PerCritical needs the labelled order (see CriticalLabelBase); the
+    // symmetric strategies do not, and keep the cheaper continued solve.
+    const bool per_critical = strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base =
+        per_critical ? custom->critical_label_base() : CriticalLabelBase{};
+
+    // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
+    // escape value (> 0 by construction: n + 2 - log_d(log|z|) with |z|
+    // barely past R is about n + 2).
+    auto escape_value = [&](const CompiledMap& compiled, const PolyEscape& esc, Cplx c0,
+                            bool& escaped) {
+        const double R2 = esc.R2;
+        double zr = c0.real(), zi = c0.imag();
+        escaped = false;
+        for (int n = 0; n < settings_.max_iter; ++n) {
+            compiled.step(zr, zi);
+            const double m2 = zr * zr + zi * zi;
+            if (m2 > R2) {
+                escaped = true;
+                const double nu = static_cast<double>(n + 2) -
+                                  std::log(std::log(std::sqrt(m2)) + esc.offset) * inv_log_d;
+                return is_bad(nu) ? static_cast<double>(n + 1) : nu;
+            }
+            if (is_bad(m2) || m2 > kHuge) { escaped = true; return static_cast<double>(n + 1); }
+        }
+        return 0.0;
+    };
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit;
+            if (per_critical) {
+                crit = custom->critical_point_labels(p, label_base);
+            } else if (cp_fixed) {
+                crit = fixed_free;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                prev_ordinary = cc.ordinary_raw;
+                crit = custom->free_critical_points(p, cc.distinct, free_s);
+            }
+            if (crit.empty()) { img.at(col, row) = 0.0; continue; }
+
+            const CompiledMap compiled = custom->compile(p);
+            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius);
+            double out = 0.0;
+            bool escaped = false;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {
+                    double worst = 0.0;
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, esc, c0, escaped);
+                        if (!escaped) { worst = 0.0; break; }   // a bounded orbit decides it
+                        worst = std::max(worst, v);
+                    }
+                    out = worst;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {
+                    double best = 0.0;
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, esc, c0, escaped);
+                        if (escaped && (best == 0.0 || v < best)) best = v;
+                    }
+                    out = best;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(crit.size()) - 1);
+                    out = escape_value(compiled, esc, crit[static_cast<std::size_t>(idx)], escaped);
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+        }
+    }, cancel);
+    return img;
+}
+
+// Dispatch for a certified polynomial. A recognised built-in shape, or a
+// map with at most ONE free critical point (z^d + a, any
+// critical_points_constant() unicritical map, z^2 + a z, ...), keeps the
+// single-orbit path unchanged; several free critical points take the
+// multi-critical path above.
+Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
+                                            const std::atomic<bool>* cancel) const {
+    const RationalMap* custom = map_.custom_map();
+    if (!custom || recognize_family(*custom)) return render_parameter_polynomial_unicritical(cancel);
+    const FreeCriticalStructure free_s = custom->free_critical_structure();
+    if (free_s.generic_free_count <= 1) return render_parameter_polynomial_unicritical(cancel);
+    return render_parameter_polynomial_multicritical(strategy, critical_index, free_s, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -855,6 +1065,13 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
     // parameter_basin's own identical choice -- see that method's comment.
     const FindAttractorsOptions opts;
 
+    // PerCritical on a Custom map selects by the labelling convention
+    // (CriticalLabelBase): critical_index means the same free critical point
+    // here as in the polynomial path and in parameter_period.
+    const bool labelled = custom && strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base = labelled ? custom->critical_label_base()
+                                                  : CriticalLabelBase{};
+
     // Stage 2 (spatial continuation): within one column, rows are already
     // processed strictly sequentially by a single thread (parallel_columns
     // parallelizes ACROSS columns, not within one -- see its own comment),
@@ -904,9 +1121,21 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                 else map_.step_with_param(p, zr, zi);
             };
 
+            // PerCritical (Custom): classify only the selected LABELLED free
+            // critical point. Discovery above still seeds from every one.
+            std::vector<Cplx> tracked = crit_pts;
+            if (labelled) {
+                const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
+                tracked.clear();
+                if (!lab.empty()) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(lab.size()) - 1);
+                    tracked.push_back(lab[static_cast<std::size_t>(idx)]);
+                }
+            }
+
             std::vector<OrbitFate> fates;
-            fates.reserve(crit_pts.size());
-            for (const Cplx& c0 : crit_pts) {
+            fates.reserve(tracked.size());
+            for (const Cplx& c0 : tracked) {
                 const Cplx seed = nudge_seed_off_pole(c0, *discovery_map, p);
                 fates.push_back(classify_rational_orbit(seed.real(), seed.imag(), step, ar, ai, aid,
                                                          settings_.tol, settings_.max_iter));
@@ -934,9 +1163,11 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                     break;
                 }
                 case ParameterStrategy::PerCritical: {
+                    // Custom: `fates` holds just the labelled selection.
+                    // Built-in rational family: its single representative.
                     if (!fates.empty()) {
-                        const int idx =
-                            std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
+                        const int idx = labelled ? 0
+                            : std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
                         out = fates[idx].resolved ? fates[idx].nu : 0.0;
                     }
                     break;
@@ -955,7 +1186,7 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrat
                                  int critical_index) const {
     // A composed map has no free parameter (see Map::composed): honest zeros.
     if (map_.family() == Family::Composed) return Image(view_.resolution, view_.resolution);
-    if (map_.escape_certified()) return render_parameter_polynomial(cancel);
+    if (map_.escape_certified()) return render_parameter_polynomial(strategy, critical_index, cancel);
     return render_parameter_rational(strategy, critical_index, cancel);
 }
 
@@ -1075,6 +1306,8 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
             }
             return seeds;
         }
+        case CriticalPointFamily::FromMap:
+            break;   // per-pixel continuation; handled in render_parameter_period itself
     }
     return {};   // unreachable for a valid enumerator; never guess a seed list
 }
@@ -1083,11 +1316,13 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
 
 Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
                                         const std::atomic<bool>* cancel, Image* undetermined,
-                                        Image* is_infinity) const {
+                                        Image* is_infinity, int critical_index,
+                                        Image* mixed) const {
     const int res = view_.resolution;
     Image img(res, res);
     if (undetermined) *undetermined = Image(res, res);
     if (is_infinity) *is_infinity = Image(res, res);
+    if (mixed) *mixed = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     // An all-undetermined degenerate image (never guessed) matches
@@ -1101,27 +1336,57 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
     }
 
     const FindAttractorsOptions opts;
+    const bool from_map = seed_family == CriticalPointFamily::FromMap;
+
+    // FromMap: the free/pre-fixed split is structural -- once per render.
+    // A map whose critical points do not move gets them once, too.
+    // Seeds come in LABEL order (CriticalLabelBase), so critical_index is
+    // the same free critical point as in render_parameter's PerCritical.
+    const CriticalLabelBase label_base =
+        from_map ? custom->critical_label_base() : CriticalLabelBase{};
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
-            const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
 
             int period = 0;
             bool inf_flag = false;
             bool resolved_any = false;
-            if (!seeds.empty()) {
-                // First tracked seed (in `seeds`' own generation order) that
-                // resolves wins -- see render_parameter_period's own doc
-                // comment for why this is a tie-break for RelaxedNewtonPower
-                // specifically (its n seeds are equivariant-guaranteed to
-                // agree), not a general disagreement policy.
-                for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
-                    if (outcome.resolved) {
-                        period = outcome.period;
-                        inf_flag = outcome.is_infinity;
+            bool mixed_flag = false;
+
+            if (from_map) {
+                const std::vector<Cplx> seeds = custom->critical_point_labels(a, label_base);
+                if (!seeds.empty()) {
+                    const std::vector<SeedOutcome> outs = per_seed_outcomes(seeds, *custom, a, opts);
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(outs.size()) - 1);
+                    const SeedOutcome& sel = outs[static_cast<std::size_t>(idx)];
+                    if (sel.resolved) {
+                        period = sel.period;
+                        inf_flag = sel.is_infinity;
                         resolved_any = true;
-                        break;
+                    }
+                    const SeedOutcome* first = nullptr;
+                    for (const SeedOutcome& o : outs) {
+                        if (!o.resolved) continue;
+                        if (!first) { first = &o; continue; }
+                        if (!same_cycle(*first, o, opts.tol * 1e3)) { mixed_flag = true; break; }
+                    }
+                }
+            } else {
+                const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
+                if (!seeds.empty()) {
+                    // First tracked seed (in `seeds`' own generation order) that
+                    // resolves wins -- see render_parameter_period's own doc
+                    // comment for why this is a tie-break for RelaxedNewtonPower
+                    // specifically (its n seeds are equivariant-guaranteed to
+                    // agree), not a general disagreement policy.
+                    for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
+                        if (outcome.resolved) {
+                            period = outcome.period;
+                            inf_flag = outcome.is_infinity;
+                            resolved_any = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1129,6 +1394,7 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
             img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
             if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
             if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+            if (mixed) mixed->at(col, row) = mixed_flag ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -1146,7 +1412,6 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
 // render_greens_polynomial.
 Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
     Image img(res, res);
 
     // See render_parameter for the three-path critical-point/step
@@ -1178,6 +1443,8 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
             double zr = c0.real(), zi = c0.imag();
 
             const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            const double escR = std::sqrt(esc.R2);
 
             // Escape-rate potential G(z) = lim d^-n log+|f^n(z)|: normalize
             // AT the pixel's own escape iteration, not against a single
@@ -1196,7 +1463,7 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
+                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
                     if (is_bad(g)) g = 0.0;
                     break;
                 }
@@ -1346,7 +1613,11 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations
 // nothing a `potential` selector would even distinguish here.
 Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
+    const RationalMap* gcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, gcustom ? recognize_family(*gcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double escR = std::sqrt(esc.R2);
     const double ddeg = static_cast<double>(map_.degree());
     Image img(res, res);
 
@@ -1384,7 +1655,7 @@ Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const 
                 const double mag = std::sqrt(zr * zr + zi * zi);
                 if (is_bad(mag)) break;
                 if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
+                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
                     if (is_bad(g)) g = 0.0;
                     break;
                 }

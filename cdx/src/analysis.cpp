@@ -301,6 +301,33 @@ std::vector<Cycle> find_attractors(const RationalMap& map, Cplx a,
 
 namespace {
 
+// A closure found at step k is only a cycle of period DIVIDING k: an orbit
+// converging to a fixed point with multiplier ~0.96*e^(2*pi*i/3) satisfies
+// |f^3(z) - z| < tol several hundred steps before |f(z) - z| does (the
+// rotation brings it back near itself every 3 steps), so the detector
+// reported "period 3" for a fixed point -- measured on the Mandelbrot
+// interior next to every bulb tangency, ~0.9% of interior pixels, with
+// multiples up to 21 for a 7-cycle. Reduce to the smallest q | k whose
+// points repeat with period q, to within the cycle-dedupe tolerance. A
+// genuine k-cycle never has two of its points that close except within
+// ~tol^2 of the bifurcation parameter where it is born.
+void reduce_to_minimal_period(std::vector<Cplx>& cyc, double tol) {
+    const int k = static_cast<int>(cyc.size());
+    for (int q = 1; q < k; ++q) {
+        if (k % q != 0) continue;
+        bool repeats = true;
+        for (int i = q; i < k && repeats; ++i) {
+            if (chordal(cyc[static_cast<std::size_t>(i)],
+                        cyc[static_cast<std::size_t>(i % q)]) >= tol) repeats = false;
+        }
+        if (repeats) { cyc.resize(static_cast<std::size_t>(q)); return; }
+    }
+}
+
+}  // namespace
+
+namespace {
+
 // find_attractors_from_seeds' body, over an already-bound map so a caller
 // making several discovery calls at the SAME (map, a) -- per_seed_outcomes,
 // one call per seed -- shares one BoundMap (and therefore one pole solve and
@@ -539,6 +566,7 @@ std::vector<Cycle> find_attractors_from_seeds_bound(const std::vector<Cplx>& see
                 !hit_inf_mid_orbit ? confirm_weakly_attracting(orbit, f, opts)
                                    : std::vector<Cplx>{};
             if (!refined.empty()) {
+                reduce_to_minimal_period(refined, opts.tol * 1e3);
                 add_cycle(cycles, std::move(refined), opts.tol * 1e3);
                 continue;
             }
@@ -548,6 +576,7 @@ std::vector<Cycle> find_attractors_from_seeds_bound(const std::vector<Cplx>& see
         }
 
         std::vector<Cplx> cyc(orbit.begin(), orbit.begin() + found);
+        reduce_to_minimal_period(cyc, opts.tol * 1e3);
 
         // ---- verify it is actually attracting ------------------------------
         if (opts.verify_multiplier) {
@@ -734,6 +763,7 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
             outcome.resolved = true;
             outcome.is_infinity = !is_finite_cplx(cycles.front().points.front());
             outcome.period = static_cast<int>(cycles.front().points.size());
+            outcome.cycle = cycles.front().points;
         } else if (!endpoints.empty()) {
             // Reconcile against the algebraic ground truth (same tolerance
             // complete_attractors_from_seeds' own union uses): this seed's
@@ -751,6 +781,7 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
                     outcome.resolved = true;
                     outcome.period = 1;
                     outcome.is_infinity = fp_inf;
+                    outcome.cycle = {fp.point};
                     break;
                 }
             }
@@ -758,6 +789,60 @@ std::vector<SeedOutcome> per_seed_outcomes(const std::vector<Cplx>& seeds, const
         out.push_back(outcome);
     }
     return out;
+}
+
+bool same_cycle(const SeedOutcome& x, const SeedOutcome& y, double tol) {
+    if (!x.resolved || !y.resolved) return false;
+    if (x.period != y.period || x.is_infinity != y.is_infinity) return false;
+    if (x.is_infinity) return true;
+    if (x.cycle.empty() || y.cycle.empty()) return false;
+    for (Cplx p : x.cycle) {
+        if (chordal(p, y.cycle.front()) < tol) return true;
+    }
+    return false;
+}
+
+double polynomial_escape_radius_abs(const double* c, int d, double floor) {
+    if (d < 2 || !(c[d] > 0.0)) return floor;
+    // g(r) = |a_d| r^d - sum_{k<d} |a_k| r^k - r, and g'(r), by Horner.
+    auto g_and_dg = [c, d](double r, double& dg) {
+        double v = c[d], dv = 0.0;
+        for (int k = d - 1; k >= 0; --k) {
+            dv = dv * r + v;
+            v = v * r - c[k];
+        }
+        dg = dv - 1.0;
+        return v - r;
+    };
+    double dg;
+    if (floor > 0.0 && g_and_dg(floor, dg) >= 0.0) return floor;   // rho <= floor
+
+    // Bracket: g(0) = -|a_0| <= 0, g(hi) >= 0 at the closed-form bound.
+    double sum = 1.0;
+    for (int k = 0; k < d; ++k) sum += c[k];
+    double hi = std::max(1.0, sum / c[d]);
+    double lo = 0.0;
+    double r = hi;
+    for (int it = 0; it < 100; ++it) {
+        const double v = g_and_dg(r, dg);
+        if (v >= 0.0) hi = r; else lo = r;
+        if (hi - lo <= 1e-13 * hi) break;
+        double next = (dg > 0.0) ? r - v / dg : 0.5 * (lo + hi);
+        if (!(next > lo && next < hi)) next = 0.5 * (lo + hi);   // safeguard: stay bracketed
+        r = next;
+    }
+    // hi always satisfies g(hi) >= 0: never below the true root.
+    return std::max(floor, hi * (1.0 + 4e-16));
+}
+
+double polynomial_escape_radius(const std::vector<Cplx>& coeffs) {
+    std::vector<Cplx> c = coeffs;
+    while (!c.empty() && c.back() == Cplx(0.0, 0.0)) c.pop_back();
+    const int d = static_cast<int>(c.size()) - 1;
+    if (d < 2) return 0.0;
+    std::vector<double> a(c.size());
+    for (std::size_t k = 0; k < c.size(); ++k) a[k] = std::abs(c[k]);
+    return polynomial_escape_radius_abs(a.data(), d, 0.0);
 }
 
 bool polynomial_escape_certified(const RationalMap& map) {
