@@ -14,6 +14,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   add_compile_options(-O3 -Wall -Wextra)
 endif()
 
+# MSVC defines M_PI (used by several tests) only with _USE_MATH_DEFINES.
+if(MSVC)
+  add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 # ---- core library -----------------------------------------------------------
 add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/special_polys.cpp src/composed.cpp src/critical_orbits.cpp)
 target_include_directories(cdx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
