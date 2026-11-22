@@ -155,6 +155,9 @@ jobs:
       - name: Run the Python test suite (offscreen)
         shell: bash
         env:
+          # Windows' console defaults to cp1252, which cannot print the
+          # tests' Unicode output (app.test_controls's "⇧", formulas' "₅").
+          PYTHONUTF8: "1"
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: ${{ steps.cdx_ext.outputs.dir }}
         run: |
@@ -175,6 +178,7 @@ jobs:
       - name: Run the approximation module's tests (offscreen)
         shell: bash
         env:
+          PYTHONUTF8: "1"
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: ${{ steps.cdx_ext.outputs.dir }}
         run: |

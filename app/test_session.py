@@ -691,8 +691,14 @@ def main() -> None:
 
     xa, ya = coords(vpA)
     xb, yb = coords(vpB)
+    # Compared to 1e-12 relative, not bit for bit: Viewport::coord computes
+    # center - scale + s*col, which compilers that fuse multiply-adds (Apple
+    # clang 21 on arm64, GCC 15 on CI) round differently per viewport -- the
+    # "same" pixel is then a parameter one ulp away (seen on CI: -0.5 vs
+    # -0.4999999999999999, values differing by <= 3e-16 relative). A label
+    # swap changes the value by O(1), so this still tests what it says.
     pairs = 0
-    same = True
+    worst = 0.0
     for cb, xv in enumerate(xb):
         ca = np.nonzero(xa == xv)[0]
         if not len(ca):
@@ -702,9 +708,11 @@ def main() -> None:
             if not len(ra):
                 continue
             pairs += 1
-            same &= bool(imA[ra[0], ca[0]] == imB[rb, cb])
-    check(pairs >= 100 and same, f"PerCritical is identical at the {pairs} parameters the two "
-                                 "viewports share -- labels do not depend on the viewport")
+            va, vb = float(imA[ra[0], ca[0]]), float(imB[rb, cb])
+            worst = max(worst, abs(va - vb) / max(abs(va), abs(vb), 1e-300))
+    check(pairs >= 100 and worst <= 1e-12,
+          f"PerCritical agrees (worst relative difference {worst:.1e}) at the {pairs} parameters "
+          "the two viewports share -- labels do not depend on the viewport")
 
     # critical_index selects the same orbit in "parameter" and "parameter_period".
     vp_x = cdx.Viewport(-0.6 + 0.2j, 0.6, 31)
