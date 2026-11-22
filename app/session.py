@@ -205,21 +205,25 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
 
     Returns a NumPy array (row 0 at the bottom -- see cdx's own orientation
     convention; plot with origin='lower'), except:
-      - "julia" returns a STACKED 3D array, shape (2, height, width), for a
-        RATIONAL map (Stage 2: has poles, not cdx.polynomial_escape_
-        certified) -- index 0 is the smooth chordal approach-rate value (0
-        = unresolved), index 1 is which attractor (Cycle.id) each pixel
-        reached (0 = unresolved). ONLY index 0 is actually colored
-        (through color_escape_time, the SAME palette/scaling pipeline a
-        certified polynomial's plain array already goes through -- see
-        app/sandbox.py's array_to_qimage, "GOVERNING PRINCIPLE"); index 1
+      - "julia" always returns a STACKED 3D array, shape (3, height,
+        width), polynomial or rational alike: index 0 is the smooth value
+        (escape time for a certified polynomial, chordal approach rate for
+        a rational map), index 1 is the ESCAPED MASK (1.0 = escaped /
+        resolved, 0.0 = not), index 2 is which attractor (Cycle.id) each
+        pixel reached (0 = unresolved; all 0 for a certified polynomial,
+        which has no label concept). THE MASK, NOT THE VALUE, IS THE
+        ESCAPE STATUS: the smooth value is legitimately <= 0 for fast
+        escapes (z^5 + a far out), and reading "value > 0" as "escaped"
+        painted those as interior -- the "bubble". Index 0 is colored
+        (through color_escape_time, with index 1 as its mask -- see
+        app/sandbox.py's array_to_qimage, "GOVERNING PRINCIPLE"); index 2
         is kept only for the cursor readout to report which basin a pixel
-        is in (see ImageView._sample_at_pixel) -- which basin was reached
-        is BASIN mode's own question, not something Julia colors by. For
-        a CERTIFIED polynomial (the common case), still a plain 2D array
-        -- today's escape-time values, UNCHANGED -- since there is no
-        label concept on that path at all (see cdx::Renderer::
-        render_julia's own doc comment).
+        is in -- which basin was reached is BASIN mode's own question.
+      - "parameter" always returns a STACKED 3D array, shape (2, height,
+        width): index 0 the smooth value, index 1 the escaped mask (see
+        cdx.Renderer.render_parameter for what "escaped" means under each
+        strategy) -- the same (value, mask) layout as "julia"'s first two
+        layers.
       - "basin" returns a STACKED 3D array, shape (2, height, width):
         index 0 is the label (0 = unresolved, else the basin/cycle id, per
         cdx::Renderer::render_basin), index 1 is the iteration count each
@@ -311,14 +315,15 @@ def render_map(rational_map: cdx.RationalMap, param: complex, viewport: cdx.View
         # -- so unpacking is unconditional; only whether `array` ends up
         # STACKED (rational) or plain (certified polynomial) differs.
         if cdx.polynomial_escape_certified(rational_map):
-            values, _labels = renderer.render_julia(cancel)
-            array = values
+            values, labels, escaped = renderer.render_julia(cancel)
         else:
             cycles = cdx.find_attractors(rational_map, param)
-            values, labels = renderer.render_julia(cancel, cycles)
-            array = np.stack([values, labels])
+            values, labels, escaped = renderer.render_julia(cancel, cycles)
+        array = np.stack([values, escaped, labels])
     elif mode == "parameter":
-        array = renderer.render_parameter(cancel, _parameter_strategy(strategy), critical_index)
+        values, escaped = renderer.render_parameter(cancel, _parameter_strategy(strategy),
+                                                    critical_index)
+        array = np.stack([values, escaped])
     elif mode == "basin":
         # complete_attractors (NOT find_attractors) -- see its own C++ doc
         # comment: the plain critical-seeded search is not a completeness

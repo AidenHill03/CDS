@@ -427,8 +427,19 @@ public:
     // classification), a rational map has no such blanket guarantee, so
     // this path never reads settings().escape_radius at all: the Julia
     // set is an invariant of the MAP, not of an arbitrary numeric cutoff.
+    //
+    // ESCAPED MASK. If `escaped` is given it is replaced with an Image the
+    // same size: 1.0 where the pixel escaped (polynomial: |z_n| > R within
+    // max_iter) or resolved (rational: reached an attractor), 0.0 where it
+    // did not. THE MASK, NOT THE VALUE, IS THE ESCAPE STATUS. The value is a
+    // shade only and may take any real value: the smooth escape value is
+    // legitimately <= 0 for fast escapes (z^5 + a: nu < 0 beyond |z_0| ~ 7
+    // under the old base-2 formula), and a value channel doubling as the
+    // "escaped?" flag painted those as interior (the "bubble"). Pixels that
+    // did not escape still carry value 0.
     Image render_julia(const std::atomic<bool>* cancel = nullptr,
-                       const std::vector<Cycle>& cycles = {}, Image* labels = nullptr) const;
+                       const std::vector<Cycle>& cycles = {}, Image* labels = nullptr,
+                       Image* escaped = nullptr) const;
 
     // Parameter plane: each pixel is a parameter value. The bound parameter
     // is ignored. Reproduces the Mandelbrot/multibrot sets and the
@@ -501,9 +512,16 @@ public:
     //   own output already goes through -- no bespoke scheme, no shape
     //   change to what this method returns (a plain Image, same as
     //   before) -- app/session.py's own dispatch needs no changes either.
+    //
+    // ESCAPED MASK (`escaped`, optional, as render_julia's): 1.0 where the
+    // pixel counts as escaped/resolved under `strategy` -- Slowest: EVERY
+    // free orbit escaped/resolved; Fastest: AT LEAST ONE did; PerCritical:
+    // the selected one did -- else 0.0. The value is then the slowest /
+    // fastest / selected orbit's smooth value, any real number; 0 where the
+    // mask is 0.
     Image render_parameter(const std::atomic<bool>* cancel = nullptr,
                            ParameterStrategy strategy = ParameterStrategy::Slowest,
-                           int critical_index = 0) const;
+                           int critical_index = 0, Image* escaped = nullptr) const;
 
     // Parameter_basin: each pixel is a parameter value a; the pixel value
     // is the NUMBER OF DISTINCT ATTRACTING CYCLES the map has at that a
@@ -803,20 +821,22 @@ private:
     // one, rather than one function trying to be both. Both are private:
     // parallel_columns is, and both need it, the same as every other
     // render_* method already gets it via being a Renderer method itself.
-    Image render_julia_polynomial(const std::atomic<bool>* cancel) const;
-    Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
+    Image render_julia_polynomial(Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels, Image& escaped,
                                 const std::atomic<bool>* cancel) const;
 
     // render_parameter's own two paths, same split rationale as render_
     // julia's -- see render_parameter's own doc comment for what each is.
     Image render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
-                                      const std::atomic<bool>* cancel) const;
-    Image render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const;
+                                      Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial_unicritical(Image& escaped,
+                                                  const std::atomic<bool>* cancel) const;
     Image render_parameter_polynomial_multicritical(ParameterStrategy strategy, int critical_index,
                                                     const FreeCriticalStructure& free_s,
+                                                    Image& escaped,
                                                     const std::atomic<bool>* cancel) const;
     Image render_parameter_rational(ParameterStrategy strategy, int critical_index,
-                                    const std::atomic<bool>* cancel) const;
+                                    Image& escaped, const std::atomic<bool>* cancel) const;
 
     // render_greens' own two paths, same split rationale as render_julia's.
     Image render_greens_polynomial(const std::atomic<bool>* cancel) const;

@@ -645,6 +645,7 @@ namespace {
 struct PolyEscape {
     double R2 = 4.0;
     double offset = 0.0;
+    double log_lead = 0.0;   // log|a_d| (0 for a monic map): the overflow estimate's constant
 };
 
 // `fit` (optional): the map's coefficients as polynomials in a, compiled
@@ -697,6 +698,7 @@ PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, 
     out.R2 = R * R;
     const double lead = c[d];
     out.offset = lead == 1.0 ? 0.0 : std::log(lead) / static_cast<double>(d - 1);
+    out.log_lead = lead == 1.0 ? 0.0 : std::log(lead);
     return out;
 }
 }  // namespace
@@ -727,12 +729,39 @@ namespace {
 constexpr double kSmoothFar2  = 1e16;   // |z| > 1e8
 constexpr int    kSmoothExtra = 16;
 
-inline double smooth_escape(int n, double m2, const PolyEscape& esc, double inv_log_d) {
+// From log|z_n| directly (see escape_log_mod for where that comes from when
+// z_n itself overflowed). A non-finite result falls back to the integer n.
+inline double smooth_escape_log(int n, double log_mod, const PolyEscape& esc, double inv_log_d) {
     double log_R = 0.5 * std::log(esc.R2);
     if (!(log_R > 0.0)) log_R = std::log(2.0);
     const double nu = static_cast<double>(n) + 1.0 -
-                      std::log((std::log(std::sqrt(m2)) + esc.offset) / log_R) * inv_log_d;
-    return is_bad(nu) ? static_cast<double>(n) : nu;
+                      std::log((log_mod + esc.offset) / log_R) * inv_log_d;
+    return std::isfinite(nu) ? nu : static_cast<double>(n);
+}
+
+inline double smooth_escape(int n, double m2, const PolyEscape& esc, double inv_log_d) {
+    return smooth_escape_log(n, std::log(std::sqrt(m2)), esc, inv_log_d);
+}
+
+// OVERFLOW. |z_n|^2 > kHuge (or inf/NaN): z_n is no longer representable,
+// which happens only for the very fastest escapes (z^5 + a at |z_0| ~ 1e62).
+// Reading that as "did not escape", or as nu = -inf / G = +inf, puts the
+// fastest escapes in the wrong place. log|z_n| is instead estimated from the
+// last finite iterate, log|z_n| ~ d log|z_{n-1}| + log|a_d| -- the leading
+// term, exact to ~|z_{n-1}|^-1 relative, and |z_{n-1}| is astronomically
+// large whenever this branch is reached from an orbit already past R.
+inline bool overflowed(double m2) { return !(m2 <= kHuge); }
+inline double escape_log_mod(double prev_r, double prev_i, double d, const PolyEscape& esc) {
+    return d * std::log(std::hypot(prev_r, prev_i)) + esc.log_lead;   // hypot: |z_{n-1}|^2 may overflow too
+}
+
+// G = (log|z_n| + offset) / d^n, never exactly 0 for an escaped orbit: G == 0
+// means "in the filled set", and d^n overflowing (2^1075 for d = 2, i.e.
+// max_iter > 1074) used to underflow G to exactly 0 -- an escaped pixel
+// reading as filled. Floored at the smallest positive double instead.
+inline double escape_potential(int n, double log_mod, double d, const PolyEscape& esc) {
+    const double g = (log_mod + esc.offset) / std::pow(d, static_cast<double>(n));
+    return g > 0.0 ? g : std::numeric_limits<double>::denorm_min();   // also catches NaN
 }
 
 // smooth_escape after the far-out continuation above. (zr, zi) is z_n, the
@@ -761,14 +790,16 @@ inline double smooth_escape_far(int n, double zr, double zi, double m2, Step&& s
 // polynomial (see Map::escape_certified/polynomial_escape_certified's own
 // doc comments for why that certification is what makes it correct, not
 // just conventional).
-Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
+Image Renderer::render_julia_polynomial(Image& escaped, const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
+    escaped = Image(res, res);
     const RationalMap* jcustom = map_.custom_map();
     const PolyEscape esc = poly_escape(
         map_, jcustom ? recognize_family(*jcustom) : std::nullopt, map_.param(),
         settings_.escape_radius);
     const double R2 = esc.R2;
-    const double inv_log_d = 1.0 / std::log(static_cast<double>(map_.degree()));
+    const double jdeg = static_cast<double>(map_.degree());
+    const double inv_log_d = 1.0 / std::log(jdeg);
     Image img(res, res);
 
     // `a` = map_.param() is fixed for the WHOLE render, so the step plan --
@@ -782,20 +813,30 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
             const Cplx c = view_.coord(col, row);
             double zr = c.real(), zi = c.imag();
             double out = 0.0;
+            bool esc_px = false;
+            double prev_r = zr, prev_i = zi;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 plan.step(zr, zi);
                 const double m2 = zr * zr + zi * zi;
 
+                if (overflowed(m2)) {                // see escape_log_mod
+                    out = smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, jdeg, esc), esc,
+                                            inv_log_d);
+                    esc_px = true;
+                    break;
+                }
                 if (m2 > R2) {                       // per-pixel early exit
                     out = smooth_escape_far(n + 1, zr, zi, m2,
                                             [&](double& r, double& i) { plan.step(r, i); },
                                             esc, inv_log_d);
+                    esc_px = true;
                     break;
                 }
-                if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = esc_px ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -827,9 +868,10 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
 // philosophy: punt to something reasonable rather than propagate a NaN
 // from a near-zero or negative log-ratio).
 Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
-                                      const std::atomic<bool>* cancel) const {
+                                      Image& escaped, const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
+    escaped = Image(res, res);
     if (labels) *labels = Image(res, res);
     if (cycles.empty()) return img;   // nothing to classify against -- every pixel unresolved
 
@@ -855,6 +897,7 @@ Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* l
                 ar, ai, aid, tol, settings_.max_iter);
 
             img.at(col, row) = fate.resolved ? fate.nu : 0.0;
+            escaped.at(col, row) = fate.resolved ? 1.0 : 0.0;
             if (labels) labels->at(col, row) = fate.resolved ? static_cast<double>(fate.label) : 0.0;
         }
     }, cancel);
@@ -862,9 +905,14 @@ Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* l
 }
 
 Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<Cycle>& cycles,
-                             Image* labels) const {
-    if (map_.escape_certified()) return render_julia_polynomial(cancel);
-    return render_julia_rational(cycles, labels, cancel);
+                             Image* labels, Image* escaped) const {
+    Image local;
+    Image& esc = escaped ? *escaped : local;
+    if (map_.escape_certified()) {
+        if (labels) *labels = Image(view_.resolution, view_.resolution);
+        return render_julia_polynomial(esc, cancel);
+    }
+    return render_julia_rational(cycles, labels, esc, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -883,9 +931,11 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // correct here because a CERTIFIED polynomial's infinity is ALWAYS
 // superattracting, so a fixed |z| > escape_radius test is a provably
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
-Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>* cancel) const {
+Image Renderer::render_parameter_polynomial_unicritical(Image& escaped,
+                                                       const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
     Image img(res, res);
+    escaped = Image(res, res);
 
     // The parameter here is the PIXEL, not map_.param() -- everything below
     // is computed once per PIXEL, not once per render, unlike the other
@@ -924,11 +974,13 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
             else c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
             double out = 0.0;
+            bool esc_px = false;
 
             if (custom && !recognized) custom->compile_into(p, compiled);
             const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
                                                &esc_fit, &scratch);
             const double R2 = esc.R2;
+            double prev_r = zr, prev_i = zi;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
@@ -940,17 +992,25 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
                 }
                 const double m2 = zr * zr + zi * zi;
 
+                if (overflowed(m2)) {   // see escape_log_mod
+                    out = smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, degree, esc), esc,
+                                            inv_log_d);
+                    esc_px = true;
+                    break;
+                }
                 if (m2 > R2) {
                     out = smooth_escape_far(n + 1, zr, zi, m2, [&](double& r, double& i) {
                         if (recognized) Map::step_with(*recognized, p.real(), p.imag(), r, i);
                         else if (custom) compiled.step(r, i);
                         else map_.step_with_param(p, r, i);
                     }, esc, inv_log_d);
+                    esc_px = true;
                     break;
                 }
-                if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = esc_px ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -976,12 +1036,14 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_polynomial_multicritical(
     ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
-    const std::atomic<bool>* cancel) const {
+    Image& escaped_img, const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
+    escaped_img = Image(res, res);
     const RationalMap* custom = map_.custom_map();
 
-    const double inv_log_d = 1.0 / std::log(static_cast<double>(custom->degree(Cplx(0.0, 0.0))));
+    const double mdeg = static_cast<double>(custom->degree(Cplx(0.0, 0.0)));
+    const double inv_log_d = 1.0 / std::log(mdeg);
 
     const bool cp_fixed = custom->critical_points_constant();
     const std::vector<Cplx> fixed_free =
@@ -1001,17 +1063,22 @@ Image Renderer::render_parameter_polynomial_multicritical(
                             bool& escaped) {
         const double R2 = esc.R2;
         double zr = c0.real(), zi = c0.imag();
+        double prev_r = zr, prev_i = zi;
         escaped = false;
         for (int n = 0; n < settings_.max_iter; ++n) {
             compiled.step(zr, zi);
             const double m2 = zr * zr + zi * zi;
+            if (overflowed(m2)) {   // see escape_log_mod
+                escaped = true;
+                return smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, mdeg, esc), esc, inv_log_d);
+            }
             if (m2 > R2) {
                 escaped = true;
                 return smooth_escape_far(n + 1, zr, zi, m2,
                                          [&](double& r, double& i) { compiled.step(r, i); },
                                          esc, inv_log_d);
             }
-            if (is_bad(m2) || m2 > kHuge) { escaped = true; return static_cast<double>(n + 1); }
+            prev_r = zr; prev_i = zi;
         }
         return 0.0;
     };
@@ -1041,35 +1108,42 @@ Image Renderer::render_parameter_polynomial_multicritical(
             custom->compile_into(p, compiled);
             const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius,
                                                &esc_fit, &scratch);
+            // Escape status is tracked as a flag, never inferred from the
+            // value: smooth values can be <= 0 (see smooth_escape), so a 0
+            // sentinel inside the combiners would misread fast escapes.
             double out = 0.0;
+            bool px_escaped = false;
             bool escaped = false;
             switch (strategy) {
-                case ParameterStrategy::Slowest: {
-                    double worst = 0.0;
+                case ParameterStrategy::Slowest: {   // escaped iff EVERY free orbit escaped
+                    double worst = -std::numeric_limits<double>::infinity();
+                    px_escaped = true;
                     for (const Cplx& c0 : crit) {
                         const double v = escape_value(compiled, esc, c0, escaped);
-                        if (!escaped) { worst = 0.0; break; }   // a bounded orbit decides it
+                        if (!escaped) { px_escaped = false; break; }   // a bounded orbit decides it
                         worst = std::max(worst, v);
                     }
-                    out = worst;
+                    out = px_escaped ? worst : 0.0;
                     break;
                 }
-                case ParameterStrategy::Fastest: {
-                    double best = 0.0;
+                case ParameterStrategy::Fastest: {   // escaped iff ANY free orbit escaped
+                    double best = std::numeric_limits<double>::infinity();
                     for (const Cplx& c0 : crit) {
                         const double v = escape_value(compiled, esc, c0, escaped);
-                        if (escaped && (best == 0.0 || v < best)) best = v;
+                        if (escaped) { px_escaped = true; best = std::min(best, v); }
                     }
-                    out = best;
+                    out = px_escaped ? best : 0.0;
                     break;
                 }
                 case ParameterStrategy::PerCritical: {
                     const int idx = std::clamp(critical_index, 0, static_cast<int>(crit.size()) - 1);
                     out = escape_value(compiled, esc, crit[static_cast<std::size_t>(idx)], escaped);
+                    px_escaped = escaped;
                     break;
                 }
             }
             img.at(col, row) = out;
+            escaped_img.at(col, row) = px_escaped ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -1081,12 +1155,13 @@ Image Renderer::render_parameter_polynomial_multicritical(
 // single-orbit path unchanged; several free critical points take the
 // multi-critical path above.
 Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
-                                            const std::atomic<bool>* cancel) const {
+                                            Image& escaped, const std::atomic<bool>* cancel) const {
     const RationalMap* custom = map_.custom_map();
-    if (!custom || recognize_family(*custom)) return render_parameter_polynomial_unicritical(cancel);
+    if (!custom || recognize_family(*custom)) return render_parameter_polynomial_unicritical(escaped, cancel);
     const FreeCriticalStructure free_s = custom->free_critical_structure();
-    if (free_s.generic_free_count <= 1) return render_parameter_polynomial_unicritical(cancel);
-    return render_parameter_polynomial_multicritical(strategy, critical_index, free_s, cancel);
+    if (free_s.generic_free_count <= 1) return render_parameter_polynomial_unicritical(escaped, cancel);
+    return render_parameter_polynomial_multicritical(strategy, critical_index, free_s, escaped,
+                                                     cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -1124,9 +1199,10 @@ Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int crit
 // symmetry, so nothing is lost by not also calling the synthesized map's
 // own distinct_critical_points here).
 Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critical_index,
-                                          const std::atomic<bool>* cancel) const {
+                                          Image& escaped, const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
+    escaped = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
@@ -1240,24 +1316,25 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
             }
 
             double out = 0.0;
+            bool px_resolved = false;
             switch (strategy) {
                 case ParameterStrategy::Slowest: {
                     bool all_resolved = !fates.empty();
-                    double worst = 0.0;
+                    double worst = -std::numeric_limits<double>::infinity();
                     for (const OrbitFate& f : fates) {
                         if (!f.resolved) { all_resolved = false; break; }
                         worst = std::max(worst, f.nu);
                     }
+                    px_resolved = all_resolved;
                     out = all_resolved ? worst : 0.0;
                     break;
                 }
                 case ParameterStrategy::Fastest: {
-                    double best = kHuge;
-                    bool any_resolved = false;
+                    double best = std::numeric_limits<double>::infinity();
                     for (const OrbitFate& f : fates) {
-                        if (f.resolved) { any_resolved = true; best = std::min(best, f.nu); }
+                        if (f.resolved) { px_resolved = true; best = std::min(best, f.nu); }
                     }
-                    out = any_resolved ? best : 0.0;
+                    out = px_resolved ? best : 0.0;
                     break;
                 }
                 case ParameterStrategy::PerCritical: {
@@ -1266,12 +1343,14 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                     if (!fates.empty()) {
                         const int idx = labelled ? 0
                             : std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
-                        out = fates[idx].resolved ? fates[idx].nu : 0.0;
+                        px_resolved = fates[idx].resolved;
+                        out = px_resolved ? fates[idx].nu : 0.0;
                     }
                     break;
                 }
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = px_resolved ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -1281,11 +1360,17 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
 // already uses; see render_parameter's own header doc comment for what each
 // path means.
 Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrategy strategy,
-                                 int critical_index) const {
+                                 int critical_index, Image* escaped) const {
+    Image local;
+    Image& esc = escaped ? *escaped : local;
     // A composed map has no free parameter (see Map::composed): honest zeros.
-    if (map_.family() == Family::Composed) return Image(view_.resolution, view_.resolution);
-    if (map_.escape_certified()) return render_parameter_polynomial(strategy, critical_index, cancel);
-    return render_parameter_rational(strategy, critical_index, cancel);
+    if (map_.family() == Family::Composed) {
+        esc = Image(view_.resolution, view_.resolution);
+        return Image(view_.resolution, view_.resolution);
+    }
+    if (map_.escape_certified())
+        return render_parameter_polynomial(strategy, critical_index, esc, cancel);
+    return render_parameter_rational(strategy, critical_index, esc, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -1554,7 +1639,11 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
             // global max_iter^degree (see render_greens' own comment for
             // why the old accumulate-then-divide-by-degree^max_iter form
             // was simply wrong, not just overflow-prone).
+            // Escaped orbits always get G > 0 (escape_potential), and an
+            // overflowing one is estimated, not dropped (escape_log_mod):
+            // G == 0 is reserved for "never escaped" -- the filled set.
             double g = 0.0;
+            double prev_r = zr, prev_i = zi;
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
                     Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
@@ -1563,13 +1652,17 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
                 } else {
                     map_.step_with_param(p, zr, zi);
                 }
-                const double mag = std::sqrt(zr * zr + zi * zi);
-                if (is_bad(mag)) break;
-                if (mag > escR) {
-                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
-                    if (is_bad(g)) g = 0.0;
+                const double m2 = zr * zr + zi * zi;
+                if (overflowed(m2)) {
+                    g = escape_potential(n + 1, escape_log_mod(prev_r, prev_i, ddeg, esc), ddeg, esc);
                     break;
                 }
+                const double mag = std::sqrt(m2);
+                if (mag > escR) {
+                    g = escape_potential(n + 1, std::log(mag), ddeg, esc);
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = g;
         }
@@ -1752,19 +1845,25 @@ Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const 
             // used to guard against (`normalized`/kHuge/is_bad on the
             // accumulator): std::pow(degree, n+1) is only ever evaluated
             // at ONE pixel's own escape step, essentially never near
-            // max_iter, and even if it were, IEEE division by +inf
-            // degrades gracefully to +0.0 for that single pixel rather
-            // than requiring a whole-image escape hatch.
+            // max_iter; when it is (d^n overflows past max_iter ~1074 for
+            // d = 2), escape_potential floors G at the smallest positive
+            // double rather than letting it read as the filled set's 0.
+            // See render_parameter_greens_polynomial: escaped => G > 0.
             double g = 0.0;
+            double prev_r = zr, prev_i = zi;
             for (int n = 0; n < settings_.max_iter; ++n) {
                 plan.step(zr, zi);
-                const double mag = std::sqrt(zr * zr + zi * zi);
-                if (is_bad(mag)) break;
-                if (mag > escR) {
-                    g = (std::log(mag) + esc.offset) / std::pow(ddeg, static_cast<double>(n + 1));
-                    if (is_bad(g)) g = 0.0;
+                const double m2 = zr * zr + zi * zi;
+                if (overflowed(m2)) {
+                    g = escape_potential(n + 1, escape_log_mod(prev_r, prev_i, ddeg, esc), ddeg, esc);
                     break;
                 }
+                const double mag = std::sqrt(m2);
+                if (mag > escR) {
+                    g = escape_potential(n + 1, std::log(mag), ddeg, esc);
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = g;
         }
