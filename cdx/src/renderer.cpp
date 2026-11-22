@@ -647,8 +647,14 @@ struct PolyEscape {
     double offset = 0.0;
 };
 
+// `fit` (optional): the map's coefficients as polynomials in a, compiled
+// ONCE per render (RationalMap::compile_polynomial_coefficients_in_a). With
+// it, a parameter-plane pixel costs a Horner pass per coefficient instead of
+// a trip through the expression evaluator -- that trip made typed z^2 + a
+// ~40% slower than before the certified radius existed.
 PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, Cplx p,
-                       double r_user) {
+                       double r_user, const PolyCoeffsInA* fit = nullptr,
+                       std::vector<Cplx>* scratch = nullptr) {
     PolyEscape out;
     const RationalMap* custom = map.custom_map();
     std::optional<Family> fam = recognized;
@@ -666,8 +672,15 @@ PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, 
         out.R2 = r_user * r_user;
         return out;
     }
-    std::vector<Cplx> coeffs;
-    if (!custom->polynomial_coefficients(p, coeffs) || coeffs.size() < 3) {
+    std::vector<Cplx> local;
+    std::vector<Cplx>& coeffs = scratch ? *scratch : local;
+    if (fit && fit->valid) {
+        fit->eval(p, coeffs);
+        while (!coeffs.empty() && coeffs.back() == Cplx(0.0, 0.0)) coeffs.pop_back();
+    } else if (!custom->polynomial_coefficients(p, coeffs)) {
+        coeffs.clear();
+    }
+    if (coeffs.size() < 3) {
         out.R2 = r_user * r_user;
         return out;
     }
@@ -676,7 +689,10 @@ PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, 
     std::vector<double> heap;
     double* c = stack;
     if (d >= 16) { heap.resize(static_cast<std::size_t>(d) + 1); c = heap.data(); }
-    for (int k = 0; k <= d; ++k) c[k] = std::abs(coeffs[static_cast<std::size_t>(k)]);
+    // sqrt(norm), not std::abs: hypot's overflow care costs ~20 ns a call,
+    // paid per coefficient per parameter pixel, and |a_k|^2 cannot overflow
+    // for any coefficient a polynomial escape test could use anyway.
+    for (int k = 0; k <= d; ++k) c[k] = std::sqrt(std::norm(coeffs[static_cast<std::size_t>(k)]));
     const double R = polynomial_escape_radius_abs(c, d, r_user);
     out.R2 = R * R;
     const double lead = c[d];
@@ -842,8 +858,12 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
 
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;
@@ -853,8 +873,9 @@ Image Renderer::render_parameter_polynomial_unicritical(const std::atomic<bool>*
             double zr = c0.real(), zi = c0.imag();
             double out = 0.0;
 
-            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
-            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            if (custom && !recognized) custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
             const double R2 = esc.R2;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
@@ -943,8 +964,12 @@ Image Renderer::render_parameter_polynomial_multicritical(
         return 0.0;
     };
 
+    const PolyCoeffsInA esc_fit = custom->compile_polynomial_coefficients_in_a();
+
     parallel_columns([&](int col) {
         std::vector<Cplx> prev_ordinary;
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
 
@@ -961,8 +986,9 @@ Image Renderer::render_parameter_polynomial_multicritical(
             }
             if (crit.empty()) { img.at(col, row) = 0.0; continue; }
 
-            const CompiledMap compiled = custom->compile(p);
-            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius);
+            custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
             double out = 0.0;
             bool escaped = false;
             switch (strategy) {
@@ -1452,8 +1478,12 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
     else if (custom) degree = custom->degree(Cplx(0.0, 0.0));
     else degree = map_.degree();
     const double ddeg = static_cast<double>(degree);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;
@@ -1462,8 +1492,9 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
             else c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
 
-            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
-            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius);
+            if (custom && !recognized) custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
             const double escR = std::sqrt(esc.R2);
 
             // Escape-rate potential G(z) = lim d^-n log+|f^n(z)|: normalize
@@ -1523,8 +1554,11 @@ Image Renderer::render_parameter_greens_rational(GreensPotential potential, Imag
 
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;

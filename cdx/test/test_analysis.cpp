@@ -1051,6 +1051,46 @@ int main() {
         }
     }
 
+    // ---- Per-render compilation for parameter-plane pixels --------------------------
+    std::printf("\nPer-pixel compilation: compile_into and coefficients-in-a match the direct "
+               "forms:\n");
+    {
+        const RationalMap typed = RationalMap::from_expression("z^2+a", "a", {});
+        const RationalMap lead = RationalMap::from_expression("0.5*z^3+a*z^2+(1-a)*z+1", "a", {});
+        const RationalMap term = RationalMap::multibrot(3);
+        const Cplx as[] = {Cplx(0.0, 0.0), Cplx(-0.75, 0.1), Cplx(3.7, -4.2), Cplx(-11.0, 6.0)};
+        bool fit_ok = true, into_ok = true;
+        for (const RationalMap* m : {&typed, &lead, &term}) {
+            const PolyCoeffsInA fit = m->compile_polynomial_coefficients_in_a();
+            if (!fit.valid) fit_ok = false;
+            CompiledMap reused;
+            for (const Cplx& a : as) {
+                std::vector<Cplx> want, got;
+                m->polynomial_coefficients(a, want);
+                fit.eval(a, got);
+                while (!got.empty() && got.back() == Cplx(0.0, 0.0)) got.pop_back();
+                if (got.size() != want.size()) fit_ok = false;
+                for (std::size_t k = 0; k < want.size() && k < got.size(); ++k) {
+                    if (std::abs(got[k] - want[k]) > 1e-12 * std::max(1.0, std::abs(want[k]))) fit_ok = false;
+                }
+                m->compile_into(a, reused);
+                const CompiledMap fresh = m->compile(a);
+                for (const Cplx& z0 : {Cplx(0.3, 0.2), Cplx(-1.1, 0.7)}) {
+                    double r1 = z0.real(), i1 = z0.imag(), r2 = r1, i2 = i1;
+                    reused.step(r1, i1);
+                    fresh.step(r2, i2);
+                    if (r1 != r2 || i1 != i2) into_ok = false;
+                }
+            }
+        }
+        check(fit_ok, "coefficients fitted as polynomials in a reproduce polynomial_coefficients "
+                      "(to 1e-12) at |a| up to 12, typed and term-based");
+        check(into_ok, "compile_into (buffers reused) steps bit-identically to compile");
+        const RationalMap rat = RationalMap::from_expression("z^2+a/z", "a", {});
+        check(!rat.compile_polynomial_coefficients_in_a().valid,
+              "a map with a pole has no coefficients-in-a fit (valid == false)");
+    }
+
     // ---- Certified escape radius (B2) -----------------------------------------------
     std::printf("\nCertified escape radius: rho = root of |a_d| r^d - sum |a_k| r^k - r:\n");
     {
