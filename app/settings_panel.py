@@ -43,6 +43,12 @@ FIELD_GROUPS = {
     "Cache": ["cache_budget_bytes"],
 }
 
+# A one-line note shown under a field's widget.
+FIELD_NOTES = {
+    "parameter_strategy": "Per-critical: dashed rays mark where critical-point labels "
+                          "switch — a labelling convention, not dynamics.",
+}
+
 # The two dock tabs (UI redesign): which groups each shows.
 RENDERING_GROUPS = {k: FIELD_GROUPS[k] for k in ("Rendering", "Parameter plane", "Navigation", "Cache")}
 COLORING_GROUPS = {k: FIELD_GROUPS[k] for k in ("Coloring", "Green's function")}
@@ -184,6 +190,7 @@ class SettingsPanel(QWidget):
         self._last_good: Settings = session.settings
         self._widgets: dict[str, QSpinBox | QDoubleSpinBox | QComboBox | QCheckBox] = {}
         self._field_errors: dict[str, QLabel] = {}
+        self._field_notes: dict[str, QLabel] = {}
         self._cache_readout_label: QLabel | None = None
         self._slow_render_label: QLabel | None = None
 
@@ -257,6 +264,12 @@ class SettingsPanel(QWidget):
             error.hide()
             cv.addWidget(error)
             self._field_errors[name] = error
+            if name in FIELD_NOTES:
+                note = QLabel(FIELD_NOTES[name], cell)
+                note.setProperty("role", "caption")
+                note.setWordWrap(True)
+                cv.addWidget(note)
+                self._field_notes[name] = note
             label = QLabel(_short_label(spec.label, group or title) + ":", column)
             label.setToolTip(spec.label)
             label.setBuddy(widget)
@@ -338,6 +351,11 @@ class SettingsPanel(QWidget):
             label = self._field_errors[name]
             label.setText(message)
             label.setVisible(bool(message))
+
+    def field_note(self, name: str) -> str:
+        """The note shown under a field ("" if none)."""
+        note = self._field_notes.get(name)
+        return note.text() if note is not None else ""
 
     def errors(self) -> dict[str, str]:
         return {n: l.text() for n, l in self._field_errors.items() if l.text()}

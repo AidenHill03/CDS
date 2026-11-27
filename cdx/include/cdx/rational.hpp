@@ -781,6 +781,12 @@ public:
     // labelled start (from_a, from_pts) -- the warm-start primitive; it
     // returns false if the continuation failed.
     CriticalLabelBase critical_label_base() const;
+    // The polynomial whose roots are the finite critical points at `a`
+    // (P'Q-PQ', or the term sandbox's cleared derivative numerator),
+    // ascending. Public for the app's labelling-cut overlay, which finds the
+    // collision parameters from it (app/label_cuts.py); also what
+    // critical_points()/the label continuation root.
+    std::vector<Cplx> deriv_numerator_poly(Cplx a) const;
     DerivNumeratorInA compile_deriv_numerator_in_a() const;
     // polynomial_coefficients(a) as polynomials in a (see PolyCoeffsInA);
     // valid == false when the map is not a polynomial or the fit fails.
@@ -861,7 +867,6 @@ private:
     // comment in rational.cpp for the derivation. Factored out purely so
     // continuation can build the SAME polynomial a cold solve would,
     // without a second, divergence-prone copy of this construction.
-    std::vector<Cplx> deriv_numerator_poly(Cplx a) const;   // P'Q-PQ' / cleared derivative numerator
     std::vector<Cplx> fixed_point_poly(Cplx a) const;       // P-zQ / N(z)-zD(z)
 
     // Appends the closed-form/deterministic sources (pole-copy multiplicity,

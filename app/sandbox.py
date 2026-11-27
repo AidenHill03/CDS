@@ -54,7 +54,9 @@ from app.equation_panel import EquationPanel
 from app.facts_panel import (FactsPanel, _classify, _is_inf, critical_orbit_fates, facts_to_dict,
                              format_short)
 from app.info_panel import InfoPanel
+from app import label_cuts as label_cuts_module
 from app.family_views import (parameter_view_for, rename_family_meta, save_parameter_view,
+                              save_parameter_strategy, stored_parameter_strategy,
                                set_thumbnail_key, thumbnail_key)
 from app.library_panel import (LibraryPanel, _placeholder_icon, default_dynamical_view,
                                default_view_for_mode)
@@ -66,8 +68,9 @@ from app.render_cache import RenderCache
 from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
                          PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES, RENDER_MODES, Session,
                          render_map)
-from app.settings import (Settings, family_meta_path_for, library_path, load_settings,
-                          preview_path_for, previews_dir, save_settings)
+from app.settings import (DEFAULT_PARAMETER_STRATEGY, Settings, family_meta_path_for,
+                          library_path, load_settings, preview_path_for, previews_dir,
+                          save_settings)
 from app.settings_panel import (COLORING_GROUPS, RENDERING_GROUPS, SETTINGS_APPLY_DEBOUNCE_MS,
                                 SettingsPanel)
 from app.version import PRODUCT_NAME
@@ -128,6 +131,30 @@ MODE_LABELS: dict[str, tuple[str, str]] = {
     "greens": ("Green's", "Green's function (escape-rate potential) of each starting point z"),
 }
 PARAMETER_MODE_ORDER = ["parameter", "parameter_greens", "parameter_basin", "parameter_period"]
+
+# How the header names a non-default parameter strategy.
+STRATEGY_HEADER_NAMES = {"slowest": "slowest", "fastest": "fastest", "per_critical": "per-critical"}
+STRATEGY_TOOLTIPS = {
+    "fastest": "Parameter strategy: Fastest -- a pixel is coloured by the free critical orbit "
+               "that escapes or resolves first (Rendering ▸ Parameter plane)",
+    "per_critical": "Parameter strategy: Per-critical -- only the labelled free critical "
+                    "point #{index} is followed. Dashed rays mark where its label is "
+                    "re-assigned: a labelling convention, not dynamics "
+                    "(Rendering ▸ Parameter plane)",
+}
+
+
+def strategy_header_text(mode: str, strategy: str, critical_index: int) -> tuple[str, str]:
+    """(text, tooltip) for a plane header: "Escape · per-critical #1" when
+    `mode` uses the parameter strategy and it is not the default, else
+    ("", "") -- the strategy is never a hidden setting."""
+    if mode != "parameter" or strategy == DEFAULT_PARAMETER_STRATEGY:
+        return "", ""
+    name = STRATEGY_HEADER_NAMES.get(strategy, strategy)
+    if strategy == "per_critical":
+        name += f" #{critical_index}"
+    tooltip = STRATEGY_TOOLTIPS.get(strategy, "").format(index=critical_index)
+    return f"{MODE_LABELS[mode][0]} · {name}", tooltip
 DYNAMICAL_MODE_ORDER = ["julia", "basin", "greens"]
 assert set(MODE_LABELS) == set(RENDER_MODES) == set(PARAMETER_MODE_ORDER + DYNAMICAL_MODE_ORDER)
 assert set(PARAMETER_MODE_ORDER) == set(PARAMETER_PLANE_MODES)
@@ -2090,8 +2117,72 @@ class ImageView(QWidget):
                               layer_trace_enabled=self._layer_trace_enabled,
                               layer_points=self._layer_points,
                               layer_traces=self._layer_traces)
+        self._paint_label_cuts(painter)
         self._paint_offscreen_arrow(painter)
         self._paint_readout_chips(painter)
+
+    # ---- Per-critical labelling cuts --------------------------------------------
+    def label_cuts_active(self) -> bool:
+        settings = self.session.settings
+        return (self.pane.render_mode == "parameter"
+                and settings.parameter_strategy == "per_critical")
+
+    def label_cuts(self):
+        """The current map's labelling cuts (app.label_cuts) when the
+        Per-critical strategy is active on this pane, else None."""
+        if not self.label_cuts_active():
+            return None
+        return label_cuts_module.label_cuts(self.session.map)
+
+    def label_cut_segments(self) -> list[tuple[complex, complex, complex]]:
+        """(collision, start, end) in complex coordinates for every cut ray
+        crossing this pane's viewport -- what _paint_label_cuts draws."""
+        cuts = self.label_cuts()
+        if cuts is None:
+            return []
+        vp = self.pane.viewport
+        return label_cuts_module.visible_segments(cuts, vp.center, vp.scale)
+
+    def label_cut_at(self, pos: QPointF, radius_px: float = 4.0) -> bool:
+        """Whether screen position `pos` is within radius_px of a drawn cut."""
+        segments = self.label_cut_segments()
+        if not segments:
+            return False
+        rect = self._display_rect()
+        if rect.width() <= 0:
+            return False
+        per_px = 2.0 * self.pane.viewport.scale / rect.width()
+        w = self._pixel_to_complex(pos)
+        return any(label_cuts_module.distance_to_segment(w, s0, s1) <= radius_px * per_px
+                   for _c, s0, s1 in segments)
+
+    def _paint_label_cuts(self, painter: QPainter) -> None:
+        segments = self.label_cut_segments()
+        if not segments:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(self._display_rect())
+        # The marks' own white-on-black-outline pair, translucent: thin and
+        # quiet, since this marks a convention rather than a dynamical object.
+        line, outline = theme.color("mark_point"), theme.color("mark_outline")
+        outline.setAlpha(110)
+        halo = QPen(outline, 2.5)
+        halo.setCapStyle(Qt.PenCapStyle.FlatCap)
+        line.setAlpha(210)
+        pen = QPen(line, 1.0)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        for c, s0, s1 in segments:
+            p0, p1 = self._complex_to_display_pixel(s0), self._complex_to_display_pixel(s1)
+            painter.setPen(halo)
+            painter.drawLine(p0, p1)
+            painter.setPen(pen)
+            painter.drawLine(p0, p1)
+            painter.setPen(QPen(line, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(self._complex_to_display_pixel(c), 2.5, 2.5)
+        painter.restore()
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -2307,6 +2398,9 @@ class ImageView(QWidget):
             if self._offscreen_arrow_hit(pos_f):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 self.setToolTip("Re-center on the parameter marker")
+            elif self.label_cut_at(pos_f):
+                self.setToolTip(label_cuts_module.TOOLTIP)
+                self._update_cursor(event.modifiers())
             else:
                 self.setToolTip("")
                 self._update_cursor(event.modifiers())
@@ -3624,6 +3718,10 @@ class SandboxWindow(QMainWindow):
                 frame.mode_control.set_segments(groups, titles)
             frame.mode_control.set_current(pane.render_mode)
             frame.set_focused(pane is self._focused_pane)
+            settings = self.session.settings
+            frame.set_strategy_text(*strategy_header_text(
+                pane.render_mode, settings.parameter_strategy,
+                settings.parameter_critical_index))
         self._equalize_chip_rows()
 
     def _show_about_dialog(self) -> None:
@@ -4095,6 +4193,9 @@ class SandboxWindow(QMainWindow):
             pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
+        self._sync_mode_controls()   # the header shows a non-default strategy
+        for pane in self.panes:
+            pane.image_view.update()   # labelling cuts on/off
         # A new palette or strategy is a new thumbnail key: out-of-date
         # thumbnails re-render in the background.
         self.library_panel.refresh_previews()
@@ -4323,6 +4424,7 @@ class SandboxWindow(QMainWindow):
         # UNCONDITIONALLY affects every pane regardless of mode (see
         # _apply_param_change's own cache-asymmetry docstring for the
         # contrast with a plain param change).
+        self._apply_family_strategy(self.session.map.name)
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
         self._refresh_header()   # name/formula/param all just changed wholesale
@@ -4340,6 +4442,22 @@ class SandboxWindow(QMainWindow):
                 self._update_status_bar()
             self._debounce_timers[pane].stop()
             self._start_render(pane)
+
+    def _apply_family_strategy(self, name: str) -> None:
+        """A family loads with the parameter strategy it was SAVED with, else
+        the default -- a non-default strategy chosen for one family does not
+        silently carry over to the next."""
+        strategy, index = stored_parameter_strategy(name) or (DEFAULT_PARAMETER_STRATEGY, 0)
+        current = self.session.settings
+        if (current.parameter_strategy, current.parameter_critical_index) == (strategy, index):
+            return
+        new_settings = dataclasses.replace(current, parameter_strategy=strategy,
+                                           parameter_critical_index=index)
+        self.session.apply_settings(new_settings)
+        save_settings(new_settings)
+        for panel in (self.rendering_panel, self.coloring_panel):
+            panel.refresh_from_session()
+        self._sync_mode_controls()
 
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
@@ -4368,6 +4486,11 @@ class SandboxWindow(QMainWindow):
         view = self.current_parameter_view()
         if view is not None:
             save_parameter_view(name, *view)
+        # The strategy is saved with the family only when it isn't the
+        # default; loading the family then restores it (_apply_family_strategy).
+        settings = self.session.settings
+        save_parameter_strategy(name, settings.parameter_strategy,
+                                settings.parameter_critical_index)
 
     def _on_family_renamed(self, old_name: str, new_name: str) -> None:
         rename_family_meta(old_name, new_name)

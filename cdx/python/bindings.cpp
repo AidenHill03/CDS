@@ -321,6 +321,26 @@ PYBIND11_MODULE(cdx, m) {
              "segment a* -> a, so the only discontinuities are rays from collision "
              "points pointing directly away from a*, independent of any viewport. "
              "See the C++ CriticalLabelBase comment.")
+        .def("critical_label_base",
+             [](const RationalMap& m) {
+                 const CriticalLabelBase b = m.critical_label_base();
+                 py::dict d;
+                 d["a_star"] = b.a_star;
+                 d["points"] = b.points;
+                 d["constant"] = b.constant;
+                 d["expected_degree"] = b.expected_degree;
+                 d["closed_form_free"] = b.closed_form_free;
+                 return d;
+             },
+             "The labelling convention's base (see the C++ CriticalLabelBase "
+             "comment): a dict with a_star (the base parameter, after any "
+             "nudge), points (the free tracked critical points there, in label "
+             "order), constant (critical points do not move with a), "
+             "expected_degree (effective degree of the derivative numerator at "
+             "a_star) and closed_form_free.")
+        .def("deriv_numerator_coefficients", &RationalMap::deriv_numerator_poly, py::arg("a"),
+             "Ascending coefficients of the derivative numerator at `a` "
+             "(P'Q - PQ'): its roots are the finite critical points.")
         .def("polynomial_coefficients",
              [](const RationalMap& m, Cplx a) -> py::object {
                  std::vector<Cplx> c;

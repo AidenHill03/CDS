@@ -91,7 +91,22 @@ class PlaneFrame(QWidget):
         header.setSpacing(10)
         self.title_label = QLabel(self)
         self.title_label.setProperty("role", "planeTitle")
-        header.addWidget(self.title_label)
+        # The parameter strategy, whenever it is not the default
+        # ("Escape · per-critical #1") -- never a hidden setting. A caption
+        # line under the title: the row is as tall as the mode control
+        # anyway, so it costs no height and takes no width from the modes.
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(0)
+        title_box.addStretch(1)
+        title_box.addWidget(self.title_label)
+        self.strategy_label = QLabel(self)
+        self.strategy_label.setProperty("role", "caption")
+        self.strategy_label.setAccessibleName("Parameter strategy")
+        self.strategy_label.hide()
+        title_box.addWidget(self.strategy_label)
+        title_box.addStretch(1)
+        header.addLayout(title_box)
         header.addStretch(1)
         self.mode_control = SegmentedControl(parent=self, accessible_name="Render mode")
         header.addWidget(self.mode_control)
@@ -124,6 +139,15 @@ class PlaneFrame(QWidget):
         self.title_label.setText(self.PLANE_TITLES[plane])
         theme.set_property(self.title_label, "plane", plane)
         self.set_chips_visible(True)
+
+    def set_strategy_text(self, text: str, tooltip: str = "") -> None:
+        """The header's strategy note; empty hides it."""
+        self.strategy_label.setText(text)
+        self.strategy_label.setToolTip(tooltip)
+        self.strategy_label.setVisible(bool(text))
+
+    def strategy_text(self) -> str:
+        return self.strategy_label.text() if not self.strategy_label.isHidden() else ""
 
     def set_chips_visible(self, visible: bool) -> None:
         for chip, gate in self.chips.values():
