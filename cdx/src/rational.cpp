@@ -1084,10 +1084,17 @@ bool RationalMap::critical_points_constant() const {
             if (references_param(c, pq_param_)) return false;
         }
         // P must not reference the parameter EXCEPT possibly its degree-0
-        // (constant) coefficient -- mirrors the term-based path's own
-        // exponent==0 exemption exactly (see the header's own comment on
-        // why that's safe: such a term never reaches the derivative).
-        for (std::size_t k = 1; k < pq_->P.coeffs.size(); ++k) {
+        // (constant) coefficient, and only when Q is a constant: then
+        // f = P/Q is a sum whose constant term never reaches f' -- the
+        // term-based path's exponent==0 exemption. With a non-constant Q
+        // that coefficient DOES reach the derivative numerator P'Q - PQ'
+        // (through -P Q'): z^2 + a/z = (z^3 + a)/z has critical points
+        // (a/2)^(1/3), which move with a.
+        bool q_is_constant = true;
+        for (std::size_t k = 1; k < pq_->Q.coeffs.size(); ++k) {
+            if (!pq_->Q.coeffs[k]->is_zero_literal()) { q_is_constant = false; break; }
+        }
+        for (std::size_t k = q_is_constant ? 1 : 0; k < pq_->P.coeffs.size(); ++k) {
             if (references_param(pq_->P.coeffs[k], pq_param_)) return false;
         }
         return true;

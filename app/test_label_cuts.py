@@ -82,6 +82,14 @@ def main() -> None:
         sep = min((abs(p - q) for i, p in enumerate(pts) for q in pts[i + 1:]), default=0.0)
         check(len(pts) < 3 or sep < 1e-3, f"  two critical points meet at a = {c:.4f}")
 
+    # A parameter in P's constant term reaches f' when Q isn't constant:
+    # z^2 + a/z = (z^3 + a)/z has critical points (a/2)^(1/3), meeting at 0.
+    # (cdx used to flag these as constant, so they were never labelled.)
+    recip = cdx.RationalMap.from_expression("z^2 + a/z", "a", {}, "recip")
+    rcuts = lc.compute_label_cuts(recip)
+    check(not recip.critical_label_base()["constant"] and rcuts is not None
+          and len(rcuts.collisions) == 1 and abs(rcuts.collisions[0]) < 1e-6,
+          f"z^2 + a/z: labelled, one collision at a = 0 ({rcuts and rcuts.collisions})")
     check(lc.compute_label_cuts(cdx.RationalMap.mandelbrot()) is None,
           "z^2 + a has nothing to cut (one critical point, constant)")
 
