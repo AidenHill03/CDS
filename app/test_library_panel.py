@@ -25,6 +25,7 @@ import math
 import tempfile
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
@@ -35,8 +36,11 @@ from app.library_panel import (LibraryPanel, _bounding_view, _derive_dynamical_v
                                _DYNAMICAL_VIEW_PADDING, _LIST_ICON_SIZE, _NAME_ROLE,
                                _placeholder_icon, default_dynamical_view, default_view_for,
                                default_view_for_mode)
-from app.session import PRESET_FAMILY_NAMES, Session
-from app.settings import preview_path_for
+from app.family_views import (PRESET_PARAMETER_VIEWS, parameter_view_for, rename_family_meta,
+                               save_parameter_view, stored_parameter_view)
+from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
+                         PRESET_FAMILY_NAMES, Session)
+from app.settings import family_meta_path_for, preview_path_for
 
 failures = 0
 
@@ -63,14 +67,36 @@ def main() -> None:
 
     print("=== app.library_panel tests ===")
 
-    # ---- default-view lookup ------------------------------------------------------
-    print("\ndefault view lookup:")
-    center, scale = default_view_for("mandelbrot")
-    check(center == complex(-0.5, 0.0) and scale == 1.5,
-          "mandelbrot's default view matches the classic Mandelbrot framing")
-    fallback_center, fallback_scale = default_view_for("some-user-family-not-in-the-table")
-    check(fallback_center == 0j and fallback_scale > 0,
-          "an unlisted name gets the generic fallback view, not a KeyError")
+    # ---- default-view lookup: each family's stored parameter-plane framing ---------
+    # (app.family_views). The presets use the thumbnail table: the earlier
+    # hand-picked table opened McMullen at +-2.5, where its structure is a
+    # speck, and gave unlisted families an arbitrary (0, 2).
+    print("\ndefault view lookup (stored per-family parameter framing):")
+    expected_presets = {"mandelbrot": (complex(-0.75, 0), 1.5), "multibrot3": (0j, 1.35),
+                        "multibrot5": (0j, 1.25), "mcmullen2": (0j, 0.3), "mcmullen3": (0j, 0.3)}
+    check(all(default_view_for(n) == v for n, v in expected_presets.items()),
+          "each preset opens at its table framing (McMullen at +-0.3, not a speck at +-2.5)")
+    fallback = (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE)
+    check(default_view_for("some-user-family-not-in-the-table") == fallback,
+          "a family with no stored view falls back to DEFAULT_PARAMETER_VIEW_CENTER/SCALE")
+    check(default_view_for("newton3") == fallback,
+          "...as does newton3 (a has no effect on it; no table entry)")
+
+    # A saved family's view lives in a JSON sidecar beside its preview PNG.
+    save_parameter_view("viewed-family", complex(0.1, -0.2), 0.05)
+    check(stored_parameter_view("viewed-family") == (complex(0.1, -0.2), 0.05)
+          and family_meta_path_for("viewed-family").exists(),
+          "save_parameter_view stores a saved family's framing in its sidecar")
+    rename_family_meta("viewed-family", "viewed-family-2")
+    check(parameter_view_for("viewed-family-2") == (complex(0.1, -0.2), 0.05)
+          and stored_parameter_view("viewed-family") is None,
+          "rename moves the stored framing with the family")
+    family_meta_path_for("garbled-family").write_text("{not json")
+    check(parameter_view_for("garbled-family") == fallback,
+          "an unreadable sidecar reads as 'nothing stored', never an exception")
+    save_parameter_view("mandelbrot", 5j, 9.0)
+    check(parameter_view_for("mandelbrot") == PRESET_PARAMETER_VIEWS["mandelbrot"],
+          "a preset's framing is fixed: saving one for it is ignored")
 
     # ---- dynamical (Julia-set) default framing: FIXED, interim -----------------------
     # default_view_for's own table is a-SPACE (the parameter plane) --
@@ -167,7 +193,7 @@ def main() -> None:
     changes: list[None] = []
     panel = LibraryPanel(session, lambda: loads.append(None), lambda: changes.append(None))
 
-    check(panel._list.count() == len(session.library),
+    check(len(panel.entry_names()) == len(session.library),
           "the list has one row per library entry (six presets, nothing saved yet)")
     check(panel._selected_name() is not None, "something is selected on construction")
 
@@ -272,11 +298,10 @@ def main() -> None:
     placeholder_image = _placeholder_icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
 
     def icon_image(name: str):
-        for row in range(panel._list.count()):
-            item = panel._list.item(row)
-            if item.data(_NAME_ROLE) == name:
-                return item.icon().pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
-        raise AssertionError(f"{name!r} not found in the list")
+        icon = panel.row_icon(name)
+        if icon is None:
+            raise AssertionError(f"{name!r} not found in the list")
+        return icon.pixmap(_LIST_ICON_SIZE, _LIST_ICON_SIZE).toImage()
 
     check(icon_image("thumbed-family") != placeholder_image,
           "an entry WITH a sidecar preview shows that thumbnail as its list icon, not the "
@@ -307,6 +332,87 @@ def main() -> None:
     panel._list.itemDoubleClicked.emit(panel._list.currentItem())
     check(len(loads) == 1 and session.map.name == session.library.find("mandelbrot").name,
           "double-clicking a library entry loads it, exactly like the Load button")
+
+    # ---- UI redesign: sections, search, loaded dot, row menus, confirm ------------------
+    print("\nsidebar library (UI redesign):")
+    from app.session import PRESET_FAMILY_NAMES
+    names = panel.entry_names()
+    presets = [n for n in names if n in PRESET_FAMILY_NAMES]
+    check(names[:len(presets)] == presets and all(n not in PRESET_FAMILY_NAMES for n in names[len(presets):]),
+          "two sections: Presets first, then Yours")
+    headers = [panel._list.itemWidget(panel._list.item(r)).text()
+               for r in range(panel._list.count()) if panel._list.item(r).data(_NAME_ROLE) is None]
+    check(headers == ["PRESETS", "YOURS"], "the sections are headed PRESETS and YOURS")
+    panel.search_field.setText("mcm")
+    check(panel.visible_entry_names() == ["mcmullen2", "mcmullen3"], "search filters by name")
+    panel.search_field.setText("z^5")
+    check("multibrot5" in panel.visible_entry_names() and "mandelbrot" not in panel.visible_entry_names(),
+          "search filters by formula too")
+    panel.search_field.setText("")
+    check(panel.visible_entry_names() == names, "clearing the search shows every entry again")
+    check(panel.row_menu_texts("mandelbrot") == ["Load"],
+          "a preset row's ⋯ menu offers Load only (no rename/delete)")
+    check(panel.row_menu_texts("thumbed-family") == ["Load", "Save current map here", "Rename…", "Delete…"],
+          "a user row's ⋯ menu offers Load, Save current map here, Rename, Delete")
+
+    loads.clear()
+    panel._select_by_name("multibrot3")
+    panel._load_selected()
+    check(panel.loaded_name() == "multibrot3" and panel._rows["multibrot3"].dot.text() == "●"
+          and panel._rows["mandelbrot"].dot.text() == "", "the loaded dot follows a load")
+    panel.set_loaded("mcmullen2")
+    check(panel._selected_name() == "mcmullen2" and panel._rows["mcmullen2"].dot.text() == "●",
+          "set_loaded moves the dot and selects that row")
+    panel._select_by_name("newton3")
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent as _QEvent
+    loads.clear()
+    QApplication.sendEvent(panel._list, QKeyEvent(_QEvent.Type.KeyPress, Qt.Key.Key_Return,
+                                                  Qt.KeyboardModifier.NoModifier))
+    check(loads == [None] and session.map.name == "newton3", "Return loads the selected entry")
+
+    asked: list[str] = []
+    panel._confirm = lambda title, text: asked.append(text) or False
+    panel._select_by_name("thumbed-family")
+    panel._delete_selected()
+    check(asked and "thumbed-family" in session.library.names(),
+          "Delete asks first, and a No leaves the entry alone")
+    panel._confirm = lambda title, text: True
+    panel._delete_selected()
+    check("thumbed-family" not in session.library.names(), "...and a Yes deletes it")
+
+    # ---- legacy library file: no framing data anywhere -> defaults -------------------
+    print("\nlegacy library file (written before per-family framings existed):")
+    legacy_session = Session()
+    legacy_session.map = cdx.RationalMap.from_expression("z^2 + a*z^3", "a", {}, "legacy-family")
+    legacy_session.save_to_library("legacy-family")
+    legacy_path = Path(tempfile.mkdtemp()) / "legacy-library.txt"
+    legacy_session.save_library_file(str(legacy_path))
+    check("parameter_view" not in legacy_path.read_text(),
+          "sanity: the library file format itself carries no framing (it lives app-side)")
+    fresh = Session()
+    fresh.load_library_file(str(legacy_path))
+    check("legacy-family" in fresh.library.names()
+          and default_view_for("legacy-family") == fallback,
+          "a library file with no view data loads, and its family opens at the defaults")
+
+    # ---- callbacks: the owner persists the framing on save / rename -----------------
+    saved_as: list[str] = []
+    renamed: list[tuple[str, str]] = []
+    cb_panel = LibraryPanel(Session(), lambda: None, lambda: None,
+                            on_saved_as=saved_as.append,
+                            on_renamed=lambda old, new: renamed.append((old, new)))
+    cb_panel._do_save_as("cb-family")
+    cb_panel._do_rename("cb-family", "cb-family-renamed")
+    check(saved_as == ["cb-family"] and renamed == [("cb-family", "cb-family-renamed")],
+          "Save current as and Rename tell the owner (it stores/moves the framing)")
+
+    provided: list[str] = []
+    thumbed = LibraryPanel(Session(), lambda: None, lambda: None,
+                           thumbnail_provider=lambda name, entry: provided.append(name) or _placeholder_icon())
+    check(sorted(provided) == sorted(PRESET_FAMILY_NAMES),
+          "row thumbnails come from the thumbnail provider (one call per row; a fresh "
+          "session's library is just the presets)")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

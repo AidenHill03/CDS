@@ -77,9 +77,9 @@ def main() -> None:
     check(len(applied) == 1, "a valid Apply calls on_apply exactly once")
     check(applied[-1].resolution == 600 and applied[-1].threads == 3,
           "the Settings passed to on_apply reflects the edited widget values")
-    check(panel._error_label.text() == "", "no error text after a valid Apply")
+    check(panel.errors() == {}, "no error text after a valid Apply")
 
-    # ---- Apply: one invalid field reverts ALL fields, applies nothing -------------
+    # ---- Apply: an invalid field shows an inline error and applies nothing ---------
     print("\napply (one field invalid):")
     applied.clear()
     panel._widgets["resolution"].setValue(700)      # a valid change, on its own
@@ -93,14 +93,22 @@ def main() -> None:
     panel._apply()
 
     check(len(applied) == 0, "an invalid field means on_apply is NOT called at all")
-    check(panel._error_label.text() != "", "an error message is shown")
-    check("Escape radius" in panel._error_label.text(),
-          "the error message names the actual offending field")
-    check(abs(panel._widgets["escape_radius"].value() - 3.0) < 1e-9,
-          "the invalid field reverts to the LAST GOOD value (3.0), not left at the bad input")
-    check(panel._widgets["resolution"].value() == 600,
-          "a field that WAS valid (resolution=700) also reverts -- Apply is all-or-nothing, "
-          "so it goes back to 600 (the last successful Apply), not the rejected 700")
+    errors = panel.errors()
+    check(list(errors) == ["escape_radius"] and "Escape radius" in errors["escape_radius"],
+          "the error is shown inline, under the offending field only, naming it")
+    check(panel._field_errors["escape_radius"].isVisibleTo(panel)
+          and panel._widgets["escape_radius"].property("invalid") is True,
+          "...as visible error text plus an error border (no tinted field)")
+    check(panel._widgets["escape_radius"].value() == 0.0 and panel._widgets["resolution"].value() == 700,
+          "what was typed stays put (a live form doesn't snap values back under the user)")
+    panel._widgets["escape_radius"].setValue(3.0)
+    panel._apply()
+    check(len(applied) == 1 and applied[-1].resolution == 700 and panel.errors() == {}
+          and not panel._widgets["escape_radius"].property("invalid"),
+          "fixing the field clears its error and applies the pending changes together")
+    applied.clear()
+    panel._apply()
+    check(applied == [], "applying with nothing changed does nothing (no needless re-render)")
 
     # ---- coloring fields: QComboBox for choices, generic apply round-trip ------------
     print("\ncoloring fields (choices widgets):")
@@ -202,6 +210,35 @@ def main() -> None:
     check(panel._slow_render_label.text() != "",
           "a large resolution/iteration combination shows a warning, live -- before Apply, "
           "not just after")
+
+    # ---- live apply: debounced, exactly once per pause -------------------------------------
+    print("\nlive apply (UI redesign):")
+    from PySide6.QtTest import QTest
+    from app.settings_panel import COLORING_GROUPS, RENDERING_GROUPS, SETTINGS_APPLY_DEBOUNCE_MS
+    live_session = Session()
+    live_applied: list[Settings] = []
+    live = SettingsPanel(live_session, live_applied.append, groups=RENDERING_GROUPS)
+    live._widgets["max_iter"].setValue(201)
+    live._widgets["max_iter"].setValue(202)
+    live._widgets["max_iter"].setValue(203)
+    check(live_applied == [], "edits don't apply immediately")
+    QTest.qWait(SETTINGS_APPLY_DEBOUNCE_MS + 150)
+    check(len(live_applied) == 1 and live_applied[0].max_iter == 203,
+          "three quick edits apply once, after the pause, with the last value")
+    check(set(live._widgets) == {f for fs in RENDERING_GROUPS.values() for f in fs}
+          and "color_palette" not in live._widgets,
+          "the Rendering tab holds only its own groups")
+    coloring = SettingsPanel(live_session, live_applied.append, groups=COLORING_GROUPS)
+    live_session.apply_settings(live_applied[0])
+    live_applied.clear()
+    coloring._widgets["color_palette"].setCurrentText("viridis")
+    coloring._apply()
+    check(len(live_applied) == 1 and live_applied[0].max_iter == 203
+          and live_applied[0].color_palette == "viridis",
+          "a Coloring change keeps the Rendering values already applied (merged, not reverted)")
+    check(set(RENDERING_GROUPS) == {"Rendering", "Parameter plane", "Navigation", "Cache"}
+          and set(COLORING_GROUPS) == {"Coloring", "Green's function"},
+          "Rendering: rendering/parameter plane/navigation/cache; Coloring: coloring/Green's")
 
     print(f"\n{'ALL CHECKS PASSED' if failures == 0 else 'SOME CHECKS FAILED'} "
           f"({failures} failure{'' if failures == 1 else 's'})")

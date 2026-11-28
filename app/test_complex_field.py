@@ -74,7 +74,7 @@ def main() -> None:
     field._on_editing_finished()
     check(field.value == complex(2, -3), "a new valid value updates .value")
     check(committed == [complex(2, -3)], "committed fired exactly once with the new value")
-    check(field._line_edit.styleSheet() == "", "no error styling after a valid commit")
+    check(not field._line_edit.property("invalid") and field.error_label.isHidden(), "no error styling after a valid commit")
 
     print("\nComplexField (invalid input -- no crash, model untouched):")
     committed.clear()
@@ -82,13 +82,13 @@ def main() -> None:
     field._on_editing_finished()   # must not raise
     check(field.value == complex(2, -3), "the last VALID value is kept, not zeroed")
     check(committed == [], "committed does NOT fire on invalid input")
-    check(field._line_edit.styleSheet() != "", "invalid input marks the field with error styling")
+    check(field._line_edit.property("invalid") is True and field.error_label.text() != "" and not field.error_label.isHidden(), "invalid input marks the field and shows the error text under it")
     check(field._line_edit.toolTip() != "", "invalid input sets a tooltip explaining why")
 
     print("\nComplexField (recommitting the SAME text after an error clears it):")
     field._line_edit.setText("2-3i")
     field._on_editing_finished()
-    check(field._line_edit.styleSheet() == "", "a subsequent valid commit clears the error styling")
+    check(not field._line_edit.property("invalid") and field.error_label.isHidden(), "a subsequent valid commit clears the error styling and text")
 
     print("\nComplexField (set_value: programmatic sync, no feedback loop):")
     committed.clear()

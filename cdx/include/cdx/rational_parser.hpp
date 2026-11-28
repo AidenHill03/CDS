@@ -37,6 +37,8 @@
 //                                                        int_exponent below)
 //     unary    := ('-' | '+')? atom
 //     atom     := number | 'i' | 'j' | 'z' | identifier | '(' expr ')'
+//               | 'd' '(' expr ')'                       -- derivative in z
+//               | special '(' digit+ (',' expr)+ ')'      -- see below
 //     int_exponent := '('? ('-'|'+')? digit+ ')'?      -- a LITERAL signed
 //                                                          integer, optionally
 //                                                          parenthesized;
@@ -62,10 +64,34 @@
 // parse_rational() collects every distinct one into CanonicalRational::
 // parameters, sorted for a stable, deterministic order.
 //
-// FUNCTION CALLS ARE REJECTED, always, with a message that distinguishes a
-// recognized transcendental name (out of scope: not a rational map) from an
-// unrecognized one (not a supported construct at all) -- see
-// rational_parser.cpp's KNOWN_TRANSCENDENTAL set.
+// BUILT-IN FUNCTIONS. Two kinds, each expanding symbolically into the same
+// Fraction<PolyZ> algebra, so the rest of the engine sees an ordinary P/Q:
+//   d(expr)        derivative in z (quotient rule; d(d(p)) works)
+//   special polynomials, first argument the degree n -- a bare integer
+//   literal, 0 <= n <= 40 (a parse WARNING, CanonicalRational::warnings,
+//   above 25: monomial coefficients get large) -- last argument x, any
+//   expression:
+//     hermite(n,x)  H(n,x)        physicists' H_n
+//     hermite_e(n,x) He(n,x)      probabilists' He_n
+//     legendre(n,x) P(n,x)        P_n
+//     laguerre(n,x) L(n,x)        L_n
+//     laguerre(n,alpha,x) L(n,alpha,x)   generalized L_n^(alpha)
+//     chebyshev_t(n,x) T(n,x), chebyshev_u(n,x) U(n,x)
+//     gegenbauer(n,lam,x)         C_n^(lam)
+//     jacobi(n,alpha,beta,x) P(n,alpha,beta,x)   P_n^(alpha,beta)
+//     bessel_poly(n,x)            y_n
+//     bernoulli(n,x), euler_poly(n,x)            B_n(x), E_n(x)
+//     cyclotomic(n,x)             Phi_n(x), n >= 1
+//   alpha/beta/lam may be numbers or polynomial expressions in the map's
+//   parameters (never z, never a division BY a parameter). The short
+//   aliases do not reserve their letters: a parameter named P, L, T, ...
+//   still works, because a parameter reference is never followed by '('.
+//   Identifiers may contain '_' only as part of one of these names.
+//
+// ANY OTHER FUNCTION CALL IS REJECTED, always, with a message that
+// distinguishes a recognized transcendental name (out of scope: not a
+// rational map) from an unrecognized one (not a supported construct at
+// all) -- see rational_parser.cpp's KNOWN_TRANSCENDENTAL set.
 //
 // NOT DONE HERE, ON PURPOSE: symbolic GCD cancellation of common P/Q
 // factors. A redundant common factor (e.g. from `(z-1)/(z-1) * f(z)`)
@@ -192,6 +218,9 @@ struct CanonicalRational {
     PolyZ P, Q;
     std::vector<std::string> parameters;
     std::string source;   // the original authored text, preserved verbatim
+    // Non-fatal notes from parsing (e.g. a special polynomial of degree
+    // above 25). Empty for almost every expression.
+    std::vector<std::string> warnings;
 
     // R(z) = P(z)/Q(z) at the given z, with every name in `parameters`
     // bound via `params`. A name present in `parameters` but missing from

@@ -4,6 +4,7 @@
 #include "cdx/renderer.hpp"
 
 #include "cdx/analysis.hpp"   // polynomial_escape_certified -- see Map::escape_certified below
+#include "cdx/critical_orbits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -140,6 +141,29 @@ std::optional<Family> recognize_family(const RationalMap& m) {
     }
 
     return std::nullopt;
+}
+
+// -----------------------------------------------------------------------------
+// relaxed_newton_power_n -- see the header. Evaluation-based rather than a
+// term/P-Q pattern match, so "z - a*(z^n-1)/(n*z^(n-1))" and
+// "((n-a)*z^n + a)/(n*z^(n-1))" (and a term-based build) all qualify.
+// -----------------------------------------------------------------------------
+std::optional<int> relaxed_newton_power_n(const RationalMap& m) {
+    const Cplx as[3] = {Cplx(0.3711, 0.2179), Cplx(1.4183, -0.6127), Cplx(-0.5813, 0.4417)};
+    const Cplx zs[3] = {Cplx(0.8123, 0.3391), Cplx(-0.4417, 1.1309), Cplx(1.7071, -0.9133)};
+    const int n = m.degree(as[0]);
+    if (n < 2) return std::nullopt;
+    for (const Cplx& a : as) {
+        if (m.degree(a) != n) return std::nullopt;
+        for (const Cplx& z : zs) {
+            const Cplx zn1 = std::pow(z, n - 1);
+            const Cplx want = ((static_cast<double>(n) - a) * zn1 * z + a) /
+                              (static_cast<double>(n) * zn1);
+            const Cplx got = m.eval(z, a);
+            if (!(std::abs(got - want) <= 1e-9 * std::max(1.0, std::abs(want)))) return std::nullopt;
+        }
+    }
+    return n;
 }
 
 // -----------------------------------------------------------------------------
@@ -610,6 +634,153 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 }
 }  // namespace
 
+namespace {
+// Per-parameter escape data for a CERTIFIED polynomial (B2): R2 is the
+// squared escape radius max(rho(p), settings.escape_radius)^2 -- rho is
+// polynomial_escape_radius, a proof that |z| > R escapes -- and `offset`
+// is log|a_d| / (d - 1), the Boettcher-coordinate correction that keeps the
+// smooth value and Green's function right for a non-unit leading
+// coefficient (G(z) ~ (log|z_n| + offset) / d^n). Monic maps get offset
+// exactly 0.0, and x + 0.0 == x, so their arithmetic is bit-for-bit
+// unchanged.
+struct PolyEscape {
+    double R2 = 4.0;
+    double offset = 0.0;
+    double log_lead = 0.0;   // log|a_d| (0 for a monic map): the overflow estimate's constant
+};
+
+// `fit` (optional): the map's coefficients as polynomials in a, compiled
+// ONCE per render (RationalMap::compile_polynomial_coefficients_in_a). With
+// it, a parameter-plane pixel costs a Horner pass per coefficient instead of
+// a trip through the expression evaluator -- that trip made typed z^2 + a
+// ~40% slower than before the certified radius existed.
+PolyEscape poly_escape(const Map& map, const std::optional<Family>& recognized, Cplx p,
+                       double r_user, const PolyCoeffsInA* fit = nullptr,
+                       std::vector<Cplx>* scratch = nullptr) {
+    PolyEscape out;
+    const RationalMap* custom = map.custom_map();
+    std::optional<Family> fam = recognized;
+    if (!custom) fam = map.family();
+    if (fam) {   // z^d + p: |coeffs| = [|p|, 0, ..., 0, 1]
+        const int d = Map(*fam, Cplx(0.0, 0.0)).degree();
+        double c[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (d >= 2 && d < 8) {
+            c[0] = std::abs(p);
+            c[d] = 1.0;
+            const double R = polynomial_escape_radius_abs(c, d, r_user);
+            out.R2 = R * R;
+            return out;
+        }
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    std::vector<Cplx> local;
+    std::vector<Cplx>& coeffs = scratch ? *scratch : local;
+    if (fit && fit->valid) {
+        fit->eval(p, coeffs);
+        while (!coeffs.empty() && coeffs.back() == Cplx(0.0, 0.0)) coeffs.pop_back();
+    } else if (!custom->polynomial_coefficients(p, coeffs)) {
+        coeffs.clear();
+    }
+    if (coeffs.size() < 3) {
+        out.R2 = r_user * r_user;
+        return out;
+    }
+    const int d = static_cast<int>(coeffs.size()) - 1;
+    double stack[16];
+    std::vector<double> heap;
+    double* c = stack;
+    if (d >= 16) { heap.resize(static_cast<std::size_t>(d) + 1); c = heap.data(); }
+    // sqrt(norm), not std::abs: hypot's overflow care costs ~20 ns a call,
+    // paid per coefficient per parameter pixel, and |a_k|^2 cannot overflow
+    // for any coefficient a polynomial escape test could use anyway.
+    for (int k = 0; k <= d; ++k) c[k] = std::sqrt(std::norm(coeffs[static_cast<std::size_t>(k)]));
+    const double R = polynomial_escape_radius_abs(c, d, r_user);
+    out.R2 = R * R;
+    const double lead = c[d];
+    out.offset = lead == 1.0 ? 0.0 : std::log(lead) / static_cast<double>(d - 1);
+    out.log_lead = lead == 1.0 ? 0.0 : std::log(lead);
+    return out;
+}
+}  // namespace
+
+namespace {
+// The smooth escape value for a certified polynomial of degree d, at the
+// first (1-based) iteration n with |z_n| > R:
+//     nu = n + 1 - log_d( (log|z_n| + offset) / log R )
+// (offset = log|a_d|/(d-1), 0 for a monic map -- see PolyEscape). Because
+// log|z_{n+1}| ~ d log|z_n| far out, nu is continuous across escape-
+// iteration boundaries for every d; the old base-2 form was continuous only
+// for d = 2 and banded by log2(d) - 1 elsewhere (0.58 for z^3 + a, 1.32 for
+// z^5 + a). nu is NOT positive in general: an orbit that starts far outside
+// R gets nu < 1 and, far enough out, nu < 0 (as it already could in base
+// 2). Degenerate log R <= 0 (a user radius below 1 with a
+// certified radius of ~1) normalises by log 2 instead -- a constant shift,
+// still continuous.
+//
+// FAR-OUT EVALUATION. The formula is exactly continuous only if
+// log|z_{n+1}| = d log|z_n|, i.e. in the limit |z| -> inf. At |z| ~ R = 2
+// the lower-order terms are not negligible (z^3 + a at |a| ~ 2: |a^3 + a|
+// ranges over [6, 10]), which left a seam of up to 0.14 on the first band.
+// So escape is DECIDED at R (certified), but nu is EVALUATED after
+// iterating on until |z| > kSmoothFar (at most kSmoothExtra more steps,
+// stopping early if the next step would overflow), with n counting those
+// steps too. Same formula; its error falls like |a|/|z|^d. The extra steps
+// cost a handful of iterations on escaping pixels only.
+constexpr double kSmoothFar2  = 1e16;   // |z| > 1e8
+constexpr int    kSmoothExtra = 16;
+
+// From log|z_n| directly (see escape_log_mod for where that comes from when
+// z_n itself overflowed). A non-finite result falls back to the integer n.
+inline double smooth_escape_log(int n, double log_mod, const PolyEscape& esc, double inv_log_d) {
+    double log_R = 0.5 * std::log(esc.R2);
+    if (!(log_R > 0.0)) log_R = std::log(2.0);
+    const double nu = static_cast<double>(n) + 1.0 -
+                      std::log((log_mod + esc.offset) / log_R) * inv_log_d;
+    return std::isfinite(nu) ? nu : static_cast<double>(n);
+}
+
+inline double smooth_escape(int n, double m2, const PolyEscape& esc, double inv_log_d) {
+    return smooth_escape_log(n, std::log(std::sqrt(m2)), esc, inv_log_d);
+}
+
+// OVERFLOW. |z_n|^2 > kHuge (or inf/NaN): z_n is no longer representable,
+// which happens only for the very fastest escapes (z^5 + a at |z_0| ~ 1e62).
+// Reading that as "did not escape", or as nu = -inf / G = +inf, puts the
+// fastest escapes in the wrong place. log|z_n| is instead estimated from the
+// last finite iterate, log|z_n| ~ d log|z_{n-1}| + log|a_d| -- the leading
+// term, exact to ~|z_{n-1}|^-1 relative, and |z_{n-1}| is astronomically
+// large whenever this branch is reached from an orbit already past R.
+inline bool overflowed(double m2) { return !(m2 <= kHuge); }
+inline double escape_log_mod(double prev_r, double prev_i, double d, const PolyEscape& esc) {
+    return d * std::log(std::hypot(prev_r, prev_i)) + esc.log_lead;   // hypot: |z_{n-1}|^2 may overflow too
+}
+
+// G = (log|z_n| + offset) / d^n, never exactly 0 for an escaped orbit: G == 0
+// means "in the filled set", and d^n overflowing (2^1075 for d = 2, i.e.
+// max_iter > 1074) used to underflow G to exactly 0 -- an escaped pixel
+// reading as filled. Floored at the smallest positive double instead.
+inline double escape_potential(int n, double log_mod, double d, const PolyEscape& esc) {
+    const double g = (log_mod + esc.offset) / std::pow(d, static_cast<double>(n));
+    return g > 0.0 ? g : std::numeric_limits<double>::denorm_min();   // also catches NaN
+}
+
+// smooth_escape after the far-out continuation above. (zr, zi) is z_n, the
+// first iterate past R; `step` advances it in place.
+template <typename Step>
+inline double smooth_escape_far(int n, double zr, double zi, double m2, Step&& step,
+                                const PolyEscape& esc, double inv_log_d) {
+    for (int k = 0; k < kSmoothExtra && m2 <= kSmoothFar2; ++k) {
+        double nr = zr, ni = zi;
+        step(nr, ni);
+        const double nm2 = nr * nr + ni * ni;
+        if (is_bad(nm2) || nm2 > kHuge) break;   // keep the last finite iterate
+        zr = nr; zi = ni; m2 = nm2; ++n;
+    }
+    return smooth_escape(n, m2, esc, inv_log_d);
+}
+}  // namespace
+
 // -----------------------------------------------------------------------------
 // Julia
 // -----------------------------------------------------------------------------
@@ -620,10 +791,16 @@ ConformalPotential conformal_potential(const OrbitFate& fate) {
 // polynomial (see Map::escape_certified/polynomial_escape_certified's own
 // doc comments for why that certification is what makes it correct, not
 // just conventional).
-Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
+Image Renderer::render_julia_polynomial(Image& escaped, const std::atomic<bool>* cancel) const {
     const int  res  = view_.resolution;
-    const double R2 = settings_.escape_radius * settings_.escape_radius;
-    const double inv_log2 = 1.0 / std::log(2.0);
+    escaped = Image(res, res);
+    const RationalMap* jcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, jcustom ? recognize_family(*jcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double R2 = esc.R2;
+    const double jdeg = static_cast<double>(map_.degree());
+    const double inv_log_d = 1.0 / std::log(jdeg);
     Image img(res, res);
 
     // `a` = map_.param() is fixed for the WHOLE render, so the step plan --
@@ -637,20 +814,30 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
             const Cplx c = view_.coord(col, row);
             double zr = c.real(), zi = c.imag();
             double out = 0.0;
+            bool esc_px = false;
+            double prev_r = zr, prev_i = zi;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 plan.step(zr, zi);
                 const double m2 = zr * zr + zi * zi;
 
-                if (m2 > R2) {                       // per-pixel early exit
-                    const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
-                    out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
+                if (overflowed(m2)) {                // see escape_log_mod
+                    out = smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, jdeg, esc), esc,
+                                            inv_log_d);
+                    esc_px = true;
                     break;
                 }
-                if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
+                if (m2 > R2) {                       // per-pixel early exit
+                    out = smooth_escape_far(n + 1, zr, zi, m2,
+                                            [&](double& r, double& i) { plan.step(r, i); },
+                                            esc, inv_log_d);
+                    esc_px = true;
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = esc_px ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -682,9 +869,10 @@ Image Renderer::render_julia_polynomial(const std::atomic<bool>* cancel) const {
 // philosophy: punt to something reasonable rather than propagate a NaN
 // from a near-zero or negative log-ratio).
 Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
-                                      const std::atomic<bool>* cancel) const {
+                                      Image& escaped, const std::atomic<bool>* cancel) const {
     const int res = view_.resolution;
     Image img(res, res);
+    escaped = Image(res, res);
     if (labels) *labels = Image(res, res);
     if (cycles.empty()) return img;   // nothing to classify against -- every pixel unresolved
 
@@ -710,6 +898,7 @@ Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* l
                 ar, ai, aid, tol, settings_.max_iter);
 
             img.at(col, row) = fate.resolved ? fate.nu : 0.0;
+            escaped.at(col, row) = fate.resolved ? 1.0 : 0.0;
             if (labels) labels->at(col, row) = fate.resolved ? static_cast<double>(fate.label) : 0.0;
         }
     }, cancel);
@@ -717,9 +906,14 @@ Image Renderer::render_julia_rational(const std::vector<Cycle>& cycles, Image* l
 }
 
 Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<Cycle>& cycles,
-                             Image* labels) const {
-    if (map_.escape_certified()) return render_julia_polynomial(cancel);
-    return render_julia_rational(cycles, labels, cancel);
+                             Image* labels, Image* escaped) const {
+    Image local;
+    Image& esc = escaped ? *escaped : local;
+    if (map_.escape_certified()) {
+        if (labels) *labels = Image(view_.resolution, view_.resolution);
+        return render_julia_polynomial(esc, cancel);
+    }
+    return render_julia_rational(cycles, labels, esc, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -738,11 +932,11 @@ Image Renderer::render_julia(const std::atomic<bool>* cancel, const std::vector<
 // correct here because a CERTIFIED polynomial's infinity is ALWAYS
 // superattracting, so a fixed |z| > escape_radius test is a provably
 // forward-invariant trap (same reasoning as render_julia_polynomial's own).
-Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) const {
+Image Renderer::render_parameter_polynomial_unicritical(Image& escaped,
+                                                       const std::atomic<bool>* cancel) const {
     const int    res = view_.resolution;
-    const double R2  = settings_.escape_radius * settings_.escape_radius;
-    const double inv_log2 = 1.0 / std::log(2.0);
     Image img(res, res);
+    escaped = Image(res, res);
 
     // The parameter here is the PIXEL, not map_.param() -- everything below
     // is computed once per PIXEL, not once per render, unlike the other
@@ -764,8 +958,15 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
 
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+    const int degree = recognized ? Map(*recognized, Cplx(0.0, 0.0)).degree()
+                                  : custom ? custom->degree(Cplx(0.0, 0.0)) : map_.degree();
+    const double inv_log_d = 1.0 / std::log(static_cast<double>(degree));
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;
@@ -774,8 +975,13 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
             else c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
             double out = 0.0;
+            bool esc_px = false;
 
-            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            if (custom && !recognized) custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
+            const double R2 = esc.R2;
+            double prev_r = zr, prev_i = zi;
 
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
@@ -787,18 +993,176 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
                 }
                 const double m2 = zr * zr + zi * zi;
 
-                if (m2 > R2) {
-                    const double nu = static_cast<double>(n + 1) + 1.0 -
-                                      std::log(std::log(std::sqrt(m2))) * inv_log2;
-                    out = is_bad(nu) ? static_cast<double>(n + 1) : nu;
+                if (overflowed(m2)) {   // see escape_log_mod
+                    out = smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, degree, esc), esc,
+                                            inv_log_d);
+                    esc_px = true;
                     break;
                 }
-                if (is_bad(m2) || m2 > kHuge) { out = static_cast<double>(n + 1); break; }
+                if (m2 > R2) {
+                    out = smooth_escape_far(n + 1, zr, zi, m2, [&](double& r, double& i) {
+                        if (recognized) Map::step_with(*recognized, p.real(), p.imag(), r, i);
+                        else if (custom) compiled.step(r, i);
+                        else map_.step_with_param(p, r, i);
+                    }, esc, inv_log_d);
+                    esc_px = true;
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = esc_px ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
+}
+
+
+// -----------------------------------------------------------------------------
+// Several free critical points (B1). Every free critical orbit is iterated
+// per pixel and combined with the SAME ParameterStrategy semantics the
+// rational path uses -- see ParameterStrategy's own doc comment:
+//   Slowest     0 iff SOME free orbit stays bounded, else the largest smooth
+//               escape value (the slowest orbit to leave);
+//   Fastest     0 iff NO free orbit escapes (the connectedness locus), else
+//               the smallest smooth escape value;
+//   PerCritical the orbit critical_index selects (clamped into range).
+// Critical points are continued down each column (warm-started Newton on
+// the derivative numerator, as render_parameter_rational does), or computed
+// once when they do not move at all (critical_points_constant()).
+//
+// Smooth value: smooth_escape, n + 1 - log_d((log|z_n| + offset)/log R) at
+// the first n with |z_n| > R, R the certified radius (see PolyEscape) --
+// the same formula as the unicritical path.
+// -----------------------------------------------------------------------------
+Image Renderer::render_parameter_polynomial_multicritical(
+    ParameterStrategy strategy, int critical_index, const FreeCriticalStructure& free_s,
+    Image& escaped_img, const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    escaped_img = Image(res, res);
+    const RationalMap* custom = map_.custom_map();
+
+    const double mdeg = static_cast<double>(custom->degree(Cplx(0.0, 0.0)));
+    const double inv_log_d = 1.0 / std::log(mdeg);
+
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0),
+                                                custom->distinct_critical_points(Cplx(1.0, 0.0)),
+                                                free_s)
+                 : std::vector<Cplx>{};
+    // PerCritical needs the labelled order (see CriticalLabelBase); the
+    // symmetric strategies do not, and keep the cheaper continued solve.
+    const bool per_critical = strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base =
+        per_critical ? custom->critical_label_base() : CriticalLabelBase{};
+
+    // One orbit: 0 if it stays bounded for max_iter steps, else its smooth
+    // escape value (see smooth_escape -- not necessarily > 0).
+    auto escape_value = [&](const CompiledMap& compiled, const PolyEscape& esc, Cplx c0,
+                            bool& escaped) {
+        const double R2 = esc.R2;
+        double zr = c0.real(), zi = c0.imag();
+        double prev_r = zr, prev_i = zi;
+        escaped = false;
+        for (int n = 0; n < settings_.max_iter; ++n) {
+            compiled.step(zr, zi);
+            const double m2 = zr * zr + zi * zi;
+            if (overflowed(m2)) {   // see escape_log_mod
+                escaped = true;
+                return smooth_escape_log(n + 1, escape_log_mod(prev_r, prev_i, mdeg, esc), esc, inv_log_d);
+            }
+            if (m2 > R2) {
+                escaped = true;
+                return smooth_escape_far(n + 1, zr, zi, m2,
+                                         [&](double& r, double& i) { compiled.step(r, i); },
+                                         esc, inv_log_d);
+            }
+            prev_r = zr; prev_i = zi;
+        }
+        return 0.0;
+    };
+
+    const PolyCoeffsInA esc_fit = custom->compile_polynomial_coefficients_in_a();
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit;
+            if (per_critical) {
+                crit = custom->critical_point_labels(p, label_base);
+            } else if (cp_fixed) {
+                crit = fixed_free;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                prev_ordinary = cc.ordinary_raw;
+                crit = custom->free_critical_points(p, cc.distinct, free_s);
+            }
+            if (crit.empty()) { img.at(col, row) = 0.0; continue; }
+
+            custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, std::nullopt, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
+            // Escape status is tracked as a flag, never inferred from the
+            // value: smooth values can be <= 0 (see smooth_escape), so a 0
+            // sentinel inside the combiners would misread fast escapes.
+            double out = 0.0;
+            bool px_escaped = false;
+            bool escaped = false;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {   // escaped iff EVERY free orbit escaped
+                    double worst = -std::numeric_limits<double>::infinity();
+                    px_escaped = true;
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, esc, c0, escaped);
+                        if (!escaped) { px_escaped = false; break; }   // a bounded orbit decides it
+                        worst = std::max(worst, v);
+                    }
+                    out = px_escaped ? worst : 0.0;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {   // escaped iff ANY free orbit escaped
+                    double best = std::numeric_limits<double>::infinity();
+                    for (const Cplx& c0 : crit) {
+                        const double v = escape_value(compiled, esc, c0, escaped);
+                        if (escaped) { px_escaped = true; best = std::min(best, v); }
+                    }
+                    out = px_escaped ? best : 0.0;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(crit.size()) - 1);
+                    out = escape_value(compiled, esc, crit[static_cast<std::size_t>(idx)], escaped);
+                    px_escaped = escaped;
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+            escaped_img.at(col, row) = px_escaped ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// Dispatch for a certified polynomial. A recognised built-in shape, or a
+// map with at most ONE free critical point (z^d + a, any
+// critical_points_constant() unicritical map, z^2 + a z, ...), keeps the
+// single-orbit path unchanged; several free critical points take the
+// multi-critical path above.
+Image Renderer::render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
+                                            Image& escaped, const std::atomic<bool>* cancel) const {
+    const RationalMap* custom = map_.custom_map();
+    if (!custom || recognize_family(*custom)) return render_parameter_polynomial_unicritical(escaped, cancel);
+    const FreeCriticalStructure free_s = custom->free_critical_structure();
+    if (free_s.generic_free_count <= 1) return render_parameter_polynomial_unicritical(escaped, cancel);
+    return render_parameter_polynomial_multicritical(strategy, critical_index, free_s, escaped,
+                                                     cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -807,9 +1171,17 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
 // git-history context (the reverted "AllCaptured/FastestCapture/PerCritical"
 // attempt this generalizes correctly).
 //
-// Custom map: every free critical point (RationalMap::distinct_critical_
-// points(a), UNFILTERED) is classified against complete_attractors_from_
-// seeds' own discovery at that SAME seed list -- one extra find_attractors
+// Custom map: every FREE critical point (RationalMap::free_critical_points
+// -- the one shared rule, FreeCriticalStructure; Bug C) is classified
+// against complete_attractors_from_seeds' own discovery, which still seeds
+// from EVERY distinct critical point. Classifying the structurally pre-fixed
+// ones too was Bug C: for z^n + a/z^n the list holds 0 (a double pole,
+// f(0) = inf) and inf (superattracting, fixed) for every a. Under Slowest an
+// unresolved orbit through the pole blanked every pixel; under Fastest inf
+// resolved at the same speed everywhere and made the plane constant. With
+// zero free critical points (a has no effect on any critical orbit) every
+// pixel is 0 -- the same honest uniform plane the app already reports as
+// "a has no effect". Discovery runs at that SAME seed list -- one extra find_attractors
 // pass per pixel beyond what render_parameter_basin already pays, since the
 // two methods answer different questions (a count vs a per-critical smooth
 // rate) and neither can be derived from the other's own return shape alone.
@@ -828,15 +1200,24 @@ Image Renderer::render_parameter_polynomial(const std::atomic<bool>* cancel) con
 // symmetry, so nothing is lost by not also calling the synthesized map's
 // own distinct_critical_points here).
 Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critical_index,
-                                          const std::atomic<bool>* cancel) const {
+                                          Image& escaped, const std::atomic<bool>* cancel) const {
+    if (!reconciled_parameter_path_)
+        return render_parameter_rational_orbits(strategy, critical_index, escaped, cancel);
     const int res = view_.resolution;
     Image img(res, res);
+    escaped = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     const std::optional<Family> recognized = custom ? recognize_family(*custom) : std::nullopt;
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const std::vector<Cplx> fixed_crit_pts =
         cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+    // The free/pre-fixed split is structural: once per render (Bug C).
+    const FreeCriticalStructure free_s =
+        custom ? custom->free_critical_structure() : FreeCriticalStructure{};
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0), fixed_crit_pts, free_s)
+                 : std::vector<Cplx>{};
 
     std::optional<RationalMap> synthesized;
     const RationalMap* discovery_map = custom;
@@ -855,6 +1236,13 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
     // parameter_basin's own identical choice -- see that method's comment.
     const FindAttractorsOptions opts;
 
+    // PerCritical on a Custom map selects by the labelling convention
+    // (CriticalLabelBase): critical_index means the same free critical point
+    // here as in the polynomial path and in parameter_period.
+    const bool labelled = custom && strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base = labelled ? custom->critical_label_base()
+                                                  : CriticalLabelBase{};
+
     // Stage 2 (spatial continuation): within one column, rows are already
     // processed strictly sequentially by a single thread (parallel_columns
     // parallelizes ACROSS columns, not within one -- see its own comment),
@@ -870,17 +1258,23 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
 
-            std::vector<Cplx> crit_pts;
+            std::vector<Cplx> crit_pts;   // every distinct critical point: discovery seeds
+            std::vector<Cplx> free_pts;   // the free ones: what the strategies classify
             if (custom && cp_fixed) {
                 crit_pts = fixed_crit_pts;
+                free_pts = fixed_free;
             } else if (custom) {
                 const ContinuedCriticalPoints cc =
                     custom->distinct_critical_points_continued(p, prev_ordinary);
                 crit_pts = cc.distinct;
                 prev_ordinary = cc.ordinary_raw;
+                free_pts = custom->free_critical_points(p, crit_pts, free_s);
             } else {
                 crit_pts.push_back(map_.critical_point_at(p));
+                free_pts = crit_pts;
             }
+            // No free critical point: nothing here depends on a. Honest 0.
+            if (free_pts.empty()) { img.at(col, row) = 0.0; continue; }
 
             std::vector<Cplx> fp_raw_next;
             const std::vector<Cycle> cycles = complete_attractors_from_seeds(
@@ -904,45 +1298,62 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
                 else map_.step_with_param(p, zr, zi);
             };
 
+            // PerCritical (Custom): classify only the selected LABELLED free
+            // critical point. Discovery above still seeds from every one.
+            std::vector<Cplx> tracked = free_pts;
+            if (labelled) {
+                const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
+                tracked.clear();
+                if (!lab.empty()) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(lab.size()) - 1);
+                    tracked.push_back(lab[static_cast<std::size_t>(idx)]);
+                }
+            }
+
             std::vector<OrbitFate> fates;
-            fates.reserve(crit_pts.size());
-            for (const Cplx& c0 : crit_pts) {
+            fates.reserve(tracked.size());
+            for (const Cplx& c0 : tracked) {
                 const Cplx seed = nudge_seed_off_pole(c0, *discovery_map, p);
                 fates.push_back(classify_rational_orbit(seed.real(), seed.imag(), step, ar, ai, aid,
                                                          settings_.tol, settings_.max_iter));
             }
 
             double out = 0.0;
+            bool px_resolved = false;
             switch (strategy) {
                 case ParameterStrategy::Slowest: {
                     bool all_resolved = !fates.empty();
-                    double worst = 0.0;
+                    double worst = -std::numeric_limits<double>::infinity();
                     for (const OrbitFate& f : fates) {
                         if (!f.resolved) { all_resolved = false; break; }
                         worst = std::max(worst, f.nu);
                     }
+                    px_resolved = all_resolved;
                     out = all_resolved ? worst : 0.0;
                     break;
                 }
                 case ParameterStrategy::Fastest: {
-                    double best = kHuge;
-                    bool any_resolved = false;
+                    double best = std::numeric_limits<double>::infinity();
                     for (const OrbitFate& f : fates) {
-                        if (f.resolved) { any_resolved = true; best = std::min(best, f.nu); }
+                        if (f.resolved) { px_resolved = true; best = std::min(best, f.nu); }
                     }
-                    out = any_resolved ? best : 0.0;
+                    out = px_resolved ? best : 0.0;
                     break;
                 }
                 case ParameterStrategy::PerCritical: {
+                    // Custom: `fates` holds just the labelled selection.
+                    // Built-in rational family: its single representative.
                     if (!fates.empty()) {
-                        const int idx =
-                            std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
-                        out = fates[idx].resolved ? fates[idx].nu : 0.0;
+                        const int idx = labelled ? 0
+                            : std::clamp(critical_index, 0, static_cast<int>(fates.size()) - 1);
+                        px_resolved = fates[idx].resolved;
+                        out = px_resolved ? fates[idx].nu : 0.0;
                     }
                     break;
                 }
             }
             img.at(col, row) = out;
+            escaped.at(col, row) = px_resolved ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -952,11 +1363,17 @@ Image Renderer::render_parameter_rational(ParameterStrategy strategy, int critic
 // already uses; see render_parameter's own header doc comment for what each
 // path means.
 Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrategy strategy,
-                                 int critical_index) const {
+                                 int critical_index, Image* escaped) const {
+    Image local;
+    Image& esc = escaped ? *escaped : local;
     // A composed map has no free parameter (see Map::composed): honest zeros.
-    if (map_.family() == Family::Composed) return Image(view_.resolution, view_.resolution);
-    if (map_.escape_certified()) return render_parameter_polynomial(cancel);
-    return render_parameter_rational(strategy, critical_index, cancel);
+    if (map_.family() == Family::Composed) {
+        esc = Image(view_.resolution, view_.resolution);
+        return Image(view_.resolution, view_.resolution);
+    }
+    if (map_.escape_certified())
+        return render_parameter_polynomial(strategy, critical_index, esc, cancel);
+    return render_parameter_rational(strategy, critical_index, esc, cancel);
 }
 
 // -----------------------------------------------------------------------------
@@ -979,6 +1396,7 @@ Image Renderer::render_parameter(const std::atomic<bool>* cancel, ParameterStrat
 // -----------------------------------------------------------------------------
 Image Renderer::render_parameter_basin(const std::atomic<bool>* cancel, Image* unresolved,
                                        Image* certain) const {
+    if (!reconciled_parameter_path_) return render_parameter_basin_orbits(cancel, unresolved, certain);
     const int res = view_.resolution;
     Image img(res, res);
     if (unresolved) *unresolved = Image(res, res);
@@ -1075,6 +1493,8 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
             }
             return seeds;
         }
+        case CriticalPointFamily::FromMap:
+            break;   // per-pixel continuation; handled in render_parameter_period itself
     }
     return {};   // unreachable for a valid enumerator; never guess a seed list
 }
@@ -1083,11 +1503,16 @@ std::vector<Cplx> tracked_seeds(CriticalPointFamily seed_family, int n, Cplx a) 
 
 Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
                                         const std::atomic<bool>* cancel, Image* undetermined,
-                                        Image* is_infinity) const {
+                                        Image* is_infinity, int critical_index,
+                                        Image* mixed) const {
+    if (!reconciled_parameter_path_)
+        return render_parameter_period_orbits(seed_family, n, cancel, undetermined, is_infinity,
+                                              critical_index, mixed);
     const int res = view_.resolution;
     Image img(res, res);
     if (undetermined) *undetermined = Image(res, res);
     if (is_infinity) *is_infinity = Image(res, res);
+    if (mixed) *mixed = Image(res, res);
 
     const RationalMap* custom = map_.custom_map();
     // An all-undetermined degenerate image (never guessed) matches
@@ -1101,27 +1526,57 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
     }
 
     const FindAttractorsOptions opts;
+    const bool from_map = seed_family == CriticalPointFamily::FromMap;
+
+    // FromMap: the free/pre-fixed split is structural -- once per render.
+    // A map whose critical points do not move gets them once, too.
+    // Seeds come in LABEL order (CriticalLabelBase), so critical_index is
+    // the same free critical point as in render_parameter's PerCritical.
+    const CriticalLabelBase label_base =
+        from_map ? custom->critical_label_base() : CriticalLabelBase{};
 
     parallel_columns([&](int col) {
         for (int row = 0; row < res; ++row) {
             const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
-            const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
 
             int period = 0;
             bool inf_flag = false;
             bool resolved_any = false;
-            if (!seeds.empty()) {
-                // First tracked seed (in `seeds`' own generation order) that
-                // resolves wins -- see render_parameter_period's own doc
-                // comment for why this is a tie-break for RelaxedNewtonPower
-                // specifically (its n seeds are equivariant-guaranteed to
-                // agree), not a general disagreement policy.
-                for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
-                    if (outcome.resolved) {
-                        period = outcome.period;
-                        inf_flag = outcome.is_infinity;
+            bool mixed_flag = false;
+
+            if (from_map) {
+                const std::vector<Cplx> seeds = custom->critical_point_labels(a, label_base);
+                if (!seeds.empty()) {
+                    const std::vector<SeedOutcome> outs = per_seed_outcomes(seeds, *custom, a, opts);
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(outs.size()) - 1);
+                    const SeedOutcome& sel = outs[static_cast<std::size_t>(idx)];
+                    if (sel.resolved) {
+                        period = sel.period;
+                        inf_flag = sel.is_infinity;
                         resolved_any = true;
-                        break;
+                    }
+                    const SeedOutcome* first = nullptr;
+                    for (const SeedOutcome& o : outs) {
+                        if (!o.resolved) continue;
+                        if (!first) { first = &o; continue; }
+                        if (!same_cycle(*first, o, opts.tol * 1e3)) { mixed_flag = true; break; }
+                    }
+                }
+            } else {
+                const std::vector<Cplx> seeds = tracked_seeds(seed_family, n, a);
+                if (!seeds.empty()) {
+                    // First tracked seed (in `seeds`' own generation order) that
+                    // resolves wins -- see render_parameter_period's own doc
+                    // comment for why this is a tie-break for RelaxedNewtonPower
+                    // specifically (its n seeds are equivariant-guaranteed to
+                    // agree), not a general disagreement policy.
+                    for (const SeedOutcome& outcome : per_seed_outcomes(seeds, *custom, a, opts)) {
+                        if (outcome.resolved) {
+                            period = outcome.period;
+                            inf_flag = outcome.is_infinity;
+                            resolved_any = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -1129,6 +1584,358 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
             img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
             if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
             if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+            if (mixed) mixed->at(col, row) = mixed_flag ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// -----------------------------------------------------------------------------
+// Parameter planes from the FREE critical orbits alone (critical_orbits.hpp).
+// The default for `parameter` on a rational map, `parameter_basin` and
+// `parameter_period`; the reconciled per-pixel path above is kept behind
+// set_reconciled_parameter_path as a test oracle and for A/B timing only.
+// Full attractor reconciliation (complete_attractors) stays for single-
+// parameter uses: Facts, dynamical basin, overlays.
+// -----------------------------------------------------------------------------
+namespace {
+
+// Iterations a parameter-plane orbit gets in parameter_basin / parameter_
+// period: the budget the reconciled path's discovery had per orbit (burn-in
+// + a closure window + the weakly-attracting extension + its window), so a
+// slowly-attracting cycle the old path resolved is not given up on sooner.
+// `parameter` uses settings.max_iter instead, the budget its classification
+// always had.
+int discovery_budget(int max_iter) {
+    const FindAttractorsOptions o;
+    return std::max(max_iter, o.burn_in + o.max_period + o.extended_max_period + o.max_period);
+}
+
+bool same_point(Cplx a, Cplx b) { return a == b || (a != a && b != b); }
+
+// The rational-map representation the orbit tracker needs, for a Map that
+// may be a built-in family with no RationalMap behind it (never the app).
+const RationalMap* orbit_map(const Map& m, std::optional<RationalMap>& synthesized) {
+    if (m.custom_map()) return m.custom_map();
+    switch (m.family()) {
+        case Family::McMullen2: synthesized = RationalMap::mcmullen(2); break;
+        case Family::McMullen3: synthesized = RationalMap::mcmullen(3); break;
+        case Family::Newton3:   synthesized = RationalMap::newton_cubic(); break;
+        case Family::Quadratic: synthesized = RationalMap::mandelbrot(); break;
+        case Family::Cubic:     synthesized = RationalMap::multibrot(3); break;
+        case Family::Quintic:   synthesized = RationalMap::multibrot(5); break;
+        default: return nullptr;
+    }
+    return &*synthesized;
+}
+
+}  // namespace
+
+Image Renderer::render_parameter_rational_orbits(ParameterStrategy strategy, int critical_index,
+                                                 Image& escaped,
+                                                 const std::atomic<bool>* cancel) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    escaped = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    std::optional<RationalMap> synthesized;
+    const RationalMap* rmap = orbit_map(map_, synthesized);
+    if (!rmap) return img;
+
+    const bool cp_fixed = custom && custom->critical_points_constant();
+    const FreeCriticalStructure free_s =
+        custom ? custom->free_critical_structure() : FreeCriticalStructure{};
+    const std::vector<Cplx> fixed_free =
+        cp_fixed ? custom->free_critical_points(Cplx(1.0, 0.0),
+                                                custom->distinct_critical_points(Cplx(1.0, 0.0)), free_s)
+                 : std::vector<Cplx>{};
+    const bool labelled = custom && strategy == ParameterStrategy::PerCritical;
+    const CriticalLabelBase label_base = labelled ? custom->critical_label_base() : CriticalLabelBase{};
+
+    CriticalOrbitOptions opts;
+    opts.budget = settings_.max_iter;
+    opts.tol = settings_.tol;
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> tracked;
+            if (labelled) {
+                const std::vector<Cplx> lab = custom->critical_point_labels(p, label_base);
+                if (!lab.empty()) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(lab.size()) - 1);
+                    tracked.push_back(lab[static_cast<std::size_t>(idx)]);
+                }
+            } else if (cp_fixed) {
+                tracked = fixed_free;
+            } else if (custom) {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                prev_ordinary = cc.ordinary_raw;
+                tracked = custom->free_critical_points(p, cc.distinct, free_s);
+            } else {
+                tracked.push_back(map_.critical_point_at(p));
+            }
+            if (tracked.empty()) continue;   // no free critical point: honest 0, not escaped
+
+            rmap->compile_into(p, compiled);
+            const InfinityStatus inf = infinity_status(compiled);
+
+            bool px_resolved = false;
+            double out = 0.0;
+            switch (strategy) {
+                case ParameterStrategy::Slowest: {   // resolved iff EVERY free orbit is
+                    double worst = -std::numeric_limits<double>::infinity();
+                    px_resolved = true;
+                    for (const Cplx& c0 : tracked) {
+                        const CriticalOrbitOutcome o = track_critical_orbit(compiled, inf, c0, opts);
+                        if (!o.resolved()) { px_resolved = false; break; }
+                        worst = std::max(worst, o.nu);
+                    }
+                    out = px_resolved ? worst : 0.0;
+                    break;
+                }
+                case ParameterStrategy::Fastest: {   // resolved iff ANY free orbit is
+                    double best = std::numeric_limits<double>::infinity();
+                    for (const Cplx& c0 : tracked) {
+                        const CriticalOrbitOutcome o = track_critical_orbit(compiled, inf, c0, opts);
+                        if (o.resolved()) { px_resolved = true; best = std::min(best, o.nu); }
+                    }
+                    out = px_resolved ? best : 0.0;
+                    break;
+                }
+                case ParameterStrategy::PerCritical: {
+                    const int idx = labelled ? 0
+                        : std::clamp(critical_index, 0, static_cast<int>(tracked.size()) - 1);
+                    const CriticalOrbitOutcome o =
+                        track_critical_orbit(compiled, inf, tracked[static_cast<std::size_t>(idx)], opts);
+                    px_resolved = o.resolved();
+                    out = px_resolved ? o.nu : 0.0;
+                    break;
+                }
+            }
+            img.at(col, row) = out;
+            escaped.at(col, row) = px_resolved ? 1.0 : 0.0;
+        }
+    }, cancel);
+    return img;
+}
+
+// parameter_basin from the free critical orbits. The count is
+//   (attractors of the STRUCTURALLY pre-fixed critical points, in closed
+//    form: infinity when it attracts, each finite target w = f(c) with
+//    |f'(w)| < 1)
+// + (distinct attracting cycles the free orbits reach, deduplicated against
+//    those and against each other by chordal distance between cycle point
+//    sets).
+// Every pre-fixed critical point's orbit is the same for every a, so its
+// attractor (if any) is known without iterating; every OTHER attracting
+// cycle attracts a free critical point (Fatou). `unresolved` = free orbits
+// left undetermined (neutral / parabolic / Siegel / out of budget).
+// `certain` keeps its meaning -- attractors in the count known ONLY
+// algebraically, injected by the fixed-point union, never reached by a
+// critical orbit -- and is therefore always 0 here: nothing is injected.
+// A structural attractor is where a pre-fixed critical point's own orbit
+// goes, which the reconciled path counted as "found by critical seeding",
+// not certain.
+Image Renderer::render_parameter_basin_orbits(const std::atomic<bool>* cancel, Image* unresolved,
+                                              Image* certain) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (unresolved) *unresolved = Image(res, res);
+    if (certain) *certain = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    if (!custom) return img;   // as the reconciled path: no RationalMap, honest zeros
+
+    const bool poly = map_.escape_certified();
+    const std::optional<Family> recognized = recognize_family(*custom);
+    const PolyCoeffsInA esc_fit =
+        (poly && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+    const bool cp_fixed = custom->critical_points_constant();
+    const std::vector<Cplx> fixed_crit_pts =
+        cp_fixed ? custom->distinct_critical_points(Cplx(1.0, 0.0)) : std::vector<Cplx>{};
+    const FreeCriticalStructure free_s = custom->free_critical_structure();
+
+    CriticalOrbitOptions opts;
+    opts.budget = discovery_budget(settings_.max_iter);
+    opts.tol = settings_.tol;
+    constexpr double kSame = 1e-6;   // chordal: the reconciled path's dedupe tolerance
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> prev_ordinary, scratch;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
+
+            std::vector<Cplx> crit_pts;
+            if (cp_fixed) {
+                crit_pts = fixed_crit_pts;
+            } else {
+                const ContinuedCriticalPoints cc =
+                    custom->distinct_critical_points_continued(p, prev_ordinary);
+                crit_pts = cc.distinct;
+                prev_ordinary = cc.ordinary_raw;
+            }
+            const std::vector<Cplx> free_pts = custom->free_critical_points(p, crit_pts, free_s);
+
+            custom->compile_into(p, compiled);
+            const InfinityStatus inf = infinity_status(compiled);
+            CriticalOrbitOptions o = opts;
+            if (poly) {
+                const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                                   &esc_fit, &scratch);
+                o.poly_R2 = esc.R2;
+            }
+
+            // Structural attractors: where the pre-fixed critical points go.
+            bool inf_attractor = false;
+            std::vector<Cplx> finite_attractors;
+            for (const Cplx& c : crit_pts) {
+                bool is_free = false;
+                for (const Cplx& f : free_pts) if (same_point(c, f)) { is_free = true; break; }
+                if (is_free) continue;
+                bool to_inf = true;   // infinity itself, or a pole (-> infinity)
+                if (std::isfinite(c.real()) && std::isfinite(c.imag())) {
+                    for (const Cplx& e : free_s.excluded_finite) {
+                        if (std::abs(c - e) < 1e-4 * std::max(1.0, std::abs(e))) { to_inf = false; break; }
+                    }
+                }
+                if (to_inf) { inf_attractor = poly || inf.attracting(); continue; }
+                const Cplx w = compiled.eval_c(c);
+                if (!(std::isfinite(w.real()) && std::isfinite(w.imag())) || std::norm(w) > 1e280) {
+                    inf_attractor = poly || inf.attracting();
+                    continue;
+                }
+                if (!(std::abs(compiled.deriv_c(w)) < 1.0)) continue;   // target not attracting
+                bool dup = false;
+                for (const Cplx& a : finite_attractors) if (chordal_distance(a.real(), a.imag(), w.real(), w.imag()) < kSame) dup = true;
+                if (!dup) finite_attractors.push_back(w);
+            }
+
+            std::vector<CriticalOrbitOutcome> found;
+            int unresolved_n = 0;
+            for (const Cplx& c0 : free_pts) {
+                CriticalOrbitOutcome out = track_critical_orbit(compiled, inf, c0, o);
+                if (!out.resolved()) { ++unresolved_n; continue; }
+                if (out.kind == CriticalOrbitOutcome::Kind::Infinity) { inf_attractor = true; continue; }
+                bool dup = false;
+                if (out.period == 1) {
+                    for (const Cplx& a : finite_attractors) {
+                        if (chordal_distance(a.real(), a.imag(), out.cycle[0].real(), out.cycle[0].imag()) < kSame)
+                            dup = true;
+                    }
+                }
+                for (const CriticalOrbitOutcome& f : found) if (!dup && same_attractor(f, out, kSame)) dup = true;
+                if (!dup) found.push_back(std::move(out));
+            }
+            const int count = (inf_attractor ? 1 : 0) + static_cast<int>(finite_attractors.size()) +
+                              static_cast<int>(found.size());
+            img.at(col, row) = static_cast<double>(count);
+            if (unresolved) unresolved->at(col, row) = static_cast<double>(unresolved_n);
+            // certain: always 0 (see the header comment) -- the image is zeroed above.
+        }
+    }, cancel);
+    return img;
+}
+
+// parameter_period from the free critical orbits: the period of the cycle
+// the TRACKED critical orbit lands on -- seeds exactly as the reconciled
+// path (FromMap: the labelled free critical points, critical_index
+// selecting; RelaxedNewtonPower: the closed form, first resolved wins) --
+// classified by track_critical_orbit instead of per_seed_outcomes.
+Image Renderer::render_parameter_period_orbits(CriticalPointFamily seed_family, int n,
+                                               const std::atomic<bool>* cancel, Image* undetermined,
+                                               Image* is_infinity, int critical_index,
+                                               Image* mixed) const {
+    const int res = view_.resolution;
+    Image img(res, res);
+    if (undetermined) *undetermined = Image(res, res);
+    if (is_infinity) *is_infinity = Image(res, res);
+    if (mixed) *mixed = Image(res, res);
+
+    const RationalMap* custom = map_.custom_map();
+    if (!custom) {
+        if (undetermined) for (double& v : undetermined->data) v = 1.0;
+        return img;
+    }
+
+    const bool from_map = seed_family == CriticalPointFamily::FromMap;
+    const CriticalLabelBase label_base =
+        from_map ? custom->critical_label_base() : CriticalLabelBase{};
+    const bool poly = map_.escape_certified();
+    const std::optional<Family> recognized = recognize_family(*custom);
+    const PolyCoeffsInA esc_fit =
+        (poly && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
+
+    CriticalOrbitOptions opts;
+    opts.budget = discovery_budget(settings_.max_iter);
+    opts.tol = settings_.tol;
+    constexpr double kSame = 1e-6;   // the reconciled path's same_cycle tolerance
+
+    parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;
+        for (int row = 0; row < res; ++row) {
+            const Cplx a = view_.coord(col, row);      // the PIXEL is the parameter
+            const std::vector<Cplx> seeds = from_map ? custom->critical_point_labels(a, label_base)
+                                                     : tracked_seeds(seed_family, n, a);
+            int period = 0;
+            bool inf_flag = false, resolved_any = false, mixed_flag = false;
+            if (!seeds.empty()) {
+                custom->compile_into(a, compiled);
+                const InfinityStatus inf = infinity_status(compiled);
+                CriticalOrbitOptions o = opts;
+                if (poly) {
+                    o.poly_R2 = poly_escape(map_, recognized, a, settings_.escape_radius, &esc_fit,
+                                            &scratch).R2;
+                }
+                if (from_map) {
+                    const int idx = std::clamp(critical_index, 0, static_cast<int>(seeds.size()) - 1);
+                    std::vector<CriticalOrbitOutcome> outs;
+                    outs.reserve(seeds.size());
+                    for (const Cplx& s0 : seeds) outs.push_back(track_critical_orbit(compiled, inf, s0, o));
+                    const CriticalOrbitOutcome& sel = outs[static_cast<std::size_t>(idx)];
+                    if (sel.resolved()) {
+                        period = sel.period;
+                        inf_flag = sel.kind == CriticalOrbitOutcome::Kind::Infinity;
+                        resolved_any = true;
+                    }
+                    const CriticalOrbitOutcome* first = nullptr;
+                    for (const CriticalOrbitOutcome& oc : outs) {
+                        if (!oc.resolved()) continue;
+                        if (!first) { first = &oc; continue; }
+                        if (!same_attractor(*first, oc, kSame)) { mixed_flag = true; break; }
+                    }
+                } else {
+                    // First resolved wins. The closed-form seeds are images of
+                    // each other under z -> omega z, which conjugates N_a to
+                    // itself (N_a(omega z) = omega N_a(z)), so their fates agree
+                    // in exact arithmetic: seed 0 plus ONE tie-break seed for a
+                    // numerical straggler, not all n -- an undetermined pixel
+                    // (40% of the default relaxed-Newton view) otherwise ran the
+                    // full budget n times over.
+                    const std::size_t n_try = std::min<std::size_t>(seeds.size(), 2);
+                    for (std::size_t k = 0; k < n_try; ++k) {
+                        const Cplx& s0 = seeds[k];
+                        const CriticalOrbitOutcome oc = track_critical_orbit(compiled, inf, s0, o);
+                        if (oc.resolved()) {
+                            period = oc.period;
+                            inf_flag = oc.kind == CriticalOrbitOutcome::Kind::Infinity;
+                            resolved_any = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            img.at(col, row) = inf_flag ? 0.0 : static_cast<double>(period);
+            if (undetermined) undetermined->at(col, row) = resolved_any ? 0.0 : 1.0;
+            if (is_infinity) is_infinity->at(col, row) = inf_flag ? 1.0 : 0.0;
+            if (mixed) mixed->at(col, row) = mixed_flag ? 1.0 : 0.0;
         }
     }, cancel);
     return img;
@@ -1146,7 +1953,6 @@ Image Renderer::render_parameter_period(CriticalPointFamily seed_family, int n,
 // render_greens_polynomial.
 Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
     Image img(res, res);
 
     // See render_parameter for the three-path critical-point/step
@@ -1167,8 +1973,12 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
     else if (custom) degree = custom->degree(Cplx(0.0, 0.0));
     else degree = map_.degree();
     const double ddeg = static_cast<double>(degree);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
+        CompiledMap compiled;   // refilled per pixel, buffers reused
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;
@@ -1177,14 +1987,21 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
             else c0 = map_.critical_point_at(p);
             double zr = c0.real(), zi = c0.imag();
 
-            const CompiledMap compiled = (custom && !recognized) ? custom->compile(p) : CompiledMap{};
+            if (custom && !recognized) custom->compile_into(p, compiled);
+            const PolyEscape esc = poly_escape(map_, recognized, p, settings_.escape_radius,
+                                               &esc_fit, &scratch);
+            const double escR = std::sqrt(esc.R2);
 
             // Escape-rate potential G(z) = lim d^-n log+|f^n(z)|: normalize
             // AT the pixel's own escape iteration, not against a single
             // global max_iter^degree (see render_greens' own comment for
             // why the old accumulate-then-divide-by-degree^max_iter form
             // was simply wrong, not just overflow-prone).
+            // Escaped orbits always get G > 0 (escape_potential), and an
+            // overflowing one is estimated, not dropped (escape_log_mod):
+            // G == 0 is reserved for "never escaped" -- the filled set.
             double g = 0.0;
+            double prev_r = zr, prev_i = zi;
             for (int n = 0; n < settings_.max_iter; ++n) {
                 if (recognized) {
                     Map::step_with(*recognized, p.real(), p.imag(), zr, zi);
@@ -1193,13 +2010,17 @@ Image Renderer::render_parameter_greens_polynomial(const std::atomic<bool>* canc
                 } else {
                     map_.step_with_param(p, zr, zi);
                 }
-                const double mag = std::sqrt(zr * zr + zi * zi);
-                if (is_bad(mag)) break;
-                if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
-                    if (is_bad(g)) g = 0.0;
+                const double m2 = zr * zr + zi * zi;
+                if (overflowed(m2)) {
+                    g = escape_potential(n + 1, escape_log_mod(prev_r, prev_i, ddeg, esc), ddeg, esc);
                     break;
                 }
+                const double mag = std::sqrt(m2);
+                if (mag > escR) {
+                    g = escape_potential(n + 1, std::log(mag), ddeg, esc);
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = g;
         }
@@ -1236,8 +2057,11 @@ Image Renderer::render_parameter_greens_rational(GreensPotential potential, Imag
 
     const bool cp_fixed = !recognized && custom && custom->critical_points_constant();
     const Cplx fixed_c0 = cp_fixed ? map_.critical_point_at(Cplx(1.0, 0.0)) : Cplx(0.0, 0.0);
+    const PolyCoeffsInA esc_fit =
+        (custom && !recognized) ? custom->compile_polynomial_coefficients_in_a() : PolyCoeffsInA{};
 
     parallel_columns([&](int col) {
+        std::vector<Cplx> scratch;
         for (int row = 0; row < res; ++row) {
             const Cplx p = view_.coord(col, row);      // the PIXEL is the parameter
             Cplx c0;
@@ -1346,7 +2170,11 @@ Image Renderer::render_basin(const std::vector<Cycle>& cycles, Image* iterations
 // nothing a `potential` selector would even distinguish here.
 Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const {
     const int    res  = view_.resolution;
-    const double escR = settings_.escape_radius;
+    const RationalMap* gcustom = map_.custom_map();
+    const PolyEscape esc = poly_escape(
+        map_, gcustom ? recognize_family(*gcustom) : std::nullopt, map_.param(),
+        settings_.escape_radius);
+    const double escR = std::sqrt(esc.R2);
     const double ddeg = static_cast<double>(map_.degree());
     Image img(res, res);
 
@@ -1375,19 +2203,25 @@ Image Renderer::render_greens_polynomial(const std::atomic<bool>* cancel) const 
             // used to guard against (`normalized`/kHuge/is_bad on the
             // accumulator): std::pow(degree, n+1) is only ever evaluated
             // at ONE pixel's own escape step, essentially never near
-            // max_iter, and even if it were, IEEE division by +inf
-            // degrades gracefully to +0.0 for that single pixel rather
-            // than requiring a whole-image escape hatch.
+            // max_iter; when it is (d^n overflows past max_iter ~1074 for
+            // d = 2), escape_potential floors G at the smallest positive
+            // double rather than letting it read as the filled set's 0.
+            // See render_parameter_greens_polynomial: escaped => G > 0.
             double g = 0.0;
+            double prev_r = zr, prev_i = zi;
             for (int n = 0; n < settings_.max_iter; ++n) {
                 plan.step(zr, zi);
-                const double mag = std::sqrt(zr * zr + zi * zi);
-                if (is_bad(mag)) break;
-                if (mag > escR) {
-                    g = std::log(mag) / std::pow(ddeg, static_cast<double>(n + 1));
-                    if (is_bad(g)) g = 0.0;
+                const double m2 = zr * zr + zi * zi;
+                if (overflowed(m2)) {
+                    g = escape_potential(n + 1, escape_log_mod(prev_r, prev_i, ddeg, esc), ddeg, esc);
                     break;
                 }
+                const double mag = std::sqrt(m2);
+                if (mag > escR) {
+                    g = escape_potential(n + 1, std::log(mag), ddeg, esc);
+                    break;
+                }
+                prev_r = zr; prev_i = zi;
             }
             img.at(col, row) = g;
         }

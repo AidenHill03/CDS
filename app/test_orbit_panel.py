@@ -59,8 +59,8 @@ def main() -> None:
     pane.image_view = view
     panel = OrbitPanel(session, view)
 
-    check("Click the image" in panel._readout_label.text(),
-          "the readout starts with the no-orbit prompt")
+    check(panel._readout_label.text() == "",
+          "the readout starts empty (the status-bar pane hint says what a click does)")
 
     view.orbit_tracker.seed(session.map, session.param, 0.1 + 0j)
     view.orbit_changed.emit()   # OrbitPanel only refreshes on the signal, not on direct mutation
@@ -89,7 +89,7 @@ def main() -> None:
     print("\nClear button:")
     _button(panel, "Clear").click()
     check(view.orbit_tracker.state is None, "clicking Clear removes the orbit")
-    check("Click the image" in panel._readout_label.text(),
+    check(panel._readout_label.text() == "",
           "the readout reverts to the no-orbit prompt after Clear")
 
     # Step/Run N with no active orbit must not crash (OrbitTracker.step is

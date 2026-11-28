@@ -120,18 +120,29 @@ def main():
     window = SandboxWindow()
     widget, title = make_panel(window)
     index = window.add_panel(widget, title)
-    check(window.tabs.tabText(index) == "Approximation" and window.tabs.widget(index) is widget,
-          "make_panel + add_panel put the tab in the window")
+    check(window.workspace_widget("approximation") is widget
+          and window.workspaces.indexOf(window._workspace_keys["approximation"]) == index
+          and not window.top_bar.workspace_switch.isHidden()
+          and window.top_bar.workspace_switch.labels() == ["Explore", "Approximation"],
+          "make_panel + add_panel register Approximation as a workspace next to Explore")
     import phoenix
     check(len(phoenix._module_panels()) == 1, "phoenix.py finds the Approximation panel")
 
     # Controls registry: the tab documents its own controls in the Info tab,
     # and each documented gesture does what it says on the Basins canvas.
     info = window.info_panel.toPlainText()
-    check(all(e.action in info for e in widget.controls) and "Approximation tab" in info,
+    check(all(e.action in info for e in widget.controls) and "Approximation workspace" in info,
           "add_panel puts the Approximation tab's controls into the Info tab")
-    check(window.tabs.widget(window.tabs.count() - 1) is window.info_panel,
-          "Info stays the last tab after the Approximation tab is added")
+    from modules.approximation.panel import EMPTY_BASINS, EMPTY_CERTIFIED, EMPTY_TARGET
+    check(widget.target_canvas._message == EMPTY_TARGET and widget.basin_canvas._message == EMPTY_BASINS
+          and widget.certified_canvas._message == EMPTY_CERTIFIED
+          and all("\n" not in m for m in (EMPTY_TARGET, EMPTY_BASINS, EMPTY_CERTIFIED))
+          and widget.report_text.placeholderText(),
+          "each empty view shows one centered line saying what to do")
+    from app import theme as _theme
+    widget.target_canvas.resize(120, 120)
+    corner = widget.target_canvas.grab().toImage().pixelColor(2, 2)
+    check(corner == _theme.color("bg"), "empty canvases use the theme background, not white")
     canvas = widget.basin_canvas
     canvas._interactive = True
     canvas.set_image(QImage(64, 64, QImage.Format.Format_RGB32), (-1.0, 1.0, -1.0, 1.0))

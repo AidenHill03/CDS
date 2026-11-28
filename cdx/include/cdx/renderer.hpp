@@ -250,7 +250,24 @@ enum class CriticalPointFamily {
     // how a caller that only has a RationalMap, not the n it was built
     // with, can still recover it).
     RelaxedNewtonPower,
+
+    // The map's OWN free critical points, whatever the map is: per pixel,
+    // RationalMap::distinct_critical_points_continued (warm-started down
+    // each column, as render_parameter_rational does) filtered through
+    // RationalMap::free_critical_points (structurally pre-fixed points such
+    // as infinity for a polynomial dropped -- see FreeCriticalStructure).
+    // `n` is ignored. This is the default for every map that is not
+    // structurally relaxed Newton (relaxed_newton_power_n below): it is what
+    // makes z^2 + a iterate 0, not RelaxedNewtonPower's +-sqrt(a/(2-a)).
+    FromMap,
 };
+
+// n if `m` is STRUCTURALLY relaxed Newton of z^n - 1, i.e. m(z, a) ==
+// ((n - a) z^n + a) / (n z^{n-1}) as a function of both z and a (checked by
+// evaluation at three generic (z, a) pairs, so it is representation-
+// agnostic: term-based or P/Q, either written form). nullopt otherwise.
+// The only maps for which CriticalPointFamily::RelaxedNewtonPower is valid.
+std::optional<int> relaxed_newton_power_n(const RationalMap& m);
 
 // -----------------------------------------------------------------------------
 // How render_parameter's own rational path (below) combines MULTIPLE free
@@ -262,11 +279,16 @@ enum class CriticalPointFamily {
 // critical orbit escape to infinity" -- see render_parameter's own doc
 // comment for why THIS version (sphere-aware, any attractor, not just
 // infinity) fixes the gap that made the earlier one useless on a Nova-like
-// family. Meaningless for a CERTIFIED polynomial (which has, at most, ONE
-// finite critical point that ever distinguishes parameter pixels -- see
-// render_parameter's own comment for why -- so there is nothing for a
-// strategy to combine) and for a non-Custom built-in RATIONAL family
-// (McMullen2/McMullen3/Newton3), which keeps using its existing single-
+// family. Every strategy combines only the FREE critical orbits
+// (RationalMap::free_critical_points; Bug C): including a structurally
+// pre-fixed one (whose orbit is the same for every a) makes Slowest blank
+// and Fastest constant. A CERTIFIED polynomial with SEVERAL free critical points (e.g.
+// z^3 + a z + 1, critical points +-sqrt(-a/3)) uses the same three
+// semantics, with "settles" meaning "escapes to infinity" (see
+// render_parameter); a unicritical one (z^d + a) has one orbit and ignores
+// the strategy. Also meaningless for a non-Custom built-in RATIONAL family
+// (McMullen2/McMullen3/Newton3 with no RationalMap behind it -- never the
+// app, which always wraps a RationalMap), which keeps using its existing single-
 // representative critical point (see Map::critical_point's own doc
 // comment) for the same reason Map::critical_point already gave: every
 // finite critical point of that SPECIFIC family shares escape/capture
@@ -297,11 +319,11 @@ enum class ParameterStrategy {
     // FASTEST (0 only if NONE of them resolve at all) -- "how quickly
     // does structure emerge here," rather than "is everything nice here."
     Fastest,
-    // Track exactly ONE distinct critical point's own orbit (selected by
-    // render_parameter's own `critical_index`, into the SAME distinct_
-    // critical_points(a) ordering for every pixel -- clamped into range
-    // per pixel, since how many free critical points there are can itself
-    // vary with `a`), ignoring the rest entirely -- gives one
+    // Track exactly ONE free critical point's own orbit: the one
+    // `critical_index` selects under the labelling convention
+    // (CriticalLabelBase, rational.hpp -- the same numbering every mode
+    // and RationalMap::critical_point_labels use; clamped into range per
+    // pixel), ignoring the rest entirely -- gives one
     // independent, classical-Mandelbrot-style render per critical point,
     // for a caller that wants to let the user flip between them rather
     // than see them pre-combined.
@@ -353,6 +375,17 @@ public:
     // Convenience: zoom the viewport toward a point by a factor (>1 zooms in).
     void zoom(Cplx target, double factor);
 
+    // INTERNAL -- not a user setting. Parameter planes (`parameter` on a
+    // rational map, `parameter_basin`, `parameter_period`) follow the FREE
+    // critical orbits with inline period detection (critical_orbits.hpp).
+    // `true` switches back to the old per-pixel path -- attractor discovery
+    // with burn-in and closure detection, union with the solved fixed
+    // points, reconciliation sweep, then classification
+    // (complete_attractors_from_seeds / per_seed_outcomes) -- kept ONLY as a
+    // test oracle and for A/B timing.
+    void set_reconciled_parameter_path(bool on) { reconciled_parameter_path_ = on; }
+    bool reconciled_parameter_path() const { return reconciled_parameter_path_; }
+
     // --- render modes --------------------------------------------------------
     //
     // Every mode below takes an optional `cancel`: a caller-owned flag,
@@ -370,11 +403,16 @@ public:
     // family-aware):
     //
     //   CERTIFIED POLYNOMIAL (no poles, degree >= 2 -- infinity is ALWAYS
-    //   superattracting there, so a fixed |z| > escape_radius test is a
-    //   provably forward-invariant trap): today's escape-time fast path,
-    //   UNCHANGED -- `cycles`/`labels` are ignored entirely. Value is the
-    //   smooth escape count n + 1 - log(log|z|)/log 2, or 0 for orbits
-    //   that never escaped.
+    //   superattracting there): escape-time fast path, `cycles`/`labels`
+    //   ignored. The escape radius is max(rho, settings.escape_radius),
+    //   rho = polynomial_escape_radius of the map's coefficients at its
+    //   parameter -- a PROOF that |z| > rho escapes (see analysis.hpp). A
+    //   bare user radius is not one: 0.1 z^2 has bounded orbits through
+    //   |z| = 5, which an R = 2 cutoff called escaped. Value is the smooth
+    //   escape count nu = n + 1 - log_d((log|z_n| + log|a_d|/(d-1)) / log R)
+    //   at the first n with |z_n| > R, d the degree (continuous across
+    //   escape-iteration boundaries for every d; the offset is 0 for a monic
+    //   map), or 0 for orbits that never escaped.
     //
     //   RATIONAL (has poles -- infinity may be repelling, attracting, or
     //   not even fixed; a fixed escape radius is not a validated trap in
@@ -400,22 +438,39 @@ public:
     // classification), a rational map has no such blanket guarantee, so
     // this path never reads settings().escape_radius at all: the Julia
     // set is an invariant of the MAP, not of an arbitrary numeric cutoff.
+    //
+    // ESCAPED MASK. If `escaped` is given it is replaced with an Image the
+    // same size: 1.0 where the pixel escaped (polynomial: |z_n| > R within
+    // max_iter) or resolved (rational: reached an attractor), 0.0 where it
+    // did not. THE MASK, NOT THE VALUE, IS THE ESCAPE STATUS. The value is a
+    // shade only and may take any real value: the smooth escape value is
+    // legitimately <= 0 for fast escapes (z^5 + a: nu < 0 beyond |z_0| ~ 7
+    // under the old base-2 formula), and a value channel doubling as the
+    // "escaped?" flag painted those as interior (the "bubble"). Pixels that
+    // did not escape still carry value 0.
     Image render_julia(const std::atomic<bool>* cancel = nullptr,
-                       const std::vector<Cycle>& cycles = {}, Image* labels = nullptr) const;
+                       const std::vector<Cycle>& cycles = {}, Image* labels = nullptr,
+                       Image* escaped = nullptr) const;
 
     // Parameter plane: each pixel is a parameter value. The bound parameter
     // is ignored. Reproduces the Mandelbrot/multibrot sets and the
     // McMullenbrot. TWO PATHS, same certification dispatch as render_julia/
     // render_greens (Map::escape_certified):
     //
-    //   CERTIFIED POLYNOMIAL: UNCHANGED from before this milestone --
-    //   escape_radius-based escape-TIME, orbit starts at the map's own
-    //   SINGLE finite critical point (every finite critical point of a
-    //   z^d+a-shaped family coincides at 0; infinity is trivially,
-    //   uninformatively superattracting there, deliberately excluded --
-    //   see Map::critical_point's own doc comment). `strategy`/
-    //   `critical_index` are ignored entirely -- there is nothing for a
-    //   strategy to combine with only one orbit. NOTE: this mode is a
+    //   CERTIFIED POLYNOMIAL: escape-TIME of the FREE critical orbits
+    //   (infinity, structurally pre-fixed, excluded -- see
+    //   FreeCriticalStructure). A polynomial can have several (z^3 + a z
+    //   + 1 has +-sqrt(-a/3)); an earlier version iterated only
+    //   critical_points(a).front(), whichever root Aberth listed first,
+    //   which ignored `strategy` and drew a seam where that order flipped.
+    //   With ONE free critical point (z^d + a, unicritical
+    //   critical_points_constant() maps) the single-orbit path is kept
+    //   bit-for-bit and `strategy`/`critical_index` are ignored. With
+    //   several, every free orbit is iterated and combined exactly as the
+    //   rational path does: Slowest = 0 iff some orbit stays bounded, else
+    //   the largest smooth escape value; Fastest = 0 iff no orbit escapes
+    //   (the connectedness locus), else the smallest; PerCritical = the
+    //   orbit `critical_index` selects. NOTE: this mode is a
     //   VISUALIZATION, not a set-membership computation -- unlike the
     //   Julia SET or Green's function, which are invariants of the map
     //   and so must never depend on escape_radius (see their own doc
@@ -423,7 +478,9 @@ public:
     //   explicitly an artifact of where the cutoff is drawn, the same way
     //   classical Mandelbrot-set escape-time renders always have been.
     //   escape_radius is a legitimate tuning knob for the POLYNOMIAL path
-    //   specifically; the milestone's own escape-radius-invariance
+    //   specifically, but only ABOVE the certified radius: every pixel
+    //   escapes at max(rho(a), escape_radius), rho(a) recomputed per pixel
+    //   from the coefficients at that `a` (see polynomial_escape_radius); the milestone's own escape-radius-invariance
     //   acceptance test applies to Julia/Green's, deliberately not here.
     //
     //   RATIONAL: escape-radius-free and MULTI-critical -- retires the
@@ -436,19 +493,23 @@ public:
     //   escape to infinity" -- useless for a family (Nova-like ones)
     //   whose interesting parameter structure is FINITE attracting
     //   cycles, which just ran every pixel to max_iter and returned a
-    //   uniform plane. THIS path fixes exactly that gap: every free
+    //   uniform plane. THIS path fixes exactly that gap: every FREE
     //   critical point at that pixel's parameter (RationalMap::
-    //   distinct_critical_points, UNFILTERED -- deliberately including
-    //   any pole-related one, unlike render_parameter_period's own
-    //   family-specific "free" subset, since a pole-related critical
-    //   orbit failing to settle is exactly as informative here as any
-    //   other) has its own orbit classified against the FULL sphere-
+    //   free_critical_points, the one rule every parameter-plane mode
+    //   shares -- see FreeCriticalStructure) has its own orbit
+    //   classified against the FULL sphere-
     //   aware attractor set at that parameter (complete_attractors_
     //   from_seeds -- fixed point, cycle, OR infinity, not just infinity
     //   alone -- see that function's own doc comment), via the SAME
     //   classify_rational_orbit smooth-chordal-rate machinery render_
     //   julia_rational/render_greens_rational/render_parameter_greens_
-    //   rational already use (nothing bespoke here either). `strategy`
+    //   rational already use (nothing bespoke here either). Structurally
+    //   pre-fixed critical points are NOT classified (Bug C): for the
+    //   McMullen maps z^n + a/z^n they are 0 (a double pole, f(0) = inf)
+    //   and inf (a superattracting fixed point), whose orbits are the same
+    //   for every a -- classifying them made Slowest all-zero and Fastest
+    //   constant. They still seed attractor discovery. A map with no free
+    //   critical point at all renders all-zero (a has no effect). `strategy`
     //   (ParameterStrategy, see its own doc comment) combines the
     //   resulting per-critical-point smooth values into the one value
     //   this pixel gets; `critical_index` only matters for
@@ -462,13 +523,24 @@ public:
     //   own output already goes through -- no bespoke scheme, no shape
     //   change to what this method returns (a plain Image, same as
     //   before) -- app/session.py's own dispatch needs no changes either.
+    //
+    // ESCAPED MASK (`escaped`, optional, as render_julia's): 1.0 where the
+    // pixel counts as escaped/resolved under `strategy` -- Slowest: EVERY
+    // free orbit escaped/resolved; Fastest: AT LEAST ONE did; PerCritical:
+    // the selected one did -- else 0.0. The value is then the slowest /
+    // fastest / selected orbit's smooth value, any real number; 0 where the
+    // mask is 0.
     Image render_parameter(const std::atomic<bool>* cancel = nullptr,
                            ParameterStrategy strategy = ParameterStrategy::Slowest,
-                           int critical_index = 0) const;
+                           int critical_index = 0, Image* escaped = nullptr) const;
 
     // Parameter_basin: each pixel is a parameter value a; the pixel value
     // is the NUMBER OF DISTINCT ATTRACTING CYCLES the map has at that a
     // (infinity counts as one when it's the limit of a critical orbit).
+    // Deliberately seeds from ALL critical points, NOT just the free ones
+    // (FreeCriticalStructure): a structurally pre-fixed critical point
+    // such as infinity for z^n + a/z^n is still an attractor, and a count
+    // of attractors must include it.
     // Escape-radius-free -- this is a genuine multi-attractor question,
     // the one render_parameter's own retired Stage 4 detour was trying to
     // answer before being pulled back to plain escape-time (see its own
@@ -578,10 +650,9 @@ public:
     // exact arithmetic, so this is a tie-break for numerical stragglers,
     // not a real policy choice for THAT family; a future, genuinely
     // asymmetric family (a bicritical one, whose two critical points CAN
-    // converge to two actually-different cycles) would need this
-    // documented explicitly wherever it is used -- this method does not
-    // attempt to detect or flag such a disagreement itself (no "mixed"
-    // class yet; not needed by any family this method currently supports).
+    // converge to two actually-different cycles) is handled by FromMap
+    // below, which selects by `critical_index` and flags disagreement in
+    // `mixed` instead of tie-breaking.
     //
     // The pixel value is the period (>= 1) when a tracked seed resolves to
     // a FINITE cycle; 0 (paired with `undetermined` set) when NONE of the
@@ -601,18 +672,31 @@ public:
     //
     // Requires a Custom-wrapped map (map_.custom_map() non-null), same as
     // Parameter_basin -- degrades to an honest all-undetermined image
-    // otherwise, rather than guessing. CURRENTLY SUPPORTS EXACTLY ONE
-    // seed_family (RelaxedNewtonPower) -- calling this on a map that is
-    // not structurally that family produces seeds that do not correspond
-    // to its actual critical points, and the result is meaningless (not a
-    // crash: those seeds' own orbits are followed under the map's real
-    // dynamics regardless, they simply are not the family's own critical
-    // points) -- this is a scope limitation to document at every call
-    // site, not a case this method itself detects or guards against.
+    // otherwise, rather than guessing. RelaxedNewtonPower is valid ONLY for
+    // a map that is structurally that family (relaxed_newton_power_n): on
+    // any other map its closed-form seeds are not the map's critical
+    // points and the result is meaningless. That was a real bug (z^2 + a
+    // was seeded at +-sqrt(a/(2-a)) and reported "escapes" over a fifth of
+    // the Mandelbrot interior); callers must pick FromMap for everything
+    // else, as app/session.py does.
+    //
+    // FromMap (the default for anything that is not relaxed Newton -- see
+    // CriticalPointFamily::FromMap): seeds are the map's own FREE critical
+    // points at each pixel. With one, the pixel reports its period. With
+    // more than one, it reports the period of the one selected by
+    // `critical_index` (clamped into range; same labelling as
+    // render_parameter's PerCritical), and `mixed`, if given, is replaced
+    // with an Image that is 1.0 where the RESOLVED free critical orbits
+    // reached cycles of different periods or different cycles of the same
+    // period (unresolved orbits are not counted either way), 0.0 elsewhere.
+    // RelaxedNewtonPower keeps its first-resolved tie-break above and
+    // leaves `mixed` all-zero (its n seeds agree by symmetry).
     Image render_parameter_period(CriticalPointFamily seed_family, int n,
                                   const std::atomic<bool>* cancel = nullptr,
                                   Image* undetermined = nullptr,
-                                  Image* is_infinity = nullptr) const;
+                                  Image* is_infinity = nullptr,
+                                  int critical_index = 0,
+                                  Image* mixed = nullptr) const;
 
     // Basin classification against a set of attracting cycles, in the chordal
     // metric. Value is the cycle id, or 0 for unresolved pixels.
@@ -636,9 +720,12 @@ public:
     // Green's function (dynamical potential). TWO PATHS, same certification
     // dispatch as render_julia (Map::escape_certified):
     //
-    //   CERTIFIED POLYNOMIAL: UNCHANGED -- G_f(z) = lim_{n->inf} d^-n
-    //   log+|f^n(z)|. When the orbit escapes at iteration n, the result is
-    //   log|z_n| / degree^n; non-escaping pixels are exactly 0. `cycles`/
+    //   CERTIFIED POLYNOMIAL: G_f(z) = lim_{n->inf} d^-n log+|f^n(z)|.
+    //   When the orbit escapes (certified radius, as render_julia) at
+    //   iteration n, the result is (log|z_n| + log|a_d|/(d-1)) / degree^n
+    //   -- the Boettcher offset makes it right for a non-unit leading
+    //   coefficient and is exactly 0 for a monic map; non-escaping pixels
+    //   are exactly 0. `cycles`/
     //   `potential`/`exact` are ignored entirely (PRAGMATIC and CONFORMAL-
     //   Boettcher already coincide exactly at a certified polynomial's own
     //   infinity -- see GreensPotential's own doc comment).
@@ -745,15 +832,30 @@ private:
     // one, rather than one function trying to be both. Both are private:
     // parallel_columns is, and both need it, the same as every other
     // render_* method already gets it via being a Renderer method itself.
-    Image render_julia_polynomial(const std::atomic<bool>* cancel) const;
-    Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels,
+    Image render_julia_polynomial(Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_julia_rational(const std::vector<Cycle>& cycles, Image* labels, Image& escaped,
                                 const std::atomic<bool>* cancel) const;
 
     // render_parameter's own two paths, same split rationale as render_
     // julia's -- see render_parameter's own doc comment for what each is.
-    Image render_parameter_polynomial(const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial(ParameterStrategy strategy, int critical_index,
+                                      Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial_unicritical(Image& escaped,
+                                                  const std::atomic<bool>* cancel) const;
+    Image render_parameter_polynomial_multicritical(ParameterStrategy strategy, int critical_index,
+                                                    const FreeCriticalStructure& free_s,
+                                                    Image& escaped,
+                                                    const std::atomic<bool>* cancel) const;
     Image render_parameter_rational(ParameterStrategy strategy, int critical_index,
-                                    const std::atomic<bool>* cancel) const;
+                                    Image& escaped, const std::atomic<bool>* cancel) const;
+    // The critical-orbit paths (default) -- see set_reconciled_parameter_path.
+    Image render_parameter_rational_orbits(ParameterStrategy strategy, int critical_index,
+                                           Image& escaped, const std::atomic<bool>* cancel) const;
+    Image render_parameter_basin_orbits(const std::atomic<bool>* cancel, Image* unresolved,
+                                        Image* certain) const;
+    Image render_parameter_period_orbits(CriticalPointFamily seed_family, int n,
+                                         const std::atomic<bool>* cancel, Image* undetermined,
+                                         Image* is_infinity, int critical_index, Image* mixed) const;
 
     // render_greens' own two paths, same split rationale as render_julia's.
     Image render_greens_polynomial(const std::atomic<bool>* cancel) const;
@@ -770,6 +872,7 @@ private:
     Map            map_;
     Viewport       view_;
     RenderSettings settings_;
+    bool           reconciled_parameter_path_ = false;   // see set_reconciled_parameter_path
 };
 
 }  // namespace cdx

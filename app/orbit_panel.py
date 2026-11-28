@@ -18,7 +18,8 @@ this app already uses.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSpinBox, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 
 def _format_complex(z: complex) -> str:
@@ -36,12 +37,18 @@ class OrbitPanel(QWidget):
         self._refresh()
 
     def _build_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+        layout = QHBoxLayout()
+        layout.setSpacing(6)
+        outer.addLayout(layout)
 
+        # The orbit readout line, under the buttons.
         self._readout_label = QLabel()
         self._readout_label.setWordWrap(True)
-        layout.addWidget(self._readout_label, 1)
+        self._readout_label.setProperty("mono", True)
+        self._readout_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         step_button = QPushButton("Step")
         step_button.clicked.connect(lambda: self.image_view.step_orbit(1))
@@ -64,6 +71,8 @@ class OrbitPanel(QWidget):
         # to a different pane's view.
         clear_button.clicked.connect(lambda: self.image_view.clear_orbit())
         layout.addWidget(clear_button)
+        layout.addStretch(1)
+        outer.addWidget(self._readout_label)
 
     def run_n(self) -> int:
         """The current "Run N" count (Shift+Space in a dynamical pane uses it)."""
@@ -86,8 +95,9 @@ class OrbitPanel(QWidget):
     def _refresh(self) -> None:
         tracker = self.image_view.orbit_tracker
         if tracker.state is None:
-            self._readout_label.setText("Click the image (dynamical-plane modes only) to seed "
-                                        "an orbit.")
+            # No orbit yet: say nothing here -- the status bar's pane hint
+            # already says what a click on each plane does.
+            self._readout_label.setText("")
             return
         classification = tracker.classify(self.session.map, self.session.param,
                                           self.session.render_settings.max_iter,

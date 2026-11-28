@@ -127,6 +127,107 @@ struct ContinuedFixedPoints {
 };
 
 // -----------------------------------------------------------------------------
+// Which critical points are FREE -- see RationalMap::free_critical_structure.
+// Computed once per render (it costs three cold critical/fixed-point solves),
+// then applied per pixel by RationalMap::free_critical_points.
+//
+// THE RULE. A critical point c is STRUCTURALLY PRE-FIXED -- not free -- when,
+// at each of three generic parameter values (kGenericParams in rational.cpp),
+// c is a critical point at the same location and either c is a fixed point
+// or f(c) is a fixed point, the same one at all three. Its orbit then says
+// nothing about the parameter: it is the same at every `a`. Identification
+// is by location, with two kinds of point identified by type instead,
+// because their location is a closed-form consequence of the map's shape:
+//   * infinity, when it is a critical point: pre-fixed iff infinity is a
+//     fixed point at all three (every polynomial: f(inf) = inf);
+//   * a pole of order >= 2 (critical in its own right): f(pole) = inf, so it
+//     is pre-fixed iff infinity is a fixed point at all three -- even when
+//     the pole MOVES with `a` (e.g. relaxed Newton of z^n - 1, whose z = 0 is
+//     an order n-1 pole mapping to the fixed point at infinity).
+// A finite, non-pole critical point that is pre-fixed but moves with `a`
+// (e.g. c = a for (z - a)^2 + a) is NOT recognised and stays "free"; its
+// orbit then reports a constant period 1, which is honest, just
+// uninformative.
+// -----------------------------------------------------------------------------
+struct FreeCriticalStructure {
+    std::vector<Cplx> excluded_finite;   // parameter-independent, pre-fixed, finite, non-pole
+    bool exclude_infinity = false;       // infinity (when critical) is pre-fixed
+    bool exclude_poles    = false;       // every pole-critical point is pre-fixed
+    int  generic_free_count = 0;         // max #free distinct critical points at the generic params
+};
+
+// -----------------------------------------------------------------------------
+// THE CRITICAL-POINT LABELLING CONVENTION -- what `critical_index` means in
+// every mode (render_parameter's PerCritical, polynomial or rational, and
+// render_parameter_period's FromMap), and what RationalMap::
+// critical_point_labels returns for the Facts panel.
+//
+// Free critical points can collide (z^3 + a z + 1 at a = 0), and going once
+// around a collision swaps them, so no global labelling is continuous
+// everywhere: there must be a cut. The convention makes the cut
+// deterministic, documented and independent of the viewport:
+//   1. A fixed base parameter a* per map: 0.618 + 0.382i, nudged (by
+//      +0.0137i steps) if any two free critical points there are within
+//      1e-6 (relative) of each other or fewer than generic exist.
+//   2. At a*, the free FINITE non-pole critical points (roots of the
+//      derivative numerator) are labelled 0, 1, ... in order of (Re, Im),
+//      each rounded to 1e-9.
+//   3. For a pixel parameter a, those points are continued along the
+//      straight segment a* -> a: adaptive steps, a secant predictor, a
+//      Newton corrector on the derivative-numerator polynomial; a step is
+//      halved when Newton fails, a point jumps more than a quarter of its
+//      distance to its nearest neighbour, or two tracked points come within
+//      the collapse tolerance (1e-9 relative).
+//   4. Free critical points that are not tracked roots -- infinity and
+//      pole copies, both closed-form -- follow, in (Re, Im) order.
+// Labels index the FREE critical points only (FreeCriticalStructure): a
+// structurally pre-fixed point -- infinity for a polynomial, or 0 and
+// infinity for z^n + a/z^n -- never gets a label, so critical_index 0 can
+// never silently mean "infinity", whose orbit is the same for every a.
+// So the cuts are the rays from each collision point pointing directly
+// away from a*, and they do not move when the user pans or zooms. If a
+// continuation fails outright (the segment passes within ~1e-7 of a
+// collision, i.e. the pixel lies ON a cut, or the root count changes), the
+// pixel falls back to step 2's sort applied at a itself.
+// -----------------------------------------------------------------------------
+// The derivative numerator N_a(z) = sum_k c_k(a) z^k with every c_k(a)
+// itself a polynomial in a, compiled once so the labelling continuation can
+// evaluate N at a new parameter in a few dozen flops instead of rebuilding
+// it through the P/Q expression evaluator (measured: that rebuild, paid on
+// every continuation step including rejected ones, was nearly all of the
+// labelling cost). Built by RationalMap::compile_deriv_numerator_in_a: fitted
+// from 16 samples on |a| = 1 and accepted only if it reproduces
+// deriv_numerator_poly at four other parameters (|a| up to ~4) to 1e-10
+// relative; otherwise valid == false and callers use the direct path. (The
+// parser only admits rational expressions and clears denominators in a too,
+// so the coefficients are always polynomial in a; what fails is degree
+// >= 16 in a, which 16 samples cannot capture.)
+//
+// The same fit serves any per-`a` coefficient vector that is polynomial in
+// a: RationalMap::compile_polynomial_coefficients_in_a fits f's OWN
+// coefficients (polynomial_coefficients) so the certified escape radius can
+// be computed per parameter pixel without the expression evaluator.
+struct PolyCoeffsInA {
+    bool valid = false;
+    int  z_terms = 0;                 // number of z-coefficients
+    int  a_terms = 0;                 // number of a-coefficients per z-coefficient
+    std::vector<Cplx> coef;           // coef[k * a_terms + j] multiplies a^j z^k
+    // The coefficients (ascending in z) at `a` into `out`, resized to z_terms.
+    void eval(Cplx a, std::vector<Cplx>& out) const;
+};
+using DerivNumeratorInA = PolyCoeffsInA;
+
+struct CriticalLabelBase {
+    bool  constant = false;           // critical points do not move: labels are just `points`
+    Cplx  a_star{0.618, 0.382};
+    std::vector<Cplx> points;         // free tracked critical points at a_star, label order
+    int   expected_degree = 0;        // effective degree of the derivative numerator at a_star
+    bool  closed_form_free = false;   // infinity / pole copies can be free (step 4 needed)
+    FreeCriticalStructure free_s;
+    DerivNumeratorInA fast;           // speed only: same polynomial, evaluated faster
+};
+
+// -----------------------------------------------------------------------------
 // RationalMap::eval(z, a) redoes every term's effective_coeff/
 // effective_location/effective_strength -- each an a^param_power call -- on
 // EVERY invocation, even though every caller that matters (an escape-time
@@ -163,6 +264,19 @@ public:
     // render, so free after the first), the same reasoning this class's
     // own doc comment already applies to that branch.
     inline void step(double& zr, double& zi) const;
+
+    // Cold-path companions (Newton refinement and multipliers in
+    // critical_orbits.cpp -- a few dozen calls per orbit, not per step):
+    // f(z) and f'(z) in std::complex, and infinity's status read off the
+    // compiled coefficients (see InfinityStatus, critical_orbits.hpp).
+    // eval_c maps a pole to (1e300, 0), the same sentinel step() uses.
+    Cplx eval_c(Cplx z) const;
+    Cplx deriv_c(Cplx z) const;
+    // f(inf) == inf? If so, local degree there (>= 2: superattracting) and
+    // the multiplier in the w = 1/z chart (0 when superattracting). If not,
+    // `image` is f(inf) (the leading-coefficient ratio when deg P == deg Q,
+    // else 0).
+    void infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier, Cplx& image) const;
 
 private:
     friend class RationalMap;
@@ -486,6 +600,11 @@ public:
     // render_parameter: for one pixel's worth of iterations). See
     // CompiledMap's own doc comment for what this buys over plain eval().
     CompiledMap compile(Cplx a) const;
+    // compile(a) into `out`, reusing out's buffers (and a per-thread
+    // parameter binding): no allocation once `out` has been filled once.
+    // Bit-identical to compile(a). For per-PIXEL callers (the parameter
+    // planes), where compile(a)'s allocations were most of the overhead.
+    void compile_into(Cplx a, CompiledMap& out) const;
 
     // --- structure ----------------------------------------------------------
     // Degree as a rational map of the sphere: max(deg numerator, deg
@@ -642,6 +761,53 @@ public:
     // range this project's viewports actually explore.
     bool critical_points_constant() const;
 
+    // The free/pre-fixed split of this map's critical points -- see
+    // FreeCriticalStructure's own comment for the rule. Parameter-
+    // independent by construction; compute it once per render.
+    FreeCriticalStructure free_critical_structure() const;
+
+    // `distinct` (a distinct_critical_points(a)-style list AT `a`) with every
+    // structurally pre-fixed entry removed, order otherwise preserved. A
+    // finite entry within 1e-4 (relative, distinct_critical_points' own
+    // dedup radius) of an excluded location counts as that location.
+    std::vector<Cplx> free_critical_points(Cplx a, const std::vector<Cplx>& distinct,
+                                           const FreeCriticalStructure& s) const;
+
+    // The labelling convention above (see CriticalLabelBase): the base is
+    // computed once per render, then critical_point_labels(a, base) gives the
+    // free critical points at `a` IN LABEL ORDER. The one-argument form
+    // builds the base itself (cold; for one-off callers such as the Facts
+    // panel). continue_critical_labels is step 3 from an arbitrary already-
+    // labelled start (from_a, from_pts) -- the warm-start primitive; it
+    // returns false if the continuation failed.
+    CriticalLabelBase critical_label_base() const;
+    // The polynomial whose roots are the finite critical points at `a`
+    // (P'Q-PQ', or the term sandbox's cleared derivative numerator),
+    // ascending. Public for the app's labelling-cut overlay, which finds the
+    // collision parameters from it (app/label_cuts.py); also what
+    // critical_points()/the label continuation root.
+    std::vector<Cplx> deriv_numerator_poly(Cplx a) const;
+    DerivNumeratorInA compile_deriv_numerator_in_a() const;
+    // polynomial_coefficients(a) as polynomials in a (see PolyCoeffsInA);
+    // valid == false when the map is not a polynomial or the fit fails.
+    PolyCoeffsInA compile_polynomial_coefficients_in_a() const;
+    std::vector<Cplx> critical_point_labels(Cplx a, const CriticalLabelBase& base) const;
+    std::vector<Cplx> critical_point_labels(Cplx a) const;
+    bool continue_critical_labels(const CriticalLabelBase& base, Cplx from_a,
+                                  const std::vector<Cplx>& from_pts, Cplx to_a,
+                                  std::vector<Cplx>& out) const;
+    // Step 4 / the fallback: everything free at `a`, tracked points first
+    // (given), then the closed-form ones, each group in (Re, Im) order when
+    // `sort_tracked` is set.
+    std::vector<Cplx> assemble_labels(Cplx a, const CriticalLabelBase& base,
+                                      std::vector<Cplx> tracked, bool sort_tracked) const;
+
+    // f's own coefficients at `a`, ASCENDING (index k multiplies z^k), when
+    // is_polynomial_structurally(); returns false (and leaves `out`
+    // untouched) otherwise. Trailing exact zeros are trimmed, so
+    // out.back() is the leading coefficient a_d.
+    bool polynomial_coefficients(Cplx a, std::vector<Cplx>& out) const;
+
     // All fixed points R(z) == z, found algebraically (root the polynomial
     // N(z) - z*D(z) after clearing denominators; NOT limited to attracting
     // ones -- for that, and for genuine higher-period cycles, see
@@ -701,7 +867,6 @@ private:
     // comment in rational.cpp for the derivation. Factored out purely so
     // continuation can build the SAME polynomial a cold solve would,
     // without a second, divergence-prone copy of this construction.
-    std::vector<Cplx> deriv_numerator_poly(Cplx a) const;   // P'Q-PQ' / cleared derivative numerator
     std::vector<Cplx> fixed_point_poly(Cplx a) const;       // P-zQ / N(z)-zD(z)
 
     // Appends the closed-form/deterministic sources (pole-copy multiplicity,

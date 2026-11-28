@@ -14,8 +14,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
   add_compile_options(-O3 -Wall -Wextra)
 endif()
 
+# MSVC defines M_PI (used by several tests) only with _USE_MATH_DEFINES.
+if(MSVC)
+  add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 # ---- core library -----------------------------------------------------------
-add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/composed.cpp)
+add_library(cdx_core STATIC src/renderer.cpp src/expr.cpp src/rational.cpp src/roots.cpp src/analysis.cpp src/rational_parser.cpp src/special_polys.cpp src/composed.cpp src/critical_orbits.cpp)
 target_include_directories(cdx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 find_package(Threads REQUIRED)
@@ -48,6 +53,9 @@ target_link_libraries(cdx_test_rational_pq PRIVATE cdx_core)
 
 add_executable(cdx_test_rational_params test/test_rational_params.cpp)
 target_link_libraries(cdx_test_rational_params PRIVATE cdx_core)
+
+add_executable(cdx_test_special_polys test/test_special_polys.cpp)
+target_link_libraries(cdx_test_special_polys PRIVATE cdx_core)
 
 add_executable(cdx_test_composed test/test_composed.cpp)
 target_link_libraries(cdx_test_composed PRIVATE cdx_core)

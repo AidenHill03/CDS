@@ -38,9 +38,73 @@ are studying.
 - `roots` — Aberth–Ehrlich polynomial root finder
 - `renderer` — Julia / parameter / basin / Green's rendering
 - `analysis` — `find_attractors`, `wada_diagnostic`, `hausdorff_distance`
+- `critical_orbits` — `track_critical_orbit`: one free critical orbit, followed
+  with inline period detection (the parameter planes' engine)
 
 Test by mathematical property (symmetries, Riemann–Hurwitz counts, metric
 identities), never by golden image.
+
+#### Parameter-plane conventions
+
+Every parameter-plane mode agrees on five things. The definitions live in
+`cdx/rational.hpp` (`FreeCriticalStructure`, `CriticalLabelBase`) and
+`cdx/analysis.hpp` (`polynomial_escape_radius`); this is the summary.
+
+- **Free critical points.** A mode iterates only the *free* critical points.
+  A critical point is structurally pre-fixed, and dropped, when at three
+  generic parameters it sits at the same place and is fixed, or maps onto
+  the same fixed point. Examples: ∞ for every polynomial, and a pole of order
+  ≥ 2 when ∞ is fixed, such as z = 0 for relaxed Newton. The split is computed
+  once per render.
+- **`critical_index`: one labelling everywhere.** The index means the same
+  free critical point in `parameter` (PerCritical, polynomial or rational),
+  in `parameter_period` (FromMap), and in
+  `RationalMap.critical_point_labels(a)` (for the Facts panel). The free
+  critical points are sorted by (Re, Im) at a fixed base parameter
+  a* = 0.618 + 0.382i (nudged off any collision), then continued along the
+  straight segment a* → a. Colliding critical points swap when you go round
+  the collision, so some cut is unavoidable. This convention puts the cuts on
+  the rays from each collision point pointing directly away from a*. They do
+  not move when you pan or zoom.
+- **Parameter planes follow the free critical orbits; full attractor
+  reconciliation is single-parameter only.** Every attracting cycle attracts a
+  critical point (Fatou), and a pre-fixed critical point's attractor is known
+  in closed form, so following the free orbits finds every attracting cycle
+  that matters. `parameter` (rational), `parameter_basin` and
+  `parameter_period` run `track_critical_orbit` per pixel and per free
+  critical point (`cdx/critical_orbits.hpp`): escape to ∞ (certified radius
+  for a polynomial; ∞'s multiplier read off the compiled coefficients for a
+  rational map), otherwise Brent periodicity checking, reduction to the
+  minimal period, Newton refinement of f^q(z) − z, and the multiplier test
+  |λ| < 1 − 10⁻⁶. Neutral, parabolic, Siegel, or out of budget is reported
+  undetermined, never guessed. No fixed-point solve, attractor discovery,
+  algebraic union or reconciliation sweep runs per pixel.
+  `complete_attractors` and the reconciliation code serve single-parameter
+  uses: Facts, dynamical `basin`, overlays. The old per-pixel path survives
+  only behind `Renderer::set_reconciled_parameter_path`, as a test oracle and
+  for A/B timing, not as a user setting.
+- **Escape status is a mask.** `julia` and `parameter` return an explicit
+  escaped/resolved mask next to the smooth value. The value is only a shade,
+  and is legitimately ≤ 0 for fast escapes.
+- **Strategies.** Several free orbits are combined the same way for a
+  polynomial and a rational map. Slowest is unescaped iff some orbit does not
+  settle; otherwise it takes the largest smooth value. Fastest is unescaped
+  iff none settles (for a polynomial, that is the connectedness locus);
+  otherwise it takes the smallest. PerCritical uses only the `critical_index` orbit. A unicritical
+  polynomial (z^d + a) has one orbit and ignores the strategy, and its
+  single-orbit path is pinned bit-for-bit in the tests.
+- **"Certified" escape.** `polynomial_escape_certified` means "no poles, so ∞
+  is superattracting". The *radius* comes from the coefficients: every
+  polynomial escape-time path escapes at max(ρ, `escape_radius`). Here ρ is
+  the positive root of |a_d| r^d − Σ_{k<d} |a_k| r^k − r, recomputed per pixel
+  in the parameter plane. Past ρ every orbit provably escapes. A user radius
+  on its own is not a proof: 0.1 z² + a has bounded orbits through |z| = 10.
+  For z^d + a at the default radius 2, the result is unchanged.
+
+`parameter_period` seeds from the map's own free critical points
+(`CriticalPointFamily::FromMap`). The closed-form relaxed-Newton seeds are
+used only when `relaxed_newton_power_n` recognises the map structurally.
+`find_attractors` reduces every detected cycle to its minimal period.
 
 ### `app/` — the sandbox
 
@@ -52,6 +116,43 @@ engine stays stateless apart from `Renderer`'s configuration.
 - term editing operations and undo
 - data extraction and export
 - animation export
+
+### The window
+
+`SandboxWindow` (app/sandbox.py) is a `QMainWindow`:
+
+- **Top bar** (a fixed toolbar holding `app.widgets.TopBar`): wordmark, map
+  chip (family name, or `custom` once the formula is edited away from a
+  library entry; opens the Library), the workspace switch, Coupled | Single,
+  render status, Reset view, Export.
+- **Central widget**: a `QStackedWidget` of workspaces. *Explore* is the two
+  planes side by side in a splitter, each an `app.plane_frame.PlaneFrame`
+  (caps title, segmented mode control, the `ImageView`, overlay chips).
+  Modules can add more workspaces.
+- **Sidebar** (right `TabbedDock`): Info | Library | Facts.
+- **Equations & Settings** (bottom `TabbedDock`): Equation | Rendering |
+  Coloring | Orbit. Rendering and Coloring are live `SettingsPanel`s (one
+  shared debounce, one coalesced re-render); there is no Settings dialog.
+
+Both docks collapse to their tab strip and can be closed and reopened from
+View; their state, the window geometry and the splitter persist in
+`~/.complexdynamics/layout.ini` (`QSettings` + `saveState()`), and View ▸
+Reset Layout restores the defaults. Below 1250 px wide the sidebar collapses
+on its own. The overlay chips and the View-menu overlay items are both built
+from `overlay_toggles()` (the `OVERLAY_LAYERS` registry plus the seeded
+orbit, the parameter marker and its crosshair), so they cannot disagree.
+
+### Theme
+
+`app/theme.py` holds every color (a `Tokens` set per theme; only `dark`
+exists today, structured so a light set can be added), the three bundled
+OFL fonts (`app/resources/fonts/`, registered at startup, silently falling
+back to system fonts) and the sizes. It generates the Qt style sheet and the
+palette; the app runs on the Fusion style on every platform so macOS and
+Windows look the same. Widgets opt into a look with dynamic properties
+(`role`, `plane`, `invalid`, `mono`), never with their own style sheets.
+`app/test_theme.py` fails if any other UI source contains a hex color,
+`rgb()`, a `QColor(r, g, b)` literal or a named Qt color.
 
 ### `modules/` — research code
 
@@ -75,11 +176,20 @@ machinery is harder to remove than to add.
 
 `app/` never imports a module. The **composition root**, `phoenix.py` at the
 repository root, is the one file that knows every layer: it builds each
-module's panel and hands it to `SandboxWindow.add_panel(widget, title)`, a
-plain method that adds a tab (and calls the widget's `shutdown()`, if it has
-one, when the window closes). `python -m app.sandbox` still starts the plain
-sandbox. Packaging (`complexdynamics.spec`) starts from `phoenix.py`.
-A module tab is inserted before the Info tab, which always stays last.
+module's panel and hands it to `SandboxWindow.add_panel(widget, title,
+placement)`, a plain method (it also calls the widget's `shutdown()`, if it
+has one, when the window closes). `placement` is one of:
+
+- `"workspace"`: a page of the central stack next to Explore; the top bar's
+  Explore | … switch appears. While it shows, the plane-only controls
+  (Coupled | Single, overlay chips, the Rendering/Coloring/Orbit tabs) hide.
+- `"sidebar"` (the default): a sidebar tab after Info, Library, Facts.
+- `"dock"`: a tab of the Equations & Settings dock.
+
+When `placement` is omitted, the widget's own `placement` attribute is used
+(the Approximation panel sets `placement = "workspace"`), then `"sidebar"`.
+`python -m app.sandbox` still starts the plain sandbox. Packaging
+(`complexdynamics.spec`) starts from `phoenix.py`.
 
 ## Controls registry
 
@@ -98,7 +208,8 @@ It is the same single-source pattern as `OVERLAY_LAYERS` for the View menu
 
 - `SandboxWindow`'s QActions take their shortcuts from `key_sequences(id)`;
   `ImageView` takes its key sets from `plot_keys(id)` / `plot_modifiers(id)`.
-- The Info tab (`app/info_panel.py`) is generated by `info_html()`, and the
+- The Info tab (`app/info_panel.py`, in the sidebar) is generated by
+  `info_html()` (followed by a "This map" section), and the
   status-bar pane hint by `hint_parts()`, so documentation cannot drift.
 - The mouse handlers are a state machine and cannot simply look bindings
   up, so `app/test_sandbox.py` drives the real handler for every bound entry
@@ -132,7 +243,8 @@ critical-point count (argument principle + Ehrlich–Aberth), and scoring
 against the target with `cdx.hausdorff_distance` / `cdx.wada_diagnostic`.
 `r` is evaluated by the engine's `ComposedMap`; the module's own C++ kernel
 (`_approx_kernel`, built by `modules/approximation/CMakeLists.txt`) holds only
-what is specific to the construction. Its panel is the "Approximation" tab.
+what is specific to the construction. Its panel is the "Approximation"
+workspace.
 
 `verify_conditions` for the Fisher–Hill–Lazebnik–Thompson construction is
 **not** engine code, and this is worth recording because it is easy to

@@ -430,6 +430,32 @@ int main() {
               "both representations agree z^4+a*z IS structurally polynomial");
     }
 
+    // ---- critical_points_constant: a parameter in P's constant term ----
+    // only stays out of f' when Q is constant. Checked against the actual
+    // critical point sets at two parameters, not just the flag.
+    std::printf("\ncritical_points_constant (P/Q):\n");
+    {
+        struct Case { const char* src; bool constant; };
+        const Case cases[] = {
+            {"z^2 + a", true},                  // Q = 1: the exemption holds
+            {"(z^3 + a)/2", true},              // Q a nonzero constant: still holds
+            {"z^2 + a/z", false},               // (z^3 + a)/z: crit points (a/2)^(1/3)
+            {"(z^3 + a)/(z^2 + 1)", false},
+            {"(z^3 + 1)/(z^2 + 1)", true},      // no parameter reaches it at all
+        };
+        for (const Case& c : cases) {
+            const RationalMap m = build_pq(c.src);
+            const bool flag = m.critical_points_constant();
+            const bool same = same_point_set(m.distinct_critical_points(Cplx(0.7, 0.2)),
+                                             m.distinct_critical_points(Cplx(-1.3, 0.9)));
+            char what[200];
+            std::snprintf(what, sizeof what, "%s: flagged %s, and its critical points %s",
+                          c.src, c.constant ? "constant" : "NOT constant",
+                          same ? "agree at two parameters" : "differ between two parameters");
+            check(flag == c.constant && same == c.constant, what);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED",
                 failures, failures == 1 ? "" : "s");

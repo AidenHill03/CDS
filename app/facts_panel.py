@@ -41,10 +41,14 @@ from __future__ import annotations
 import math
 from typing import Callable
 
-from PySide6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-                               QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtWidgets import (QAbstractItemView, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QPushButton, QTableWidget, QTableWidgetItem, QToolButton,
+                               QVBoxLayout, QWidget)
 
 import cdx
+from app import theme
 
 CRITICAL_COLUMNS = ("Point", "Multiplicity")
 FIXED_COLUMNS = ("Point", "Multiplier", "|Multiplier|", "Classification")
@@ -74,6 +78,53 @@ def _format_complex(z: complex) -> str:
     return s
 
 
+# The full-precision value of a cell (what its tooltip shows and Copy copies).
+_FULL_ROLE = Qt.ItemDataRole.UserRole
+
+
+def format_short(z: complex, digits: int = 6) -> str:
+    """6 significant digits per part, i for the imaginary unit, ∞ for infinity."""
+    if _is_inf(z):
+        return "∞"
+    if z.imag == 0:
+        return f"{z.real:.{digits}g}"
+    sign = "−" if z.imag < 0 else "+"
+    return f"{z.real:.{digits}g} {sign} {abs(z.imag):.{digits}g}i"
+
+
+def format_full(z: complex) -> str:
+    return "∞" if _is_inf(z) else _format_complex(z)
+
+
+def critical_orbit_fates(rational_map: cdx.RationalMap, a: complex, facts, max_iter: int,
+                         tol: float) -> list[tuple[complex, str]]:
+    """Where each distinct critical point's orbit goes, for the Info tab's
+    "This map" section: the attracting cycle it lands on (by chordal
+    distance -- infinity is an ordinary point of the sphere here), or that
+    none was found within `max_iter` iterations."""
+    out = []
+    cycles = list(facts.attracting_cycles)
+    for c in rational_map.distinct_critical_points(a):
+        z, fate = c, None
+        for n in range(max_iter + 1):
+            for cyc in cycles:
+                if any(cdx.chordal_distance(z, p) < tol for p in cyc.points):
+                    at_inf = any(_is_inf(p) for p in cyc.points)
+                    if cyc.period == 1:
+                        fate = "→ ∞ (attracting fixed point)" if at_inf else \
+                            f"→ fixed point {format_short(cyc.points[0], 4)}"
+                    else:
+                        fate = f"→ {cyc.period}-cycle"
+                    break
+            if fate is not None or n == max_iter:
+                break
+            z = rational_map.eval(z, a)
+            if math.isnan(z.real) or math.isnan(z.imag):
+                break
+        out.append((c, fate or f"no attracting cycle within {max_iter} iterations"))
+    return out
+
+
 def _is_inf(z: complex) -> bool:
     return math.isinf(z.real) or math.isinf(z.imag)
 
@@ -85,7 +136,7 @@ def _format_magnitude(z: complex) -> str:
     # convention other magnitude-like readouts already use (see
     # app.orbit_tracker's own cycle-multiplier text, app.sandbox's status-
     # bar readouts).
-    return f"{abs(z):.4g}"
+    return f"{abs(z):.6g}"
 
 
 def _classify(multiplier: complex) -> str:
@@ -185,6 +236,13 @@ def facts_to_dict(session, render_mode: str, viewport: cdx.Viewport) -> dict:
     }
 
 
+def _cell(z: complex) -> QTableWidgetItem:
+    """A table cell showing z to 6 significant digits, holding the full value."""
+    item = QTableWidgetItem(format_short(z))
+    item.setData(_FULL_ROLE, format_full(z))
+    return item
+
+
 class FactsPanel(QWidget):
     def __init__(self, session, on_center_view: Callable[[complex], None],
                 on_seed_orbit: Callable[[complex], None], parent: QWidget | None = None):
@@ -206,6 +264,7 @@ class FactsPanel(QWidget):
         self._row_points: dict[int, list[complex | None]] = {}
         # What clicking a row of each table does, as a tooltip/caption.
         self._row_hints: dict[int, str] = {}
+        self._section_toggles: dict[int, QToolButton] = {}
 
         self._build_ui()
         self.refresh()
@@ -213,13 +272,31 @@ class FactsPanel(QWidget):
     # ---- construction ------------------------------------------------------------------
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
+        # Compact summary on top: degree, critical points, attracting cycles.
+        summary = QFormLayout()
+        summary.setHorizontalSpacing(12)
+        summary.setVerticalSpacing(6)
         self._degree_label = QLabel()
-        self._degree_label.setStyleSheet("font-weight: bold;")
-        layout.addWidget(self._degree_label)
+        self._critical_summary = QLabel()
+        self._cycles_summary = QLabel()
+        for label in (self._degree_label, self._critical_summary, self._cycles_summary):
+            label.setProperty("mono", True)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for caption, value in (("Degree", self._degree_label),
+                               ("Critical points", self._critical_summary),
+                               ("Attracting cycles", self._cycles_summary)):
+            name = QLabel(caption)
+            name.setProperty("role", "muted")
+            summary.addRow(name, value)
+        layout.addLayout(summary)
 
         self._rh_label = QLabel()
         self._rh_label.setWordWrap(True)
+        self._rh_label.setProperty("role", "caption")
         layout.addWidget(self._rh_label)
 
         self._critical_table = self._add_table_group(layout, "Critical Points", CRITICAL_COLUMNS,
@@ -232,6 +309,7 @@ class FactsPanel(QWidget):
 
         row = QHBoxLayout()
         refresh_btn = QPushButton("Refresh")
+        refresh_btn.setToolTip("Recompute the facts for the current map and a")
         refresh_btn.clicked.connect(lambda: self.refresh(force=True))
         row.addWidget(refresh_btn)
         row.addStretch(1)
@@ -241,20 +319,76 @@ class FactsPanel(QWidget):
 
     def _add_table_group(self, layout: QVBoxLayout, title: str,
                          columns: tuple[str, ...], row_hint: str) -> QTableWidget:
-        box = QGroupBox(title)
-        v = QVBoxLayout(box)
+        """A collapsible section: a header button, the click caption, the table."""
+        group = QWidget()
+        v = QVBoxLayout(group)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        toggle = QToolButton(group)
+        toggle.setProperty("role", "sectionToggle")
+        toggle.setText(title)
+        toggle.setCheckable(True)
+        toggle.setChecked(True)
+        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.ArrowType.DownArrow)
+        toggle.setAccessibleName(f"{title}: show or hide")
+        v.addWidget(toggle)
         caption = QLabel(row_hint)
+        caption.setProperty("role", "caption")
         v.addWidget(caption)
         table = QTableWidget(0, len(columns))
         self._row_hints[id(table)] = row_hint
         table.setHorizontalHeaderLabels(columns)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        table.verticalHeader().setVisible(False)
+        table.setProperty("mono", True)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         table.cellClicked.connect(lambda row, _column, t=table: self._on_row_clicked(t, row))
+        # Copy copies the FULL values of the selected rows (cells show 6 digits).
+        copy = QAction("Copy", table)
+        copy.setShortcut(QKeySequence(QKeySequence.StandardKey.Copy))
+        copy.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        copy.triggered.connect(lambda _checked=False, t=table: self.copy_rows(t))
+        table.addAction(copy)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         v.addWidget(table)
-        layout.addWidget(box)
+        toggle.toggled.connect(lambda on, c=caption, t=table, b=toggle: (
+            c.setVisible(on), t.setVisible(on),
+            b.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)))
+        self._section_toggles[id(table)] = toggle
+        layout.addWidget(group)
         return table
+
+    def section_toggle(self, table: QTableWidget) -> QToolButton:
+        return self._section_toggles[id(table)]
+
+    def copy_rows(self, table: QTableWidget) -> str:
+        rows = sorted({i.row() for i in table.selectedItems()}) or (
+            [table.currentRow()] if table.currentRow() >= 0 else [])
+        lines = []
+        for r in rows:
+            cells = []
+            for c in range(table.columnCount()):
+                item = table.item(r, c)
+                cells.append("" if item is None else (item.data(_FULL_ROLE) or item.text()))
+            lines.append("\t".join(cells))
+        text = "\n".join(lines)
+        if text:
+            QGuiApplication.clipboard().setText(text)
+        return text
+
+    def _fit_table_height(self, table: QTableWidget) -> None:
+        """Tables show all their rows; the sidebar scrolls, not each table."""
+        height = table.horizontalHeader().height() + 2 * table.frameWidth()
+        for r in range(table.rowCount()):
+            height += table.rowHeight(r)
+        if table.horizontalScrollBar().isVisible() or table.horizontalHeader().length() > table.viewport().width():
+            height += table.horizontalScrollBar().sizeHint().height()
+        table.setFixedHeight(height)
 
     # ---- refresh: recompute only when (map, param) actually changed --------------------
     def refresh(self, force: bool = False) -> None:
@@ -267,17 +401,26 @@ class FactsPanel(QWidget):
 
     def _render_facts(self) -> None:
         facts = self._facts
-        self._degree_label.setText(f"Degree: {facts.degree}")
+        self._degree_label.setText(str(facts.degree))
+        self._degree_label.setAccessibleName(f"Degree: {facts.degree}")
+        groups = _critical_points_with_multiplicity(self.session.map, self.session.param)
+        self._critical_summary.setText(", ".join(
+            format_short(p, 4) + (f" (×{m})" if m > 1 else "") for p, m in groups) or "none")
+        cycles = list(facts.attracting_cycles)
+        self._cycles_summary.setText(", ".join(
+            ("∞ (fixed)" if cyc.period == 1 and any(_is_inf(p) for p in cyc.points)
+             else "fixed" if cyc.period == 1 else f"period {cyc.period}") for cyc in cycles)
+            or "none found")
 
         expected = 2 * facts.degree - 2
         actual = len(facts.critical_points)
         if actual == expected:
-            self._rh_label.setStyleSheet("")
+            theme.set_property(self._rh_label, "role", "muted")
             self._rh_label.setText(
                 f"Riemann-Hurwitz: {actual} critical points with multiplicity, "
                 f"matches 2d-2 = {expected} ✓")
         else:
-            self._rh_label.setStyleSheet("color: #cc4444; font-weight: bold;")
+            theme.set_property(self._rh_label, "role", "error")
             self._rh_label.setText(
                 f"Riemann-Hurwitz MISMATCH: {actual} critical points counted, expected "
                 f"2d-2 = {expected} -- critical_points() is incomplete for this map")
@@ -293,7 +436,7 @@ class FactsPanel(QWidget):
         table.setRowCount(len(groups))
         points: list[complex | None] = []
         for row, (point, mult) in enumerate(groups):
-            table.setItem(row, 0, QTableWidgetItem(_format_complex(point)))
+            table.setItem(row, 0, _cell(point))
             table.setItem(row, 1, QTableWidgetItem(str(mult)))
             points.append(point)
         self._row_points[id(table)] = points
@@ -305,8 +448,8 @@ class FactsPanel(QWidget):
         table.setRowCount(len(pts))
         points: list[complex | None] = []
         for row, fp in enumerate(pts):
-            table.setItem(row, 0, QTableWidgetItem(_format_complex(fp.point)))
-            table.setItem(row, 1, QTableWidgetItem(_format_complex(fp.multiplier)))
+            table.setItem(row, 0, _cell(fp.point))
+            table.setItem(row, 1, _cell(fp.multiplier))
             table.setItem(row, 2, QTableWidgetItem(_format_magnitude(fp.multiplier)))
             table.setItem(row, 3, QTableWidgetItem(_classify(fp.multiplier)))
             points.append(fp.point)
@@ -320,10 +463,11 @@ class FactsPanel(QWidget):
         points: list[complex | None] = []
         for row, cyc in enumerate(cycles):
             table.setItem(row, 0, QTableWidgetItem(str(cyc.period)))
-            table.setItem(row, 1, QTableWidgetItem(_format_complex(cyc.multiplier)))
+            table.setItem(row, 1, _cell(cyc.multiplier))
             table.setItem(row, 2, QTableWidgetItem(_format_magnitude(cyc.multiplier)))
-            table.setItem(row, 3, QTableWidgetItem(", ".join(_format_complex(p)
-                                                              for p in cyc.points)))
+            pts = QTableWidgetItem(", ".join(format_short(p) for p in cyc.points))
+            pts.setData(_FULL_ROLE, ", ".join(format_full(p) for p in cyc.points))
+            table.setItem(row, 3, pts)
             # A cycle row centres on its FIRST point -- some single choice
             # has to be made, and points[0] is the critical point's own
             # orbit landing spot that discovered this cycle (see
@@ -339,20 +483,24 @@ class FactsPanel(QWidget):
         table.setRowCount(len(locations))
         points: list[complex | None] = []
         for row, (loc, order) in enumerate(zip(locations, orders)):
-            table.setItem(row, 0, QTableWidgetItem(_format_complex(loc)))
+            table.setItem(row, 0, _cell(loc))
             table.setItem(row, 1, QTableWidgetItem(str(order)))
             points.append(loc)
         self._row_points[id(table)] = points
         self._apply_row_tooltips(table)
 
     def _apply_row_tooltips(self, table: QTableWidget) -> None:
+        """Each cell's tooltip: its full-precision value (if shortened), then
+        what clicking the row does."""
         hint = self._row_hints[id(table)]
         for row, point in enumerate(self._row_points[id(table)]):
             text = hint if point is not None and not _is_inf(point) else INFINITE_ROW_HINT
             for column in range(table.columnCount()):
                 item = table.item(row, column)
                 if item is not None:
-                    item.setToolTip(text)
+                    full = item.data(_FULL_ROLE)
+                    item.setToolTip(f"{full}\n{text}" if full and full != item.text() else text)
+        self._fit_table_height(table)
 
     # ---- click a row -> seeds an orbit (critical/fixed) or centres the view (pole) ------
     def _on_row_clicked(self, table: QTableWidget, row: int) -> None:

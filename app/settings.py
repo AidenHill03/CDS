@@ -361,6 +361,14 @@ def preview_path_for(name: str) -> Path:
     return previews_dir() / _preview_filename(name)
 
 
+def family_meta_path_for(name: str) -> Path:
+    """The JSON sidecar beside a family's preview PNG (same hashed stem):
+    its stored parameter-plane framing and the key its thumbnail was
+    rendered under -- see app.family_views. App-side, like the PNG, because
+    FamilyLibrary's serialized format has no room for extra fields."""
+    return previews_dir() / (_preview_filename(name)[:-len(".png")] + ".json")
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """Never raises: a missing file, unreadable file, malformed JSON, or a
     JSON value that is not an object all just fall back to Settings()'s

@@ -145,7 +145,16 @@ PYBIND11_MODULE(cdx, m) {
     py::enum_<CriticalPointFamily>(m, "CriticalPointFamily")
         .value("RelaxedNewtonPower", CriticalPointFamily::RelaxedNewtonPower,
               "Relaxed Newton of z^n-1 -- see the C++ enum's own doc comment for "
-              "the closed-form critical points this generates per pixel.");
+              "the closed-form critical points this generates per pixel. Valid ONLY "
+              "for a map that cdx.relaxed_newton_power_n recognises.")
+        .value("FromMap", CriticalPointFamily::FromMap,
+              "The map's own FREE critical points, per pixel (structurally "
+              "pre-fixed ones, e.g. infinity for a polynomial, dropped). The "
+              "default for every map that is not relaxed Newton.");
+
+    m.def("relaxed_newton_power_n", &relaxed_newton_power_n, py::arg("map"),
+          "n if `map` is structurally relaxed Newton of z^n - 1 "
+          "(((n-a)z^n + a)/(n z^(n-1)) as a function of z and a), else None.");
 
     // ---- ParameterStrategy (Renderer.render_parameter's rational path) -------
     py::enum_<ParameterStrategy>(m, "ParameterStrategy")
@@ -157,9 +166,9 @@ PYBIND11_MODULE(cdx, m) {
               "0 only if none of the free critical orbits settle, else the "
               "FASTEST-to-settle orbit's own smooth value.")
         .value("PerCritical", ParameterStrategy::PerCritical,
-              "Tracks exactly one distinct critical point's own orbit, selected "
-              "by critical_index into distinct_critical_points(a)'s own ordering "
-              "(clamped into range per pixel), ignoring the rest.");
+              "Tracks exactly one free critical point's own orbit: the one "
+              "critical_index selects in RationalMap.critical_point_labels(a) "
+              "order (clamped into range per pixel), ignoring the rest.");
 
     // ---- Map ---------------------------------------------------------------
     py::class_<Map>(m, "Map")
@@ -292,6 +301,55 @@ PYBIND11_MODULE(cdx, m) {
              "and infinity (multiplicity |p-q|-1 when |p-q| >= 2). Total "
              "count is 2*degree(a)-2 (Riemann-Hurwitz). Infinity is "
              "complex(float('inf'), 0).")
+        .def("free_critical_points",
+             [](const RationalMap& m, Cplx a) {
+                 return m.free_critical_points(a, m.distinct_critical_points(a),
+                                               m.free_critical_structure());
+             },
+             py::arg("a"),
+             "distinct_critical_points(a) minus the structurally pre-fixed ones "
+             "(infinity for a polynomial, a pole mapping to a fixed infinity, a "
+             "parameter-independent fixed critical point) -- see the C++ "
+             "FreeCriticalStructure comment for the rule.")
+        .def("critical_point_labels",
+             [](const RationalMap& m, Cplx a) { return m.critical_point_labels(a); },
+             py::arg("a"),
+             "The free critical points at `a` IN LABEL ORDER -- index k is what "
+             "critical_index = k selects in render_parameter (PerCritical) and "
+             "render_parameter_period. Labels are fixed at a base parameter "
+             "a* = 0.618+0.382i by (Re, Im) order and continued along the straight "
+             "segment a* -> a, so the only discontinuities are rays from collision "
+             "points pointing directly away from a*, independent of any viewport. "
+             "See the C++ CriticalLabelBase comment.")
+        .def("critical_label_base",
+             [](const RationalMap& m) {
+                 const CriticalLabelBase b = m.critical_label_base();
+                 py::dict d;
+                 d["a_star"] = b.a_star;
+                 d["points"] = b.points;
+                 d["constant"] = b.constant;
+                 d["expected_degree"] = b.expected_degree;
+                 d["closed_form_free"] = b.closed_form_free;
+                 return d;
+             },
+             "The labelling convention's base (see the C++ CriticalLabelBase "
+             "comment): a dict with a_star (the base parameter, after any "
+             "nudge), points (the free tracked critical points there, in label "
+             "order), constant (critical points do not move with a), "
+             "expected_degree (effective degree of the derivative numerator at "
+             "a_star) and closed_form_free.")
+        .def("deriv_numerator_coefficients", &RationalMap::deriv_numerator_poly, py::arg("a"),
+             "Ascending coefficients of the derivative numerator at `a` "
+             "(P'Q - PQ'): its roots are the finite critical points.")
+        .def("polynomial_coefficients",
+             [](const RationalMap& m, Cplx a) -> py::object {
+                 std::vector<Cplx> c;
+                 if (!m.polynomial_coefficients(a, c)) return py::none();
+                 return py::cast(c);
+             },
+             py::arg("a"),
+             "Ascending coefficients of f at `a` if the map is structurally a "
+             "polynomial, else None.")
         .def("distinct_critical_points", &RationalMap::distinct_critical_points,
              py::arg("a"), py::arg("rel_tol") = 1e-4,
              "critical_points(a), deduplicated to one representative per "
@@ -444,6 +502,37 @@ PYBIND11_MODULE(cdx, m) {
           "-- the SAME validation RationalMap.from_expression itself uses "
           "when actually building a map, exposed standalone for live-typing "
           "feedback before committing to that.");
+
+    m.def("parse_rational_info", [](const std::string& source) {
+              CanonicalRational cr;
+              std::string error;
+              if (!parse_rational(source, cr, error)) throw std::invalid_argument(error);
+              py::dict d;
+              d["parameters"] = cr.parameters;
+              d["warnings"] = cr.warnings;
+              d["degree_p"] = static_cast<int>(cr.P.coeffs.size()) - 1;
+              d["degree_q"] = static_cast<int>(cr.Q.coeffs.size()) - 1;
+              return d;
+          }, py::arg("source"),
+          "Like parse_rational_parameters, but returns a dict: 'parameters', "
+          "'warnings' (non-fatal parse notes, e.g. a special polynomial of "
+          "degree above 25), and the STRUCTURAL degrees 'degree_p'/'degree_q' "
+          "of the canonical numerator/denominator (-1 for the zero "
+          "polynomial; no common-factor cancellation).");
+
+    m.def("parse_rational_coefficients",
+          [](const std::string& source, const std::map<std::string, Cplx>& params) {
+              CanonicalRational cr;
+              std::string error;
+              if (!parse_rational(source, cr, error)) throw std::invalid_argument(error);
+              std::vector<Cplx> P, Q;
+              for (const auto& c : cr.P.coeffs) P.push_back(c->eval(params));
+              for (const auto& c : cr.Q.coeffs) Q.push_back(c->eval(params));
+              return py::make_tuple(P, Q);
+          }, py::arg("source"), py::arg("params") = std::map<std::string, Cplx>{},
+          "(P, Q): the canonical numerator and denominator coefficients "
+          "(ascending powers of z), each evaluated with `params` bound "
+          "(unbound parameters evaluate as 0). For tests and diagnostics.");
 
     // ---- ComposedMap (cdx/composed.hpp) ----------------------------------------
     py::class_<ComposedStage>(m, "ComposedStage")
@@ -611,21 +700,28 @@ PYBIND11_MODULE(cdx, m) {
              "Recentre on target and divide the half-width by factor.")
         .def_property_readonly("precision_floor", &Renderer::precision_floor,
              "Smallest half-width the double grid still resolves.")
+        .def_property("_reconciled_parameter_path", &Renderer::reconciled_parameter_path,
+             &Renderer::set_reconciled_parameter_path,
+             "INTERNAL, not a user setting: True switches parameter / parameter_basin / "
+             "parameter_period back to the old per-pixel attractor-reconciliation path, "
+             "kept only as a test oracle and for A/B timing (see Renderer::"
+             "set_reconciled_parameter_path).")
 
         .def("render_julia",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
                 const std::vector<Cycle>& cycles) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 Image labels;
-                 py::array_t<double> values_arr, labels_arr;
+                 Image labels, escaped;
+                 py::array_t<double> values_arr, labels_arr, escaped_arr;
                  {
                      py::gil_scoped_release release;   // let other threads run
-                     Image img = r.render_julia(cp, cycles, &labels);
+                     Image img = r.render_julia(cp, cycles, &labels, &escaped);
                      py::gil_scoped_acquire acquire;
                      values_arr = image_to_numpy(std::move(img));
                      labels_arr = image_to_numpy(std::move(labels));
+                     escaped_arr = image_to_numpy(std::move(escaped));
                  }
-                 return py::make_tuple(values_arr, labels_arr);
+                 return py::make_tuple(values_arr, labels_arr, escaped_arr);
              },
              py::arg("cancel") = nullptr, py::arg("cycles") = std::vector<Cycle>{},
              "Julia set of the bound map -- TWO PATHS (see Renderer::render_julia's "
@@ -639,7 +735,10 @@ PYBIND11_MODULE(cdx, m) {
              "0 = unresolved; labels = which attractor's Cycle.id each pixel "
              "reached, 0 = unresolved) -- the SAME (primary, shading-channel) "
              "split render_basin already returns, for the SAME reason (per-basin "
-             "hue + rate-based shading). Pass a CancelToken to make this "
+             "hue + rate-based shading). Returns (values, labels, escaped): `escaped` "
+             "is 1.0 where the pixel escaped/resolved -- THE escape status; the "
+             "smooth value is a shade only and may be <= 0 for fast escapes. "
+             "Pass a CancelToken to make this "
              "interruptible from another thread; on cancellation the (partial) "
              "result should be discarded, not displayed.")
 
@@ -647,28 +746,36 @@ PYBIND11_MODULE(cdx, m) {
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel,
                 ParameterStrategy strategy, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 py::array_t<double> arr;
+                 Image escaped;
+                 py::array_t<double> arr, escaped_arr;
                  {
                      py::gil_scoped_release release;
-                     Image img = r.render_parameter(cp, strategy, critical_index);
+                     Image img = r.render_parameter(cp, strategy, critical_index, &escaped);
                      py::gil_scoped_acquire acquire;
                      arr = image_to_numpy(std::move(img));
+                     escaped_arr = image_to_numpy(std::move(escaped));
                  }
-                 return arr;
+                 return py::make_tuple(arr, escaped_arr);
              },
              py::arg("cancel") = nullptr, py::arg("strategy") = ParameterStrategy::Slowest,
              py::arg("critical_index") = 0,
              "Parameter plane (Mandelbrot / multibrot / McMullenbrot / a Custom "
              "rational family). TWO PATHS (see Renderer::render_parameter's own "
-             "doc comment): a CERTIFIED polynomial keeps the pre-Stage-1 escape-"
-             "time form, escape_radius-governed (a VISUALIZATION knob, not an "
-             "invariant of the map) -- `strategy`/`critical_index` are ignored. A "
+             "doc comment): a CERTIFIED polynomial is escape-time of its FREE "
+             "critical orbits -- one orbit for z^d + a (strategy ignored), every "
+             "free orbit combined by `strategy` when there are several (Slowest: "
+             "0 iff some orbit is bounded; Fastest: 0 iff none escapes, the "
+             "connectedness locus; PerCritical: the critical_index orbit). A "
              "RATIONAL map (has poles) is sphere-aware and multi-critical: EVERY "
              "free critical point is classified against the complete attractor "
              "set (fixed point, cycle, or infinity), and `strategy` (a "
              "ParameterStrategy) combines their smooth chordal rates into the "
              "one value each pixel gets; escape_radius plays no role there at "
-             "all. `critical_index` only matters for ParameterStrategy.PerCritical.")
+             "all. `critical_index` only matters for ParameterStrategy.PerCritical. "
+             "Returns (values, escaped): `escaped` is 1.0 where the pixel escaped/"
+             "resolved under `strategy` (Slowest: every free orbit; Fastest: any; "
+             "PerCritical: the selected one) -- THE escape status; values may be "
+             "any real number (0 where not escaped).")
 
         .def("render_parameter_basin",
              [](const Renderer& r, std::shared_ptr<CancelToken> cancel) {
@@ -708,43 +815,40 @@ PYBIND11_MODULE(cdx, m) {
 
         .def("render_parameter_period",
              [](const Renderer& r, CriticalPointFamily seed_family, int n,
-                std::shared_ptr<CancelToken> cancel) {
+                std::shared_ptr<CancelToken> cancel, int critical_index) {
                  const std::atomic<bool>* cp = cancel ? cancel->ptr() : nullptr;
-                 Image undetermined, is_infinity;
-                 py::array_t<double> periods_arr, undetermined_arr, is_infinity_arr;
+                 Image undetermined, is_infinity, mixed;
+                 py::array_t<double> periods_arr, undetermined_arr, is_infinity_arr, mixed_arr;
                  {
                      py::gil_scoped_release release;
                      Image img = r.render_parameter_period(seed_family, n, cp, &undetermined,
-                                                           &is_infinity);
+                                                           &is_infinity, critical_index, &mixed);
                      py::gil_scoped_acquire acquire;
                      periods_arr = image_to_numpy(std::move(img));
                      undetermined_arr = image_to_numpy(std::move(undetermined));
                      is_infinity_arr = image_to_numpy(std::move(is_infinity));
+                     mixed_arr = image_to_numpy(std::move(mixed));
                  }
-                 return py::make_tuple(periods_arr, undetermined_arr, is_infinity_arr);
+                 return py::make_tuple(periods_arr, undetermined_arr, is_infinity_arr, mixed_arr);
              },
              py::arg("seed_family"), py::arg("n"), py::arg("cancel") = nullptr,
+             py::arg("critical_index") = 0,
              "Parameter_period: each pixel is a parameter value; returns (periods, "
-             "undetermined, is_infinity). periods is the PERIOD (measured in the "
-             "raw z-plane -- see per_seed_outcomes, never a symmetry quotient) of "
-             "the attracting cycle a TRACKED critical orbit converges to, where "
-             "`seed_family` (a CriticalPointFamily) supplies that orbit's closed-"
-             "form location per pixel -- deliberately NOT RationalMap.distinct_"
-             "critical_points(a) the way Parameter_basin uses, since that includes "
-             "critical points structurally unrelated to the tracked orbit (see "
-             "Renderer.render_parameter_period's own C++ doc comment for a measured "
-             "example). `n` is the family's own structural parameter (e.g. the "
-             "power in relaxed-Newton-of-z^n-1; for that family it equals map."
-             "degree(a) exactly, if the caller only has the map itself). "
-             "undetermined is 1.0 where no tracked seed resolved within budget "
-             "(a genuine residual -- Siegel/Herman/parabolic -- never a fabricated "
+             "undetermined, is_infinity, mixed). periods is the PERIOD (measured "
+             "in the raw z-plane -- see per_seed_outcomes, never a symmetry "
+             "quotient) of the attracting cycle a TRACKED critical orbit converges "
+             "to. `seed_family` picks the seeds: FromMap (the map's own free "
+             "critical points; the period of the one selected by critical_index) "
+             "for any map, or RelaxedNewtonPower (closed form, `n` = the power) "
+             "ONLY for a map cdx.relaxed_newton_power_n recognises. undetermined "
+             "is 1.0 where the tracked orbit did not resolve within budget (a "
+             "genuine residual -- Siegel/Herman/parabolic -- never a fabricated "
              "period); is_infinity is 1.0 where the resolved cycle is the point at "
-             "infinity, kept OUT of `periods`' own value and its golden-hue color "
-             "family. At most one of the two is ever 1.0 for the same pixel. "
+             "infinity, kept OUT of `periods`' own value. At most one of the two "
+             "is ever 1.0 for the same pixel. mixed (FromMap only) is 1.0 where "
+             "the resolved free critical orbits reached different cycles. "
              "Escape-radius-free. Requires a Custom-wrapped map -- degrades to an "
-             "honest all-undetermined image otherwise. CURRENTLY SUPPORTS EXACTLY "
-             "ONE seed_family (RelaxedNewtonPower) -- see CriticalPointFamily's "
-             "own doc comment before calling this on any other map shape.")
+             "honest all-undetermined image otherwise.")
 
         .def("render_basin",
              [](const Renderer& r, const std::vector<Cycle>& cycles,
@@ -864,7 +968,8 @@ PYBIND11_MODULE(cdx, m) {
     py::class_<SeedOutcome>(m, "SeedOutcome")
         .def_readonly("period",      &SeedOutcome::period)
         .def_readonly("is_infinity", &SeedOutcome::is_infinity)
-        .def_readonly("resolved",    &SeedOutcome::resolved);
+        .def_readonly("resolved",    &SeedOutcome::resolved)
+        .def_readonly("cycle",       &SeedOutcome::cycle);
 
     m.def("per_seed_outcomes", &per_seed_outcomes, py::arg("seeds"), py::arg("map"), py::arg("a"),
           py::arg("opts") = FindAttractorsOptions{},
@@ -880,6 +985,12 @@ PYBIND11_MODULE(cdx, m) {
           "case, never a fabricated period. period is measured in the raw "
           "z-plane, never a symmetry quotient. This is what Renderer."
           "render_parameter_period uses per pixel.");
+
+    m.def("polynomial_escape_radius", &polynomial_escape_radius, py::arg("coeffs"),
+          "Certified escape radius rho of the polynomial with these ASCENDING "
+          "coefficients: the positive root of |a_d| r^d - sum_{k<d} |a_k| r^k - r. "
+          "Any orbit with |z| > rho escapes to infinity. Every polynomial "
+          "escape-time path escapes at max(rho, settings.escape_radius).");
 
     m.def("polynomial_escape_certified", &polynomial_escape_certified, py::arg("map"),
           "True iff `map` has no poles anywhere (structurally -- independent of the "

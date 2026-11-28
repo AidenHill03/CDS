@@ -683,6 +683,123 @@ CompiledMap RationalMap::compile(Cplx a) const {
 }
 
 // -----------------------------------------------------------------------------
+// CompiledMap cold-path companions -- see the header.
+// -----------------------------------------------------------------------------
+namespace {
+Cplx horner(const std::vector<double>& re, const std::vector<double>& im, Cplx z, Cplx* d) {
+    Cplx v(0.0, 0.0), dv(0.0, 0.0);
+    for (std::size_t k = re.size(); k-- > 0;) {
+        dv = dv * z + v;
+        v = v * z + Cplx(re[k], im[k]);
+    }
+    if (d) *d = dv;
+    return v;
+}
+int top_nonzero(const std::vector<double>& re, const std::vector<double>& im) {
+    for (std::size_t k = re.size(); k-- > 0;) if (re[k] != 0.0 || im[k] != 0.0) return static_cast<int>(k);
+    return -1;
+}
+}  // namespace
+
+Cplx CompiledMap::eval_c(Cplx z) const {
+    double zr = z.real(), zi = z.imag();
+    step(zr, zi);
+    return {zr, zi};
+}
+
+Cplx CompiledMap::deriv_c(Cplx z) const {
+    if (is_pq_) {
+        Cplx dp, dq;
+        const Cplx p = horner(pr_, pi_, z, &dp);
+        const Cplx q = horner(qr_, qi_, z, &dq);
+        if (q == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        return (dp * q - p * dq) / (q * q);
+    }
+    Cplx d(0.0, 0.0);
+    for (const auto& t : poly_) {
+        if (t.exponent == 0) continue;
+        d += Cplx(t.cr, t.ci) * static_cast<double>(t.exponent) *
+             std::pow(z, static_cast<double>(t.exponent - 1));
+    }
+    for (const auto& t : pole_) {
+        const Cplx w = z - Cplx(t.lr, t.li);
+        if (w == Cplx(0.0, 0.0)) return {std::numeric_limits<double>::infinity(), 0.0};
+        d -= Cplx(t.sr, t.si) * static_cast<double>(t.order) / std::pow(w, t.order + 1);
+    }
+    return d;
+}
+
+void CompiledMap::infinity_shape(bool& fixed, int& local_degree, Cplx& multiplier,
+                                 Cplx& image) const {
+    fixed = false;
+    local_degree = 1;
+    multiplier = Cplx(1.0, 0.0);
+    image = Cplx(0.0, 0.0);
+    int k;                // deg P - deg Q (f ~ c z^k at infinity)
+    Cplx lead_ratio;      // c
+    if (is_pq_) {
+        const int dp = top_nonzero(pr_, pi_), dq = top_nonzero(qr_, qi_);
+        if (dp < 0 || dq < 0) return;
+        k = dp - dq;
+        lead_ratio = Cplx(pr_[static_cast<std::size_t>(dp)], pi_[static_cast<std::size_t>(dp)]) /
+                     Cplx(qr_[static_cast<std::size_t>(dq)], qi_[static_cast<std::size_t>(dq)]);
+    } else {
+        // Pole terms vanish at infinity; the highest-exponent poly terms decide.
+        k = std::numeric_limits<int>::min();
+        Cplx c(0.0, 0.0);
+        for (const auto& t : poly_) {
+            if (t.cr == 0.0 && t.ci == 0.0) continue;
+            if (t.exponent > k) { k = t.exponent; c = Cplx(t.cr, t.ci); }
+            else if (t.exponent == k) c += Cplx(t.cr, t.ci);
+        }
+        if (k == std::numeric_limits<int>::min() || c == Cplx(0.0, 0.0)) return;
+        lead_ratio = c;
+    }
+    if (k >= 2) { fixed = true; local_degree = k; multiplier = Cplx(0.0, 0.0); return; }
+    if (k == 1) { fixed = true; local_degree = 1; multiplier = Cplx(1.0, 0.0) / lead_ratio; return; }
+    image = k == 0 ? lead_ratio : Cplx(0.0, 0.0);
+}
+
+void RationalMap::compile_into(Cplx a, CompiledMap& c) const {
+    c.poly_.clear();
+    c.pole_.clear();
+    c.pr_.clear();
+    c.pi_.clear();
+    c.qr_.clear();
+    c.qi_.clear();
+    if (pq_) {
+        c.is_pq_ = true;
+        thread_local std::map<std::string, Cplx> params;
+        if (pq_param_.empty()) params.clear();
+        else if (params.size() != 1 || params.begin()->first != pq_param_) params = {{pq_param_, a}};
+        else params.begin()->second = a;
+        for (const auto& coeff : pq_->P.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.pr_.push_back(v.real());
+            c.pi_.push_back(v.imag());
+        }
+        for (const auto& coeff : pq_->Q.coeffs) {
+            const Cplx v = coeff->eval(params);
+            c.qr_.push_back(v.real());
+            c.qi_.push_back(v.imag());
+        }
+        return;
+    }
+    c.is_pq_ = false;
+    for (const auto& t : poly_) {
+        if (!t.enabled) continue;
+        const Cplx coeff = t.effective_coeff(a);
+        c.poly_.push_back({coeff.real(), coeff.imag(), t.exponent});
+    }
+    for (const auto& t : pole_) {
+        if (!t.enabled) continue;
+        const Cplx loc = t.effective_location(a);
+        const Cplx str = t.effective_strength(a);
+        c.pole_.push_back({loc.real(), loc.imag(), str.real(), str.imag(), t.order});
+    }
+}
+
+// -----------------------------------------------------------------------------
 int RationalMap::degree(Cplx a) const {
     if (pq_) {
         const auto params = pq_binding(pq_param_, a);
@@ -967,10 +1084,17 @@ bool RationalMap::critical_points_constant() const {
             if (references_param(c, pq_param_)) return false;
         }
         // P must not reference the parameter EXCEPT possibly its degree-0
-        // (constant) coefficient -- mirrors the term-based path's own
-        // exponent==0 exemption exactly (see the header's own comment on
-        // why that's safe: such a term never reaches the derivative).
-        for (std::size_t k = 1; k < pq_->P.coeffs.size(); ++k) {
+        // (constant) coefficient, and only when Q is a constant: then
+        // f = P/Q is a sum whose constant term never reaches f' -- the
+        // term-based path's exponent==0 exemption. With a non-constant Q
+        // that coefficient DOES reach the derivative numerator P'Q - PQ'
+        // (through -P Q'): z^2 + a/z = (z^3 + a)/z has critical points
+        // (a/2)^(1/3), which move with a.
+        bool q_is_constant = true;
+        for (std::size_t k = 1; k < pq_->Q.coeffs.size(); ++k) {
+            if (!pq_->Q.coeffs[k]->is_zero_literal()) { q_is_constant = false; break; }
+        }
+        for (std::size_t k = q_is_constant ? 1 : 0; k < pq_->P.coeffs.size(); ++k) {
             if (references_param(pq_->P.coeffs[k], pq_param_)) return false;
         }
         return true;
@@ -990,6 +1114,410 @@ bool RationalMap::critical_points_constant() const {
         if (!t.enabled) continue;
         if (t.param_power != 0 || t.location_is_param) return false;
     }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Free vs structurally pre-fixed critical points -- see FreeCriticalStructure
+// in the header for the rule this implements.
+// -----------------------------------------------------------------------------
+namespace {
+// Three parameter values with no special meaning: irrational-looking,
+// spread over the unit disc, none on the real axis, none a root of unity.
+// A property that holds at all three is (generically) structural.
+const Cplx kGenericParams[3] = {Cplx(0.3711, 0.2179), Cplx(-0.5813, 0.4417),
+                                Cplx(0.2269, -0.7351)};
+
+bool finite_cplx(Cplx z) { return std::isfinite(z.real()) && std::isfinite(z.imag()); }
+
+double chordal_dist(Cplx z, Cplx w) {
+    const bool zi = !finite_cplx(z), wi = !finite_cplx(w);
+    if (zi && wi) return 0.0;
+    if (zi) return 2.0 / std::sqrt(1.0 + std::norm(w));
+    if (wi) return 2.0 / std::sqrt(1.0 + std::norm(z));
+    return 2.0 * std::abs(z - w) / std::sqrt((1.0 + std::norm(z)) * (1.0 + std::norm(w)));
+}
+
+bool near_rel(Cplx z, Cplx w, double rel_tol) {
+    return std::abs(z - w) < rel_tol * std::max(1.0, std::max(std::abs(z), std::abs(w)));
+}
+}  // namespace
+
+FreeCriticalStructure RationalMap::free_critical_structure() const {
+    // static: used inside a non-capturing lambda below, which MSVC (C3493)
+    // only allows for a variable with static storage duration.
+    static constexpr double kSameLocation = 1e-6;   // relative; a multiple root's estimates spread ~1e-5..1e-6
+    constexpr double kFixedTol     = 1e-7;   // chordal; "f(w) == w"
+
+    FreeCriticalStructure s;
+    std::vector<Cplx> crit[3];
+    std::vector<Cplx> poles[3];
+    bool inf_fixed[3] = {false, false, false};
+    for (int i = 0; i < 3; ++i) {
+        crit[i] = distinct_critical_points(kGenericParams[i]);
+        poles[i] = pole_locations(kGenericParams[i]);
+        for (const FixedPoint& fp : fixed_points(kGenericParams[i])) {
+            if (!finite_cplx(fp.point)) inf_fixed[i] = true;
+        }
+    }
+    const bool inf_fixed_all = inf_fixed[0] && inf_fixed[1] && inf_fixed[2];
+    s.exclude_infinity = inf_fixed_all;
+    s.exclude_poles = inf_fixed_all;
+
+    auto is_pole = [](Cplx z, const std::vector<Cplx>& ps) {
+        for (Cplx p : ps) if (near_rel(z, p, kSameLocation)) return true;
+        return false;
+    };
+
+    // Finite, non-pole candidates from the first generic parameter; each must
+    // reappear at the same location at the other two, pre-fixed onto the
+    // same target every time.
+    for (Cplx c : crit[0]) {
+        if (!finite_cplx(c) || is_pole(c, poles[0])) continue;
+        bool excluded = true;
+        Cplx target0(0.0, 0.0);
+        for (int i = 0; i < 3 && excluded; ++i) {
+            const Cplx a = kGenericParams[i];
+            bool present = false;
+            for (Cplx ci : crit[i]) if (finite_cplx(ci) && near_rel(c, ci, kSameLocation)) present = true;
+            if (!present) { excluded = false; break; }
+
+            const Cplx w = eval(c, a);
+            bool prefixed;
+            if (!finite_cplx(w) || std::abs(w) > 1e12) {
+                prefixed = inf_fixed[i];
+            } else {
+                prefixed = chordal_dist(eval(w, a), w) < kFixedTol;
+            }
+            if (!prefixed) { excluded = false; break; }
+            const Cplx target = finite_cplx(w) && std::abs(w) <= 1e12
+                                    ? w : Cplx(std::numeric_limits<double>::infinity(), 0.0);
+            if (i == 0) target0 = target;
+            else if (chordal_dist(target, target0) > kFixedTol) excluded = false;
+        }
+        if (excluded) s.excluded_finite.push_back(c);
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        const int n = static_cast<int>(free_critical_points(kGenericParams[i], crit[i], s).size());
+        s.generic_free_count = std::max(s.generic_free_count, n);
+    }
+    return s;
+}
+
+std::vector<Cplx> RationalMap::free_critical_points(Cplx a, const std::vector<Cplx>& distinct,
+                                                    const FreeCriticalStructure& s) const {
+    constexpr double kMatch = 1e-4;   // distinct_critical_points' own dedup radius
+    std::vector<Cplx> poles;
+    if (s.exclude_poles && !is_polynomial_structurally()) poles = pole_locations(a);
+
+    std::vector<Cplx> out;
+    out.reserve(distinct.size());
+    for (Cplx z : distinct) {
+        if (!finite_cplx(z)) {
+            if (!s.exclude_infinity) out.push_back(z);
+            continue;
+        }
+        bool drop = false;
+        for (Cplx p : poles) if (near_rel(z, p, 1e-6)) { drop = true; break; }
+        for (Cplx e : s.excluded_finite) if (!drop && near_rel(z, e, kMatch)) { drop = true; break; }
+        if (!drop) out.push_back(z);
+    }
+    return out;
+}
+
+// -----------------------------------------------------------------------------
+// Critical-point labelling -- see CriticalLabelBase in the header for the
+// convention this implements.
+// -----------------------------------------------------------------------------
+namespace {
+constexpr double kLabelCollapse = 1e-9;   // relative: "two tracked points merged"
+
+double round9(double v) { return std::round(v * 1e9) / 1e9; }
+
+void sort_re_im(std::vector<Cplx>& v) {
+    std::stable_sort(v.begin(), v.end(), [](Cplx x, Cplx y) {
+        const bool xi = !finite_cplx(x), yi = !finite_cplx(y);
+        if (xi != yi) return yi;              // finite before infinite
+        if (xi) return false;
+        const double xr = round9(x.real()), yr = round9(y.real());
+        if (xr != yr) return xr < yr;
+        return round9(x.imag()) < round9(y.imag());
+    });
+}
+
+// Plain Newton on an ascending coefficient vector; converged iff the last
+// correction is below 1e-13 relative within `iters` steps.
+bool newton_poly(const std::vector<Cplx>& c, Cplx& z, int iters) {
+    for (int it = 0; it < iters; ++it) {
+        Cplx v(0.0, 0.0), dv(0.0, 0.0);
+        for (std::size_t k = c.size(); k-- > 0;) {
+            dv = dv * z + v;
+            v = v * z + c[k];
+        }
+        if (std::abs(dv) < 1e-300) return false;
+        const Cplx dz = v / dv;
+        z -= dz;
+        if (!finite_cplx(z)) return false;
+        if (std::abs(dz) <= 1e-13 * std::max(1.0, std::abs(z))) return true;
+    }
+    return false;
+}
+
+double min_separation(const std::vector<Cplx>& pts, std::size_t i) {
+    double m = std::numeric_limits<double>::infinity();
+    for (std::size_t j = 0; j < pts.size(); ++j) {
+        if (j != i) m = std::min(m, std::abs(pts[i] - pts[j]));
+    }
+    return m;
+}
+}  // namespace
+
+void PolyCoeffsInA::eval(Cplx a, std::vector<Cplx>& out) const {
+    out.resize(static_cast<std::size_t>(z_terms));
+    for (int k = 0; k < z_terms; ++k) {
+        const Cplx* c = &coef[static_cast<std::size_t>(k * a_terms)];
+        Cplx v(0.0, 0.0);
+        for (int j = a_terms - 1; j >= 0; --j) v = v * a + c[j];   // Horner in a
+        out[static_cast<std::size_t>(k)] = v;
+    }
+}
+
+namespace {
+// Fits sample(a) -- a coefficient vector in z whose entries are polynomials
+// in a -- from 16 samples on |a| = 1, and accepts the fit only if it
+// reproduces sample() at four other parameters (|a| up to ~4) to 1e-10
+// relative. See PolyCoeffsInA.
+template <typename Sample>
+PolyCoeffsInA fit_coeffs_in_a(Sample&& sample) {
+    constexpr int M = 16;
+    PolyCoeffsInA f;
+    std::vector<std::vector<Cplx>> samples(M);
+    std::size_t zt = 0;
+    const double two_pi = 2.0 * std::acos(-1.0);
+    for (int m = 0; m < M; ++m) {
+        if (!sample(std::polar(1.0, two_pi * m / M), samples[static_cast<std::size_t>(m)])) return f;
+        zt = std::max(zt, samples[static_cast<std::size_t>(m)].size());
+    }
+    if (zt == 0) return f;
+    for (auto& v : samples) v.resize(zt, Cplx(0.0, 0.0));
+
+    // Discrete Fourier inversion on the unit circle: c_j = (1/M) sum_m f(w^m) w^{-jm}.
+    std::vector<Cplx> coef(zt * M, Cplx(0.0, 0.0));
+    int a_terms = 1;
+    for (std::size_t k = 0; k < zt; ++k) {
+        double scale = 0.0;
+        for (int j = 0; j < M; ++j) {
+            Cplx acc(0.0, 0.0);
+            for (int m = 0; m < M; ++m) {
+                acc += samples[static_cast<std::size_t>(m)][k] * std::polar(1.0, -two_pi * j * m / M);
+            }
+            coef[k * M + static_cast<std::size_t>(j)] = acc / static_cast<double>(M);
+            scale = std::max(scale, std::abs(acc) / M);
+        }
+        for (int j = 0; j < M; ++j) {   // round-off from the transform is not a coefficient
+            Cplx& c = coef[k * M + static_cast<std::size_t>(j)];
+            if (std::abs(c) <= 1e-13 * scale) c = Cplx(0.0, 0.0);   // <=: an all-zero row has scale 0
+            else a_terms = std::max(a_terms, j + 1);
+        }
+    }
+    if (a_terms >= M) return f;   // degree in a too high to have been captured: not polynomial
+    f.z_terms = static_cast<int>(zt);
+    f.a_terms = a_terms;
+    f.coef.resize(zt * static_cast<std::size_t>(a_terms));
+    for (std::size_t k = 0; k < zt; ++k)
+        for (int j = 0; j < a_terms; ++j)
+            f.coef[k * static_cast<std::size_t>(a_terms) + static_cast<std::size_t>(j)] =
+                coef[k * M + static_cast<std::size_t>(j)];
+
+    // Verify away from the sampling circle, including |a| ~ 4.
+    const Cplx checks[4] = {Cplx(0.0, 0.0), Cplx(0.3711, 0.2179), Cplx(2.3, -1.7), Cplx(-4.1, 0.6)};
+    std::vector<Cplx> got, want;
+    for (const Cplx& a : checks) {
+        if (!sample(a, want)) { f.valid = false; return f; }
+        want.resize(zt, Cplx(0.0, 0.0));
+        f.valid = true;
+        f.eval(a, got);
+        double mx = 1.0;
+        for (const Cplx& w : want) mx = std::max(mx, std::abs(w));
+        for (std::size_t k = 0; k < zt; ++k) {
+            if (!(std::abs(got[k] - want[k]) <= 1e-10 * mx)) { f.valid = false; return f; }
+        }
+    }
+    return f;
+}
+}  // namespace
+
+DerivNumeratorInA RationalMap::compile_deriv_numerator_in_a() const {
+    return fit_coeffs_in_a([this](Cplx a, std::vector<Cplx>& out) {
+        out = deriv_numerator_poly(a);
+        return true;
+    });
+}
+
+PolyCoeffsInA RationalMap::compile_polynomial_coefficients_in_a() const {
+    if (!is_polynomial_structurally()) return {};
+    return fit_coeffs_in_a([this](Cplx a, std::vector<Cplx>& out) {
+        return polynomial_coefficients(a, out);
+    });
+}
+
+CriticalLabelBase RationalMap::critical_label_base() const {
+    CriticalLabelBase b;
+    b.fast = compile_deriv_numerator_in_a();
+    b.free_s = free_critical_structure();
+    b.constant = critical_points_constant();
+    b.closed_form_free = !b.free_s.exclude_infinity ||
+                         (!b.free_s.exclude_poles && !is_polynomial_structurally());
+
+    // Free tracked points at a candidate base: ordinary roots of the
+    // derivative numerator, deduplicated, minus pole-coincident and
+    // structurally pre-fixed ones.
+    auto tracked_at = [this, &b](Cplx a, int& deg) {
+        const std::vector<Cplx> num = deriv_numerator_poly(a);
+        deg = effective_degree(Polynomial{num});
+        std::vector<Cplx> ord = deg > 0 ? exclude_pole_coincident(roots(Polynomial{num}),
+                                                                  pole_locations(a))
+                                        : std::vector<Cplx>{};
+        ord = dedup_points(ord, 1e-4);
+        std::vector<Cplx> out;
+        for (Cplx z : ord) {
+            bool excluded = false;
+            for (Cplx e : b.free_s.excluded_finite) if (near_rel(z, e, 1e-4)) excluded = true;
+            if (!excluded) out.push_back(z);
+        }
+        return out;
+    };
+
+    Cplx a = b.a_star;
+    int best_n = -1;   // keeps the best-separated candidate if all 40 fail (never seen)
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        int deg = 0;
+        std::vector<Cplx> pts = tracked_at(a, deg);
+        bool separated = true;
+        for (std::size_t i = 0; i < pts.size() && separated; ++i) {
+            for (std::size_t j = i + 1; j < pts.size(); ++j) {
+                if (near_rel(pts[i], pts[j], 1e-6)) { separated = false; break; }
+            }
+        }
+        if (separated && static_cast<int>(pts.size()) > best_n) {
+            best_n = static_cast<int>(pts.size());
+            b.a_star = a;
+            b.points = pts;
+            b.expected_degree = deg;
+        }
+        if (separated) break;   // nothing near-collided here: this is a*
+        a += Cplx(0.0, 0.0137);
+    }
+    sort_re_im(b.points);
+    return b;
+}
+
+bool RationalMap::continue_critical_labels(const CriticalLabelBase& base, Cplx from_a,
+                                           const std::vector<Cplx>& from_pts, Cplx to_a,
+                                           std::vector<Cplx>& out) const {
+    if (from_pts.empty()) { out.clear(); return true; }
+    const Cplx delta = to_a - from_a;
+    std::vector<Cplx> pts = from_pts, prev_pts, next;
+    double t = 0.0, prev_h = 0.0;
+    double h = std::abs(delta) > 0.0 ? 1.0 : 0.0;
+    if (h == 0.0) { out = pts; return true; }
+    int guard = 0;
+    Polynomial numpoly;                 // reused buffer: no allocation per step
+    std::vector<Cplx>& num = numpoly.coeffs;
+    while (t < 1.0) {
+        if (++guard > 4000 || h < 1e-7) return false;
+        const double t1 = std::min(1.0, t + h);
+        const double step = t1 - t;
+        const Cplx at = from_a + delta * t1;
+        if (base.fast.valid) base.fast.eval(at, num);
+        else num = deriv_numerator_poly(at);
+        if (effective_degree(numpoly) != base.expected_degree) return false;
+
+        next.resize(pts.size());
+        bool ok = true;
+        for (std::size_t i = 0; i < pts.size() && ok; ++i) {
+            Cplx z = pts[i];
+            if (prev_h > 0.0) z += (pts[i] - prev_pts[i]) * (step / prev_h);   // secant predictor
+            if (!newton_poly(num, z, 8)) { ok = false; break; }
+            // No jumping to a neighbouring root: the corrected point must stay
+            // within a quarter of this point's distance to its nearest neighbour.
+            const double sep = min_separation(pts, i);
+            if (std::isfinite(sep) && std::abs(z - pts[i]) > 0.25 * sep) ok = false;
+            next[i] = z;
+        }
+        if (ok) {
+            for (std::size_t i = 0; i < next.size() && ok; ++i) {
+                for (std::size_t j = i + 1; j < next.size(); ++j) {
+                    if (near_rel(next[i], next[j], kLabelCollapse)) { ok = false; break; }
+                }
+            }
+        }
+        if (!ok) { h *= 0.5; continue; }
+        prev_pts.swap(pts);
+        prev_h = step;
+        pts.swap(next);
+        t = t1;
+        h = std::min(0.5, 2.0 * h);
+    }
+    out = std::move(pts);
+    return true;
+}
+
+std::vector<Cplx> RationalMap::assemble_labels(Cplx a, const CriticalLabelBase& base,
+                                               std::vector<Cplx> tracked, bool sort_tracked) const {
+    if (sort_tracked) sort_re_im(tracked);
+    if (!base.closed_form_free) return tracked;
+    std::vector<Cplx> extra = free_critical_points(
+        a, dedup_points(assemble_critical_points(a, {}), 1e-4), base.free_s);
+    sort_re_im(extra);
+    tracked.insert(tracked.end(), extra.begin(), extra.end());
+    return tracked;
+}
+
+std::vector<Cplx> RationalMap::critical_point_labels(Cplx a, const CriticalLabelBase& base) const {
+    if (base.constant) return assemble_labels(a, base, base.points, false);
+    std::vector<Cplx> tracked;
+    if (continue_critical_labels(base, base.a_star, base.points, a, tracked)) {
+        return assemble_labels(a, base, std::move(tracked), false);
+    }
+    // Fallback (the pixel is on a cut, or the root count changed): the base
+    // rule applied at `a` itself.
+    std::vector<Cplx> ord = exclude_pole_coincident(roots(Polynomial{deriv_numerator_poly(a)}),
+                                                    pole_locations(a));
+    ord = dedup_points(ord, 1e-4);
+    std::vector<Cplx> free_ord;
+    for (Cplx z : ord) {
+        bool excluded = false;
+        for (Cplx e : base.free_s.excluded_finite) if (near_rel(z, e, 1e-4)) excluded = true;
+        if (!excluded) free_ord.push_back(z);
+    }
+    return assemble_labels(a, base, std::move(free_ord), true);
+}
+
+std::vector<Cplx> RationalMap::critical_point_labels(Cplx a) const {
+    return critical_point_labels(a, critical_label_base());
+}
+
+bool RationalMap::polynomial_coefficients(Cplx a, std::vector<Cplx>& out) const {
+    if (!is_polynomial_structurally()) return false;
+    std::vector<Cplx> c;
+    if (pq_) {
+        const auto params = pq_binding(pq_param_, a);
+        c = eval_coeffs(pq_->P, params);
+        const std::vector<Cplx> Q = eval_coeffs(pq_->Q, params);
+        const Cplx q0 = Q.empty() ? Cplx(1.0, 0.0) : Q[0];
+        if (q0 != Cplx(1.0, 0.0)) for (Cplx& v : c) v /= q0;
+    } else {
+        for (const auto& t : poly_) {
+            if (!t.enabled) continue;
+            const std::size_t k = static_cast<std::size_t>(t.exponent);
+            if (c.size() <= k) c.resize(k + 1, Cplx(0.0, 0.0));
+            c[k] += t.effective_coeff(a);
+        }
+    }
+    while (!c.empty() && c.back() == Cplx(0.0, 0.0)) c.pop_back();
+    out = std::move(c);
     return true;
 }
 

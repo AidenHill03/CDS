@@ -19,8 +19,9 @@ built-in complex(), which wants 'j') -- that formatting predates this
 field and reuses working code rather than being touched here; a future
 pass could unify them, but that is a separate decision.
 
-ON MALFORMED INPUT: the field marks itself invalid (red border + a
-tooltip with the parser's own message) and returns without emitting
+ON MALFORMED INPUT: the field marks itself invalid (error-colored border,
+and the parser's own message as error text under the field -- see
+app.theme) and returns without emitting
 `committed` -- the caller's model is never touched, never zeroed, and
 nothing raises into Qt's event loop.
 """
@@ -30,11 +31,10 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 import cdx
-
-_INVALID_STYLE = "QLineEdit { border: 1px solid #cc4444; background: #fff0f0; }"
+from app import theme
 
 
 def parse_complex_literal(text: str) -> complex:
@@ -87,13 +87,39 @@ class ComplexField(QWidget):
         super().__init__(parent)
         self._value = initial
 
-        layout = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+        layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(QLabel(label_text, self))
+        outer.addLayout(layout)
+        self._label = QLabel(label_text, self)
+        self._label.setProperty("mono", True)
+        if label_text:
+            layout.addWidget(self._label)
+        else:
+            self._label.hide()
         self._line_edit = QLineEdit(format_complex_literal(initial), self)
-        self._line_edit.setMaximumWidth(160)
+        self._line_edit.setProperty("mono", True)
+        self._line_edit.setMinimumWidth(120)
         self._line_edit.editingFinished.connect(self._on_editing_finished)
-        layout.addWidget(self._line_edit)
+        layout.addWidget(self._line_edit, 1)
+        # Inline error text under the field (never a tinted field).
+        self.error_label = QLabel("", self)
+        self.error_label.setProperty("role", "error")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        outer.addWidget(self.error_label)
+
+    @property
+    def line_edit(self) -> QLineEdit:
+        return self._line_edit
+
+    def _show_error(self, message: str) -> None:
+        theme.set_invalid(self._line_edit, bool(message))
+        self._line_edit.setToolTip(message)
+        self.error_label.setText(message)
+        self.error_label.setVisible(bool(message))
 
     @property
     def value(self) -> complex:
@@ -105,19 +131,16 @@ class ComplexField(QWidget):
         just set the value in the first place.
         """
         self._value = z
-        self._line_edit.setStyleSheet("")
-        self._line_edit.setToolTip("")
+        self._show_error("")
         self._line_edit.setText(format_complex_literal(z))
 
     def _on_editing_finished(self) -> None:
         try:
             value = parse_complex_literal(self._line_edit.text())
         except ValueError as exc:
-            self._line_edit.setStyleSheet(_INVALID_STYLE)
-            self._line_edit.setToolTip(str(exc))
+            self._show_error(str(exc))
             return   # last valid value untouched; nothing committed
-        self._line_edit.setStyleSheet("")
-        self._line_edit.setToolTip("")
+        self._show_error("")
         self._line_edit.setText(format_complex_literal(value))
         if value != self._value:
             self._value = value

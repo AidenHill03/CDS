@@ -24,6 +24,7 @@
 // denominator PolyZ instead.
 // =============================================================================
 #include "cdx/rational_parser.hpp"
+#include "cdx/special_polys.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -303,6 +304,135 @@ Fraction frac_pow(const Fraction& x, int n) {
     return acc;
 }
 
+// d/dz of a PolyZ with the integer factor applied as ONE multiplication
+// (param_const(k) * c) rather than poly_deriv's k-fold repeated addition --
+// identical for the engine's own small-degree uses, but this one also
+// serves Newton/Halley maps built on degree-40 special polynomials, where
+// repeated addition would both grow symbolic coefficient trees linearly in
+// k and accumulate k roundings for numeric ones.
+PolyZ poly_deriv_scaled(const PolyZ& a) {
+    PolyZ out;
+    if (a.coeffs.size() < 2) return out;
+    out.coeffs.reserve(a.coeffs.size() - 1);
+    for (std::size_t k = 1; k < a.coeffs.size(); ++k)
+        out.coeffs.push_back(param_mul(param_const(Cplx(static_cast<double>(k), 0.0)), a.coeffs[k]));
+    trim(out);
+    return out;
+}
+
+// d/dz of a whole Fraction -- the quotient rule, or just N'/D when the
+// denominator is a constant (keeps d(p) of a polynomial a polynomial,
+// instead of manufacturing a D^2 that every later operation would carry).
+Fraction frac_deriv(const Fraction& f) {
+    if (f.den.coeffs.size() <= 1) return {poly_deriv_scaled(f.num), f.den};
+    return {poly_sub(poly_mul(poly_deriv_scaled(f.num), f.den),
+                     poly_mul(f.num, poly_deriv_scaled(f.den))),
+            poly_mul(f.den, f.den)};
+}
+
+// -----------------------------------------------------------------------------
+// Special-polynomial built-ins (see rational_parser.hpp's grammar comment and
+// special_polys.hpp for the coefficient computations).
+// -----------------------------------------------------------------------------
+struct SpecialFn {
+    special::Family family;
+    int symbols;              // how many of alpha/beta/lam the call carries
+    const char* signature;    // for the arity error message
+};
+
+// Resolves a call name + argument count to a family. `known` is set iff the
+// NAME is a special-polynomial function at all (whatever the count);
+// returns false with `arity_msg` filled when the count is wrong for it.
+bool resolve_special(const std::string& id, int nargs, bool& known, SpecialFn& fn,
+                     std::string& arity_msg) {
+    using F = special::Family;
+    struct Entry { const char* name; F family; int symbols; const char* sig; };
+    static const Entry kTable[] = {
+        {"hermite", F::Hermite, 0, "2 arguments (n, x)"},
+        {"H", F::Hermite, 0, "2 arguments (n, x)"},
+        {"hermite_e", F::HermiteE, 0, "2 arguments (n, x)"},
+        {"He", F::HermiteE, 0, "2 arguments (n, x)"},
+        {"legendre", F::Legendre, 0, "2 arguments (n, x)"},
+        {"chebyshev_t", F::ChebyshevT, 0, "2 arguments (n, x)"},
+        {"T", F::ChebyshevT, 0, "2 arguments (n, x)"},
+        {"chebyshev_u", F::ChebyshevU, 0, "2 arguments (n, x)"},
+        {"U", F::ChebyshevU, 0, "2 arguments (n, x)"},
+        {"gegenbauer", F::Gegenbauer, 1, "3 arguments (n, lam, x)"},
+        {"jacobi", F::Jacobi, 2, "4 arguments (n, alpha, beta, x)"},
+        {"bessel_poly", F::Bessel, 0, "2 arguments (n, x)"},
+        {"bernoulli", F::Bernoulli, 0, "2 arguments (n, x)"},
+        {"euler_poly", F::Euler, 0, "2 arguments (n, x)"},
+        {"cyclotomic", F::Cyclotomic, 0, "2 arguments (n, x)"},
+    };
+    known = true;
+    // The two overloaded names: argument count picks the family.
+    if (id == "laguerre" || id == "L") {
+        if (nargs == 2) { fn = {F::Laguerre, 0, ""}; return true; }
+        if (nargs == 3) { fn = {F::Laguerre, 1, ""}; return true; }
+        arity_msg = id + " expects 2 or 3 arguments (n, x) or (n, alpha, x)";
+        return false;
+    }
+    if (id == "P") {
+        if (nargs == 2) { fn = {F::Legendre, 0, ""}; return true; }
+        if (nargs == 4) { fn = {F::Jacobi, 2, ""}; return true; }
+        arity_msg = "P expects 2 arguments (n, x) or 4 (n, alpha, beta, x)";
+        return false;
+    }
+    for (const auto& e : kTable) {
+        if (id != e.name) continue;
+        if (nargs != e.symbols + 2) {
+            arity_msg = id + " expects " + e.sig;
+            return false;
+        }
+        fn = {e.family, e.symbols, e.sig};
+        return true;
+    }
+    known = false;
+    return false;
+}
+
+bool is_special_name(const std::string& id) {
+    bool known = false;
+    SpecialFn fn;
+    std::string msg;
+    resolve_special(id, 2, known, fn, msg);
+    return known;
+}
+
+// A SymPoly coefficient (polynomial in the family's symbols) as a ParamExpr,
+// given each symbol's own ParamExpr (null when the family has none). Fully
+// numeric symbols are evaluated directly in extended precision; otherwise a
+// nested Horner form keeps the tree O(degree) per coefficient.
+ParamExprPtr sym_to_param(const special::SymPoly& p, const ParamExprPtr& s0, const ParamExprPtr& s1) {
+    using CL = std::complex<long double>;
+    auto is_num = [](const ParamExprPtr& s) { return !s || s->kind == ParamExpr::Kind::Const; };
+    if (is_num(s0) && is_num(s1)) {
+        const CL a = s0 ? CL(s0->value.real(), s0->value.imag()) : CL(0.0L);
+        const CL b = s1 ? CL(s1->value.real(), s1->value.imag()) : CL(0.0L);
+        CL outer(0.0L);
+        for (std::size_t i = p.c.size(); i-- > 0;) {
+            CL inner(0.0L);
+            for (std::size_t j = p.c[i].size(); j-- > 0;) inner = inner * b + p.c[i][j];
+            outer = outer * a + inner;
+        }
+        return param_const(Cplx(static_cast<double>(outer.real()), static_cast<double>(outer.imag())));
+    }
+    auto horner = [](const std::vector<ParamExprPtr>& cs, const ParamExprPtr& s) {
+        ParamExprPtr acc = param_const(Cplx(0.0, 0.0));
+        for (std::size_t k = cs.size(); k-- > 0;) acc = param_add(s ? param_mul(acc, s) : acc, cs[k]);
+        return acc;
+    };
+    std::vector<ParamExprPtr> inners;
+    for (const auto& row : p.c) {
+        std::vector<ParamExprPtr> cs;
+        for (long double v : row) cs.push_back(param_const(Cplx(static_cast<double>(v), 0.0)));
+        if (!s1) cs.resize(1);
+        inners.push_back(horner(cs, s1));
+    }
+    if (!s0) inners.resize(1);
+    return horner(inners, s0);
+}
+
 // -----------------------------------------------------------------------------
 // Transcendental names rejected with a specific message -- the same set
 // Expr itself recognizes as functions (expr.cpp), so "not supported here"
@@ -327,6 +457,7 @@ struct Parser {
     std::size_t pos = 0;
     std::string err;
     std::set<std::string> params;
+    std::vector<std::string> warnings;
 
     explicit Parser(const std::string& s) : src(s) {}
 
@@ -468,24 +599,38 @@ struct Parser {
 
         if (std::isalpha(static_cast<unsigned char>(c))) {
             const std::size_t start = pos;
-            while (pos < src.size() && std::isalnum(static_cast<unsigned char>(src[pos]))) ++pos;
+            // '_' is scanned as part of an identifier only so the special-
+            // polynomial names (hermite_e, chebyshev_t, ...) can be
+            // recognized; a parameter name containing one is still
+            // rejected below, exactly as before.
+            while (pos < src.size() &&
+                   (std::isalnum(static_cast<unsigned char>(src[pos])) || src[pos] == '_')) ++pos;
             const std::string id = src.substr(start, pos - start);
 
             if (id == "z") { out = frac_z(); return true; }
             if (id == "i" || id == "j") { out = frac_const(Cplx(0.0, 1.0)); return true; }
 
-            // Anything else immediately followed by '(' is a function-call
-            // attempt -- always rejected, with a message that distinguishes
-            // "not a rational map" from "not a supported construct at all".
+            // Anything else immediately followed by '(' is a function call:
+            // d(...) or a special polynomial; otherwise rejected, with a
+            // message that distinguishes "not a rational map" from "not a
+            // supported construct at all".
             skip_ws();
             if (pos < src.size() && src[pos] == '(') {
+                if (id == "d") { ++pos; return parse_derivative(out); }
+                if (is_special_name(id)) { ++pos; return parse_special(id, start, out); }
                 if (is_known_transcendental(id)) {
                     return fail("transcendental function '" + id + "' is not supported -- "
                                "rational maps only (P(z)/Q(z), polynomial numerator and "
                                "denominator)");
                 }
-                return fail("unknown function '" + id + "' -- function calls are not "
-                           "supported in rational expressions");
+                return fail("unknown function '" + id + "' -- the only functions in "
+                           "rational expressions are d(...) and the special polynomials "
+                           "(hermite, legendre, laguerre, chebyshev_t, ...)");
+            }
+
+            if (id.find('_') != std::string::npos) {
+                pos = start + id.find('_');
+                return fail("unexpected character '_'");
             }
 
             // Any other identifier is a parameter reference -- including
@@ -497,6 +642,106 @@ struct Parser {
         }
 
         return fail(std::string("unexpected character '") + c + "'");
+    }
+
+    // d(expr): the '(' is already consumed.
+    bool parse_derivative(Fraction& out) {
+        Fraction inner;
+        if (!parse_expr(inner)) return false;
+        skip_ws();
+        if (peek() == ',') return fail("d expects 1 argument (an expression in z)");
+        if (!accept(')')) return fail("expected ')' after d(...)");
+        out = frac_deriv(inner);
+        return true;
+    }
+
+    // A family parameter (alpha, beta, lam) as a ParamExpr: it may involve
+    // the map's parameters, but not z, and cannot divide by a parameter
+    // (ParamExpr has no division).
+    bool symbol_value(const Fraction& f, const std::string& fname, const char* what,
+                      ParamExprPtr& out) {
+        if (f.num.coeffs.size() > 1 || f.den.coeffs.size() > 1)
+            return fail(fname + ": " + what + " must not depend on z");
+        if (f.den.coeffs.empty()) return fail(fname + ": " + what + " has a zero denominator");
+        const ParamExprPtr& d = f.den.coeffs[0];
+        if (d->kind != ParamExpr::Kind::Const)
+            return fail(fname + ": " + what + " must be a number or a polynomial in the "
+                        "parameters (no division by a parameter)");
+        const ParamExprPtr num = f.num.coeffs.empty() ? param_const(Cplx(0.0, 0.0)) : f.num.coeffs[0];
+        out = param_mul(num, param_const(Cplx(1.0, 0.0) / d->value));
+        return true;
+    }
+
+    // name(n, [alpha, [beta,]] x): the '(' is already consumed; `start` is
+    // the name's own position (for the warning text only).
+    bool parse_special(const std::string& id, std::size_t /*start*/, Fraction& out) {
+        // Degree: a bare non-negative integer literal, then ','.
+        skip_ws();
+        const std::size_t dstart = pos;
+        while (pos < src.size() && std::isdigit(static_cast<unsigned char>(src[pos]))) ++pos;
+        if (pos == dstart) return fail(id + ": degree must be an integer literal");
+        const std::string digits = src.substr(dstart, pos - dstart);
+        skip_ws();
+        if (peek() != ',' && peek() != ')') {
+            pos = dstart;
+            return fail(id + ": degree must be an integer literal");
+        }
+        const long n = digits.size() > 6 ? 1000000L : std::strtol(digits.c_str(), nullptr, 10);
+
+        // The remaining arguments: ordinary expressions.
+        std::vector<Fraction> args;
+        while (accept(',')) {
+            Fraction a;
+            if (!parse_expr(a)) return false;
+            args.push_back(std::move(a));
+        }
+        skip_ws();
+        if (!accept(')')) return fail("expected ',' or ')' in " + id + "(...)");
+
+        bool known = false;
+        SpecialFn fn;
+        std::string arity_msg;
+        if (!resolve_special(id, static_cast<int>(args.size()) + 1, known, fn, arity_msg))
+            return fail(arity_msg);
+
+        if (n > special::kMaxDegree)
+            return fail(id + ": degree must be at most " + std::to_string(special::kMaxDegree));
+        if (fn.family == special::Family::Cyclotomic && n < 1)
+            return fail(id + ": index must be at least 1");
+        if (n > special::kWarnDegree && fn.family != special::Family::Cyclotomic) {
+            warnings.push_back(id + "(" + std::to_string(n) + ", ...): degree above " +
+                               std::to_string(special::kWarnDegree) +
+                               " -- its monomial coefficients get large, and root-finding "
+                               "(critical points, poles) may lose accuracy");
+        }
+
+        // Symbols: [alpha|lam] then [beta]. Plain Laguerre is alpha = 0.
+        ParamExprPtr s0, s1;
+        if (fn.family == special::Family::Laguerre && fn.symbols == 0) s0 = param_const(Cplx(0.0, 0.0));
+        static const char* kNames[3][2] = {{"alpha", ""}, {"lam", ""}, {"alpha", "beta"}};
+        const int row = fn.family == special::Family::Gegenbauer ? 1 :
+                        fn.family == special::Family::Jacobi ? 2 : 0;
+        if (fn.symbols >= 1 && !symbol_value(args[0], id, kNames[row][0], s0)) return false;
+        if (fn.symbols >= 2 && !symbol_value(args[1], id, kNames[row][1], s1)) return false;
+        const Fraction& x = args.back();
+
+        const special::TPoly tp = special::special_poly(fn.family, static_cast<int>(n));
+        std::vector<ParamExprPtr> coef;
+        coef.reserve(tp.size());
+        for (const auto& c : tp) coef.push_back(sym_to_param(c, s0, s1));
+        while (!coef.empty() && coef.back()->is_zero_literal()) coef.pop_back();
+        if (coef.empty()) { out = frac_const(Cplx(0.0, 0.0)); return true; }
+
+        // p(x) by Horner, in the Fraction algebra: a rational x = N/D gives
+        // the homogeneous sum c_k N^k D^(n-k) over D^n.
+        const PolyZ one = poly_const(param_const(Cplx(1.0, 0.0)));
+        Fraction acc{poly_const(coef.back()), one};
+        for (std::size_t k = coef.size() - 1; k-- > 0;) {
+            acc = frac_mul(acc, x);
+            if (!coef[k]->is_zero_literal()) acc = frac_add(acc, Fraction{poly_const(coef[k]), one});
+        }
+        out = std::move(acc);
+        return true;
     }
 };
 
@@ -531,6 +776,7 @@ bool parse_rational(const std::string& source, CanonicalRational& out, std::stri
     out.P = std::move(result.num);
     out.Q = std::move(result.den);
     out.parameters.assign(p.params.begin(), p.params.end());
+    out.warnings = std::move(p.warnings);
     std::sort(out.parameters.begin(), out.parameters.end());
     out.source = source;
     return true;

@@ -41,6 +41,17 @@ Unzip the archive and run `Project Phoenix.exe` (Windows) or
 whole extracted folder together (the executable needs the files sitting
 next to it).
 
+## The window
+
+The two planes sit side by side: the parameter plane (amber) on the left and
+the dynamical plane (teal) on the right, each with its mode buttons above it
+and overlay chips below it. The top bar holds the current map, Coupled |
+Single, the render status, Reset view and Export. The sidebar on the right
+has Info, Library and Facts; the Equations & Settings dock along the bottom
+has Equation, Rendering, Coloring and Orbit. Both docks collapse to their
+tabs and can be reopened from the View menu (View ▸ Reset Layout puts
+everything back).
+
 ## Controls
 
 Drag to pan, Shift-drag to zoom into a box, scroll or pinch to zoom at the
@@ -78,6 +89,14 @@ PYTHONPATH=cdx/build pyinstaller complexdynamics.spec
 ```
 
 ## Development
+
+`tools/snapshot_ui.py` renders the window offscreen at 1389×868 and
+1100×720 and saves PNGs of every workspace, sidebar tab and dock tab (to
+`phoenix-ui-redesign/snapshots/` by default) for visual review:
+
+```bash
+PYTHONPATH=cdx/build python tools/snapshot_ui.py
+```
 
 `.github/workflows/build.yml` builds the C++ core, the pybind11
 extension, runs both test suites, and packages the app on

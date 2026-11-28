@@ -1,13 +1,14 @@
 """app/sandbox.py -- P5a/P5b: the interactive window.
 
-Single window, driven by app.session.Session, with tabs: the image pane
-(render pipeline: threaded, progressive, cursor-anchored zoom, overscan
-buffer, correct orientation), an equation-authoring panel over the P/Q
-model (app/equation_panel.py), a read-only dynamical-facts panel
-(app/facts_panel.py), and a family library (app/library_panel.py).
-Render/cache configuration (app/settings_panel.py) lives outside the tab
-strip, in a non-modal dialog opened from File > Settings... (see
-SandboxWindow._build_settings_dialog).
+Single window, driven by app.session.Session (UI redesign layout): a top
+bar (map chip, workspace switch, Coupled | Single, render status, Reset
+view, Export); the Explore workspace -- the parameter and dynamical planes
+side by side (render pipeline: threaded, progressive, cursor-anchored zoom,
+overscan buffer, correct orientation); a right sidebar dock (Info,
+Library -- app/library_panel.py, Facts -- app/facts_panel.py); and a bottom
+"Equations & Settings" dock (Equation -- app/equation_panel.py, Rendering
+and Coloring -- app/settings_panel.py, applied live, and Orbit). Research
+modules add workspaces or tabs through SandboxWindow.add_panel.
 
 Requires the cdx extension module and PySide6 to be importable, e.g. from
 the repository root:
@@ -21,33 +22,44 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import json
 import math
 import os
 import sys
+import time
 from typing import Callable
 
 import numpy as np
 import shiboken6
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QObject, QPoint, QPointF, QRect,
-                            QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal, Slot)
-from PySide6.QtGui import (QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap,
+                            QRectF, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, Signal,
+                            Slot)
+from PySide6.QtGui import (QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap,
                            QPolygonF)
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog,
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QFrame,
+                               QScrollArea,
                                QDialogButtonBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                               QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget)
+                               QSplitter, QStackedWidget, QTabWidget, QTextEdit, QToolBar,
+                               QVBoxLayout, QWidget)
 
 import cdx
-from app import controls
+from app import controls, theme
 from app.about_dialog import AboutDialog
 from app.color import (color_basin, color_escape_time, color_parameter_basin,
                         color_parameter_period, color_scalar_field)
 from app.complex_field import ComplexField
 from app.equation_panel import EquationPanel
-from app.facts_panel import FactsPanel, _classify, _is_inf, facts_to_dict
+from app.facts_panel import (FactsPanel, _classify, _is_inf, critical_orbit_fates, facts_to_dict,
+                             format_short)
 from app.info_panel import InfoPanel
-from app.library_panel import LibraryPanel, default_dynamical_view, default_view_for_mode
+from app import label_cuts as label_cuts_module
+from app.family_views import (parameter_view_for, rename_family_meta, save_parameter_view,
+                              save_parameter_strategy, stored_parameter_strategy,
+                               set_thumbnail_key, thumbnail_key)
+from app.library_panel import (LibraryPanel, _placeholder_icon, default_dynamical_view,
+                               default_view_for_mode)
 from app.metadata_header import MetadataHeader, describe_parameter_role
 from app.orbit_panel import OrbitPanel
 from app.orbit_tracker import OrbitTracker
@@ -56,10 +68,14 @@ from app.render_cache import RenderCache
 from app.session import (DEFAULT_PARAMETER_VIEW_CENTER, DEFAULT_PARAMETER_VIEW_SCALE,
                          PARAMETER_PLANE_MODES, PRESET_FAMILY_NAMES, RENDER_MODES, Session,
                          render_map)
-from app.settings import (Settings, library_path, load_settings, preview_path_for,
-                          previews_dir, save_settings)
-from app.settings_panel import SettingsPanel
+from app.settings import (DEFAULT_PARAMETER_STRATEGY, Settings, family_meta_path_for,
+                          library_path, load_settings, preview_path_for, previews_dir,
+                          save_settings)
+from app.settings_panel import (COLORING_GROUPS, RENDERING_GROUPS, SETTINGS_APPLY_DEBOUNCE_MS,
+                                SettingsPanel)
 from app.version import PRODUCT_NAME
+from app.plane_frame import PlaneFrame
+from app.widgets import Segment, TabbedDock, TopBar
 
 # Per-notch scroll zoom factor (f > 1 zooms in). ~1.15 per the spec: a
 # handful of notches gives a noticeable zoom without a single notch jumping
@@ -89,6 +105,108 @@ PAN_KEY_REPEAT_MS = 60
 # How long the status bar's per-pane controls hint stays after the cursor
 # enters a pane (it also clears when the cursor leaves).
 PANE_HINT_MS = 6000
+STATUS_FLASH_MS = 4000
+# Undo history of the parameter a (plane clicks, nudges, typed values).
+PARAM_HISTORY_LIMIT = 200
+# A held/repeated arrow nudge is ONE undo step, not one per tick.
+NUDGE_HISTORY_COALESCE_S = 0.7
+
+# Family thumbnails (render_family_thumbnail) by (name, key), shared by every
+# window of the process -- see FamilyThumbnailer.
+_FAMILY_THUMBNAIL_CACHE: dict[tuple[str, str], "QIcon"] = {}
+# Families whose parameter-plane thumbnail came back uniform, logged once each.
+_UNIFORM_THUMBNAIL_LOGGED: set[str] = set()
+
+# ---- render modes as the UI shows them ------------------------------------------------------
+# RENDER_MODES ids stay data; the segmented controls show these labels, and
+# the tooltips give the full names.
+MODE_LABELS: dict[str, tuple[str, str]] = {
+    "parameter": ("Escape", "Escape time of the critical orbit, for each parameter a"),
+    "parameter_greens": ("Green's", "Green's function (escape-rate potential) of the critical "
+                                    "orbit, for each parameter a"),
+    "parameter_basin": ("Cycles", "Number of attracting cycles, for each parameter a"),
+    "parameter_period": ("Period", "Period of the attracting cycle, for each parameter a"),
+    "julia": ("Escape", "Escape time of each starting point z"),
+    "basin": ("Basins", "Basins of attraction, colored by attractor (infinity included)"),
+    "greens": ("Green's", "Green's function (escape-rate potential) of each starting point z"),
+}
+PARAMETER_MODE_ORDER = ["parameter", "parameter_greens", "parameter_basin", "parameter_period"]
+
+# How the header names a non-default parameter strategy.
+STRATEGY_HEADER_NAMES = {"slowest": "slowest", "fastest": "fastest", "per_critical": "per-critical"}
+STRATEGY_TOOLTIPS = {
+    "fastest": "Parameter strategy: Fastest -- a pixel is coloured by the free critical orbit "
+               "that escapes or resolves first (Rendering ▸ Parameter plane)",
+    "per_critical": "Parameter strategy: Per-critical -- only the labelled free critical "
+                    "point #{index} is followed. Dashed rays mark where its label is "
+                    "re-assigned: a labelling convention, not dynamics "
+                    "(Rendering ▸ Parameter plane)",
+}
+
+
+def strategy_header_text(mode: str, strategy: str, critical_index: int) -> tuple[str, str]:
+    """(text, tooltip) for a plane header: "Escape · per-critical #1" when
+    `mode` uses the parameter strategy and it is not the default, else
+    ("", "") -- the strategy is never a hidden setting."""
+    if mode != "parameter" or strategy == DEFAULT_PARAMETER_STRATEGY:
+        return "", ""
+    name = STRATEGY_HEADER_NAMES.get(strategy, strategy)
+    if strategy == "per_critical":
+        name += f" #{critical_index}"
+    tooltip = STRATEGY_TOOLTIPS.get(strategy, "").format(index=critical_index)
+    return f"{MODE_LABELS[mode][0]} · {name}", tooltip
+DYNAMICAL_MODE_ORDER = ["julia", "basin", "greens"]
+assert set(MODE_LABELS) == set(RENDER_MODES) == set(PARAMETER_MODE_ORDER + DYNAMICAL_MODE_ORDER)
+assert set(PARAMETER_MODE_ORDER) == set(PARAMETER_PLANE_MODES)
+
+
+def _mode_segment(mode: str) -> Segment:
+    label, tooltip = MODE_LABELS[mode]
+    return Segment(mode, label, tooltip)
+
+
+class ModeSelector:
+    """Compatibility shim with the old per-pane mode QComboBox's API
+    (setCurrentText/currentText/count/itemText) over the segmented control:
+    setCurrentText(mode) switches the pane exactly as clicking that segment
+    does. Kept so existing call sites and tests still read naturally."""
+
+    def __init__(self, window: "SandboxWindow", pane: Pane):
+        self._window = window
+        self._pane = pane
+
+    def setCurrentText(self, mode: str) -> None:
+        self._window._on_mode_changed(self._pane, mode)
+
+    def currentText(self) -> str:
+        return self._pane.render_mode
+
+    def count(self) -> int:
+        return len(RENDER_MODES)
+
+    def itemText(self, index: int) -> str:
+        return RENDER_MODES[index]
+
+
+# ---- window layout (UI redesign) -------------------------------------------------------
+MIN_WINDOW_SIZE = QSize(1100, 720)
+DEFAULT_WINDOW_SIZE = QSize(1389, 868)    # a 13" MacBook's usable screen, in logical px
+SIDEBAR_MIN_WIDTH = 260
+SIDEBAR_DEFAULT_WIDTH = 300
+SETTINGS_DOCK_DEFAULT_HEIGHT = 220
+# Below this window width the sidebar collapses to its tab strip (and
+# re-expands above it, unless the user collapsed it by hand).
+SIDEBAR_AUTO_COLLAPSE_WIDTH = 1250
+# Bumped whenever the dock/toolbar arrangement changes shape, so an old
+# saved state is ignored instead of restoring a layout that no longer exists.
+LAYOUT_STATE_VERSION = 1
+
+
+def default_layout_settings() -> QSettings:
+    """Where window geometry and dock state persist: an INI file next to
+    settings.json (see app.settings.config_dir)."""
+    from app.settings import config_dir
+    return QSettings(str(config_dir() / "layout.ini"), QSettings.Format.IniFormat)
 
 # Restarted on every wheel/pan-move event; a render is only actually
 # started once this settles, so a fast scroll or drag does not queue a
@@ -204,6 +322,8 @@ class OverlayTrace:
     # e.g. "Traced orbits" reads better there than the menu action's own
     # "Trace Orbits". Empty means: use `label` as-is (see build_legend_entries).
     legend_label: str = ""
+    # The overlay chip's (shorter, sentence-case) text; empty means `label`.
+    chip_label: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +351,8 @@ class OverlayLayer:
     legend_label: str = ""
     legend_swatches: tuple[OverlayColor, ...] = ()
     trace: OverlayTrace | None = None
+    chip_label: str = ""      # the overlay chip's text; empty means `label`
+    tooltip: str = ""
 
     def is_visible_for(self, render_mode: str) -> bool:
         if self.gate == "always":
@@ -242,8 +364,8 @@ class OverlayLayer:
 CRITICAL_POINTS_LAYER_KEY = "critical_points"
 CRITICAL_TRACE_KEY = "trace_orbits"
 CRITICAL_POINT_MARKER_RADIUS = 5.0
-CRITICAL_POINT_FILL_COLOR: OverlayColor = (255, 255, 255, 255)   # white -- matches the pre-Stage-1 flat brush
-CRITICAL_TRACE_COLOR: OverlayColor = (255, 255, 255, 160)        # translucent white -- matches the old trace_pen
+CRITICAL_POINT_FILL_COLOR: OverlayColor = theme.rgba("mark_point")
+CRITICAL_TRACE_COLOR: OverlayColor = theme.rgba("mark_trace")
 
 
 def _critical_points_provider(rational_map: cdx.RationalMap, param: complex,
@@ -276,10 +398,10 @@ FIXED_POINT_MARKER_RADIUS = 5.0
 # green / red / yellow -- clear, distinguishable, and conventional for
 # attracting/repelling/neutral without relying on a legend to be readable.
 _FIXED_POINT_CLASSIFICATION_COLORS: dict[str, OverlayColor] = {
-    "attracting": (60, 200, 60, 255),
-    "superattracting": (60, 200, 60, 255),
-    "repelling": (220, 60, 60, 255),
-    "neutral": (230, 200, 40, 255),
+    "attracting": theme.rgba("fixed_attracting"),
+    "superattracting": theme.rgba("fixed_attracting"),
+    "repelling": theme.rgba("fixed_repelling"),
+    "neutral": theme.rgba("fixed_neutral"),
 }
 
 
@@ -302,8 +424,8 @@ def _fixed_points_provider(rational_map: cdx.RationalMap, param: complex,
 ATTRACTING_CYCLES_LAYER_KEY = "attracting_cycles"
 CYCLE_TRACE_KEY = "trace_cycle_paths"
 CYCLE_MARKER_RADIUS = 5.0
-_CYCLE_STRONG_COLOR: OverlayColor = (255, 0, 255, 255)    # magenta -- superattracting (|multiplier| = 0)
-_CYCLE_WEAK_COLOR: OverlayColor = (140, 140, 255, 255)    # pale blue -- |multiplier| approaching 1
+_CYCLE_STRONG_COLOR: OverlayColor = theme.rgba("cycle_strong")   # superattracting (|multiplier| = 0)
+_CYCLE_WEAK_COLOR: OverlayColor = theme.rgba("cycle_weak")       # |multiplier| approaching 1
 
 
 def _cycle_color(multiplier: complex) -> OverlayColor:
@@ -350,7 +472,9 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         marker_style="circle", legend_swatches=(CRITICAL_POINT_FILL_COLOR,),
         trace=OverlayTrace(key=CRITICAL_TRACE_KEY, label="Trace Orbits",
                            path_provider=_critical_trace_provider,
-                           legend_label="Traced orbits"),
+                           legend_label="Traced orbits", chip_label="Trace orbits"),
+        chip_label="Critical points",
+        tooltip="Mark the critical points of f (their orbits decide the dynamics)",
     ),
     OverlayLayer(
         key=FIXED_POINTS_LAYER_KEY, label="Fixed Points", gate="dynamical",
@@ -360,6 +484,8 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         legend_swatches=(_FIXED_POINT_CLASSIFICATION_COLORS["attracting"],
                          _FIXED_POINT_CLASSIFICATION_COLORS["repelling"],
                          _FIXED_POINT_CLASSIFICATION_COLORS["neutral"]),
+        chip_label="Fixed points",
+        tooltip="Mark the fixed points: green attracting, red repelling, yellow neutral",
     ),
     OverlayLayer(
         key=ATTRACTING_CYCLES_LAYER_KEY, label="Attracting Cycles", gate="dynamical",
@@ -369,11 +495,81 @@ OVERLAY_LAYERS: list[OverlayLayer] = [
         legend_swatches=(_CYCLE_STRONG_COLOR, _CYCLE_WEAK_COLOR),
         trace=OverlayTrace(key=CYCLE_TRACE_KEY, label="Trace Cycle Paths",
                            path_provider=_attracting_cycles_trace_provider,
-                           legend_label="Cycle paths"),
+                           legend_label="Cycle paths", chip_label="Trace cycles"),
+        chip_label="Cycles",
+        tooltip="Mark the attracting cycles, colored by how strongly they attract",
     ),
 ]
 
 _OVERLAY_LAYERS_BY_KEY: dict[str, OverlayLayer] = {layer.key: layer for layer in OVERLAY_LAYERS}
+
+
+# ---- overlay toggles: the on/off switches the chips and View menu share ----------
+# The registry layers above, plus three overlays that are drawn by
+# paint_overlays itself rather than from a points provider: the seeded orbit,
+# the parameter marker, and its crosshair. overlay_toggles() is the ONE list
+# both the overlay chips (under each plane) and the View menu are built from.
+ORBIT_TOGGLE_KEY = "seeded_orbit"
+PARAM_MARKER_TOGGLE_KEY = "param_marker"
+CROSSHAIR_TOGGLE_KEY = "crosshair"
+
+
+@dataclasses.dataclass(frozen=True)
+class OverlayToggle:
+    key: str
+    menu_label: str
+    chip_label: str
+    gate: str                        # "dynamical" | "parameter"
+    swatch: OverlayColor | None      # the chip's legend swatch (None: no dot)
+    default: bool = False
+    parent: str | None = None        # a trace: only meaningful while its layer is on
+    tooltip: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class BuiltinOverlay:
+    toggle: OverlayToggle
+    after: str | None                # placed right after this toggle key (None: first)
+
+
+BUILTIN_OVERLAYS: list[BuiltinOverlay] = [
+    BuiltinOverlay(OverlayToggle(ORBIT_TOGGLE_KEY, "Seeded Orbit", "Orbit", "dynamical",
+                                 theme.rgba("mark_orbit"), default=True,
+                                 tooltip="Show the orbit seeded by clicking the dynamical plane"),
+                   after=CRITICAL_TRACE_KEY),
+    BuiltinOverlay(OverlayToggle(PARAM_MARKER_TOGGLE_KEY, "Parameter Marker", "Marker", "parameter",
+                                 theme.rgba("mark_param"), default=True,
+                                 tooltip="Mark the current parameter a"),
+                   after=CYCLE_TRACE_KEY),
+    BuiltinOverlay(OverlayToggle(CROSSHAIR_TOGGLE_KEY, "Crosshair", "Crosshair", "parameter",
+                                 None, default=False,
+                                 tooltip="Thin lines through the parameter marker"),
+                   after=PARAM_MARKER_TOGGLE_KEY),
+]
+
+
+def overlay_toggles() -> list[OverlayToggle]:
+    """Every overlay switch, in display order: the registry layers (each
+    followed by its trace) with the built-in overlays slotted in."""
+    toggles: list[OverlayToggle] = []
+    for layer in OVERLAY_LAYERS:
+        toggles.append(OverlayToggle(
+            layer.key, layer.label, layer.chip_label or layer.label, layer.gate,
+            layer.legend_swatches[0] if layer.legend_swatches else None, tooltip=layer.tooltip))
+        if layer.trace is not None:
+            toggles.append(OverlayToggle(
+                layer.trace.key, layer.trace.label, layer.trace.chip_label or layer.trace.label,
+                layer.gate, None, parent=layer.key,
+                tooltip=f"{layer.trace.legend_label or layer.trace.label} "
+                        f"(while {layer.chip_label or layer.label} is on)"))
+    for builtin in BUILTIN_OVERLAYS:
+        if builtin.after is None:
+            index = 0
+        else:
+            keys = [t.key for t in toggles]
+            index = keys.index(builtin.after) + 1 if builtin.after in keys else len(toggles)
+        toggles.insert(index, builtin.toggle)
+    return toggles
 
 
 # How far outside the visible widget rect a mapped orbit/trace point may
@@ -424,6 +620,15 @@ def drawable_polyline_segments(points: list[complex], pixel_points: list,
     return segments
 
 
+def format_readout_complex(z: complex, digits: int = 4) -> str:
+    """'−0.1226 + 0.7449i' with real minus signs, for the readout chips."""
+    if not (math.isfinite(z.real) and math.isfinite(z.imag)):
+        return "∞"
+    re_part = f"{z.real:.{digits}f}".replace("-", "−")
+    sign = "−" if z.imag < 0 else "+"
+    return f"{re_part} {sign} {abs(z.imag):.{digits}f}i"
+
+
 def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int) -> QPointF:
     """The exact inverse of ImageView._pixel_to_complex, generalized to an
     ARBITRARY (viewport, width, height) instead of reading a live widget's
@@ -454,8 +659,10 @@ def complex_to_pixel(w: complex, viewport: cdx.Viewport, width: int, height: int
 # identical to every shade paint_overlays' own orbit/marker branches use, just
 # representative of them) so the legend's swatch reads as the same color a
 # user sees drawn elsewhere on the SAME pane.
-ORBIT_LEGEND_COLOR: OverlayColor = (255, 120, 0, 255)     # orange -- matches the orbit dots/lines
-PARAM_MARKER_LEGEND_COLOR: OverlayColor = (255, 0, 0, 255)   # red -- matches the marker crosshair
+PARAM_MARKER_RADIUS = 6.0
+PARAM_CROSSHAIR_ALPHA = 140
+ORBIT_LEGEND_COLOR: OverlayColor = theme.rgba("mark_orbit")      # matches the orbit dots/lines
+PARAM_MARKER_LEGEND_COLOR: OverlayColor = theme.rgba("mark_param")   # matches the marker
 
 
 @dataclasses.dataclass(frozen=True)
@@ -515,8 +722,8 @@ def draw_legend(painter: QPainter, width: int, height: int, entries: list[Legend
     box_height = LEGEND_MARGIN * 2 + LEGEND_LINE_HEIGHT * len(entries)
     box_rect = QRectF(width - LEGEND_BOX_WIDTH - LEGEND_MARGIN, LEGEND_MARGIN,
                       LEGEND_BOX_WIDTH, box_height)
-    painter.fillRect(box_rect, QColor(20, 20, 20, 190))
-    painter.setPen(QColor(230, 230, 230))
+    painter.fillRect(box_rect, theme.color("legend_bg"))
+    painter.setPen(theme.color("legend_text"))
     for i, entry in enumerate(entries):
         line_top = box_rect.top() + LEGEND_MARGIN + i * LEGEND_LINE_HEIGHT
         x = box_rect.left() + LEGEND_MARGIN
@@ -539,6 +746,7 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
                    orbit_connect_lines: bool = True,
                    orbit_state=None,
                    show_param_marker: bool = False,
+                   show_crosshair: bool = False,
                    param: "complex | None" = None,
                    show_legend: bool = False,
                    layer_enabled: "dict | None" = None,
@@ -593,7 +801,7 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
 
     if show_critical_points and is_dynamical:
         if show_traced_orbits and orbit_traces:
-            trace_pen = QPen(QColor(255, 255, 255, 160))
+            trace_pen = QPen(QColor(*CRITICAL_TRACE_COLOR))
             trace_pen.setWidth(1)
             painter.setPen(trace_pen)
             for trace in orbit_traces:
@@ -601,10 +809,10 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
                 for a, b in drawable_polyline_segments(trace, pixel_points, inflated_rect):
                     painter.drawLine(a, b)
 
-        marker_pen = QPen(QColor(0, 0, 0))
+        marker_pen = QPen(theme.color("mark_outline"))
         marker_pen.setWidth(2)
         painter.setPen(marker_pen)
-        painter.setBrush(QColor(255, 255, 255))
+        painter.setBrush(QColor(*CRITICAL_POINT_FILL_COLOR))
         r = CRITICAL_POINT_MARKER_RADIUS
         for w in critical_points:
             if finite(w):   # infinity is a valid critical point but has no finite screen position
@@ -617,17 +825,17 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
         # regardless (see ImageView.set_orbit_connect_lines's own
         # docstring).
         if orbit_connect_lines:
-            line_pen = QPen(QColor(255, 120, 0, 200))   # orange -- distinct from white/black
+            line_pen = QPen(QColor(*theme.rgba("mark_orbit", alpha=220)))
             line_pen.setWidth(1)
             painter.setPen(line_pen)
             for a, b in drawable_polyline_segments(orbit_state.history, pixel_points,
                                                    inflated_rect):
                 painter.drawLine(a, b)
 
-        dot_pen = QPen(QColor(0, 0, 0))
+        dot_pen = QPen(theme.color("mark_outline"))
         dot_pen.setWidth(1)
         painter.setPen(dot_pen)
-        painter.setBrush(QColor(255, 120, 0))
+        painter.setBrush(theme.color("mark_orbit"))
         dot_r = CRITICAL_POINT_MARKER_RADIUS * 0.6   # smaller than a critical-point marker --
         for w, pixel in zip(orbit_state.history, pixel_points):   # visually subordinate
             if finite(w) and inflated_rect.contains(pixel):
@@ -638,22 +846,31 @@ def paint_overlays(painter: QPainter, viewport: cdx.Viewport, width: int, height
         # orbit passed through.
         seed_pixel = complex_to_pixel(orbit_state.z0, viewport, width, height)
         if finite(orbit_state.z0) and inflated_rect.contains(seed_pixel):
-            seed_pen = QPen(QColor(0, 0, 0))
+            seed_pen = QPen(theme.color("mark_outline"))
             seed_pen.setWidth(2)
             painter.setPen(seed_pen)
-            painter.setBrush(QColor(255, 255, 0))
+            painter.setBrush(theme.color("mark_orbit"))
             painter.drawEllipse(seed_pixel, CRITICAL_POINT_MARKER_RADIUS,
                                 CRITICAL_POINT_MARKER_RADIUS)
 
-    if show_param_marker and not is_dynamical and param is not None and finite(param):
+    if not is_dynamical and param is not None and finite(param):
         pixel = complex_to_pixel(param, viewport, width, height)
-        if bounds.contains(pixel):
-            r = CRITICAL_POINT_MARKER_RADIUS
-            pen = QPen(QColor(255, 0, 0))
-            pen.setWidth(2)
+        side = min(width, height)
+        image = QRectF((width - side) // 2, (height - side) // 2, side, side)
+        if show_crosshair and image.contains(pixel):
+            # Thin lines through the marker, across the whole image.
+            pen = QPen(QColor(*theme.rgba("mark_param", alpha=PARAM_CROSSHAIR_ALPHA)))
+            pen.setWidthF(1.0)
             painter.setPen(pen)
-            painter.drawLine(QPointF(pixel.x() - r, pixel.y()), QPointF(pixel.x() + r, pixel.y()))
-            painter.drawLine(QPointF(pixel.x(), pixel.y() - r), QPointF(pixel.x(), pixel.y() + r))
+            painter.drawLine(QPointF(image.left(), pixel.y()), QPointF(image.right(), pixel.y()))
+            painter.drawLine(QPointF(pixel.x(), image.top()), QPointF(pixel.x(), image.bottom()))
+        if show_param_marker and bounds.contains(pixel):
+            # Mockup B's marker: an amber dot with a dark ring.
+            pen = QPen(theme.color("bg"))
+            pen.setWidthF(2.0)
+            painter.setPen(pen)
+            painter.setBrush(theme.color("mark_param"))
+            painter.drawEllipse(pixel, PARAM_MARKER_RADIUS, PARAM_MARKER_RADIUS)
 
     if show_legend:
         entries = build_legend_entries(
@@ -672,7 +889,7 @@ def _draw_marker(painter: QPainter, pixel: QPointF, radius: float, style: str,
     circle (critical points), square (fixed points), diamond (attracting
     cycles).
     """
-    pen = QPen(QColor(0, 0, 0))
+    pen = QPen(theme.color("mark_outline"))
     pen.setWidth(2)
     painter.setPen(pen)
     painter.setBrush(QColor(*color))
@@ -879,18 +1096,17 @@ def array_to_qimage(payload, mode: str, settings: Settings,
         is_infinity = np.flipud(payload[2])
         rgb = color_parameter_period(periods, undetermined, is_infinity)
         return _rgb_to_qimage(rgb)
-    # A RATIONAL "julia" payload is stacked (values, labels) -- color ONLY
-    # the values layer, through the exact SAME color_escape_time call a
-    # plain (certified-polynomial) payload already goes through below; see
-    # this function's own "GOVERNING PRINCIPLE" paragraph for why labels
-    # never reach the colorer.
-    if mode == "julia" and np.asarray(payload).ndim == 3:
-        payload = payload[0]
-    flipped = np.flipud(payload)
+    # "julia" (values, escaped, labels) and "parameter" (values, escaped)
+    # are always stacked: color the values layer with the ESCAPED MASK
+    # deciding interior vs exterior -- never "value > 0", which painted fast
+    # escapes (smooth value <= 0) as interior. Labels never reach the
+    # colorer; see this function's own "GOVERNING PRINCIPLE" paragraph.
     if mode in ("julia", "parameter"):
-        rgb = color_escape_time(flipped, max_iter, palette=settings.color_palette,
+        rgb = color_escape_time(np.flipud(payload[0]), max_iter,
+                                 palette=settings.color_palette,
                                  scaling=settings.color_scaling,
-                                 period=settings.color_period or None)
+                                 period=settings.color_period or None,
+                                 escaped=np.flipud(payload[1]))
         return _rgb_to_qimage(rgb)
     raise AssertionError(f"unreachable: mode={mode!r}")
 
@@ -1223,6 +1439,13 @@ class ImageView(QWidget):
         # Legend (Stage 3) -- off by default, matching every other overlay's
         # own starting state.
         self._show_legend: bool = False
+        # Built-in overlay switches (see BUILTIN_OVERLAYS); registry layers
+        # keep their own dicts below.
+        self._show_orbit: bool = True
+        self._show_param_marker: bool = True
+        self._show_crosshair: bool = False
+        self._reference_scale_key = None
+        self._reference_scale_value: float | None = None
 
         self._pixmap: QPixmap | None = None
         # The viewport _pixmap was actually rendered for (wider than
@@ -1234,6 +1457,10 @@ class ImageView(QWidget):
         # was rendered under, for the cursor readout's sampling.
         self._buffer_payload = None
         self._buffer_mode: str | None = None
+        # True for a RATIONAL map's "julia" payload, whose non-escaped
+        # pixels read "unresolved" (no attractor reached) rather than
+        # "never escaped" -- set in set_image.
+        self._buffer_labelled = False
 
         # ---- overlay-layer registry state (Stage 1) ----------------------------
         # Generic per-layer storage backing EVERY registered OverlayLayer (see
@@ -1355,7 +1582,9 @@ class ImageView(QWidget):
             decimals = max(4, int(math.ceil(-math.log10(pixel_step))) + 1)
         else:
             decimals = 4
-        coord = f"z = {w.real:.{decimals}f}{'+' if w.imag >= 0 else '-'}{abs(w.imag):.{decimals}f}j"
+        # On the parameter plane a pixel IS a value of a, not a point z.
+        name = "a" if self.pane.render_mode in PARAMETER_PLANE_MODES else "z"
+        coord = f"{name} = {w.real:.{decimals}f}{'+' if w.imag >= 0 else '-'}{abs(w.imag):.{decimals}f}j"
         sample = self._sample_at_pixel(pixel)
         return f"{coord}   {sample}" if sample else coord
 
@@ -1373,8 +1602,8 @@ class ImageView(QWidget):
         # for a RATIONAL map's render (Stage 2/Stage 3 -- see render_map/
         # array_to_qimage's own docstrings, distinguished the SAME way
         # there: ndim, not a second flag threaded through).
-        stacked = (mode in ("basin", "parameter_basin", "parameter_period") or
-                  (mode in ("julia", "greens", "parameter_greens") and payload.ndim == 3))
+        stacked = (mode in ("basin", "parameter_basin", "parameter_period", "julia", "parameter") or
+                  (mode in ("greens", "parameter_greens") and payload.ndim == 3))
         if stacked:
             height, width = payload[0].shape
         else:
@@ -1385,14 +1614,16 @@ class ImageView(QWidget):
                           # differently) buffer's own real pixels -- nothing to sample
         raw_row = height - 1 - row_top   # buffer is top-down; the array itself is row-0-bottom
 
-        if mode == "julia" and stacked:
-            value = payload[0][raw_row, col]
-            label = payload[1][raw_row, col]
-            return ("unresolved" if label == 0.0
-                    else f"basin = {int(label)}, approach rate = {value:.4g}")
         if mode in ("julia", "parameter"):
-            value = payload[raw_row, col]
-            return "never escaped" if value == 0.0 else f"escape = {value:.4g}"
+            # (values, escaped[, labels]); the mask is the escape status.
+            value = payload[0][raw_row, col]
+            escaped = payload[1][raw_row, col]
+            label = payload[2][raw_row, col] if mode == "julia" else 0.0
+            if label != 0.0:   # a rational map's resolved pixel: which basin
+                return f"basin = {int(label)}, approach rate = {value:.4g}"
+            if escaped == 0.0:
+                return "unresolved" if self._buffer_labelled else "never escaped"
+            return f"escape = {value:.4g}"
         if mode == "basin":
             label = payload[0][raw_row, col]
             return "unresolved" if label == 0.0 else f"basin = {int(label)}"
@@ -1573,6 +1804,156 @@ class ImageView(QWidget):
         self._show_legend = show
         self.update()
 
+    def set_overlay(self, key: str, on: bool) -> None:
+        """One entry point for every overlay switch (see overlay_toggles):
+        what the overlay chips and the View menu both call."""
+        if key == ORBIT_TOGGLE_KEY:
+            self._show_orbit = on
+        elif key == PARAM_MARKER_TOGGLE_KEY:
+            self._show_param_marker = on
+        elif key == CROSSHAIR_TOGGLE_KEY:
+            self._show_crosshair = on
+        elif key in self._layer_enabled:
+            self.set_layer_enabled(key, on)
+            return
+        elif key in self._layer_trace_enabled:
+            self.set_trace_enabled(key, on)
+            return
+        else:
+            raise KeyError(key)
+        self.update()
+
+    def overlay_on(self, key: str) -> bool:
+        return {ORBIT_TOGGLE_KEY: self._show_orbit, PARAM_MARKER_TOGGLE_KEY: self._show_param_marker,
+                CROSSHAIR_TOGGLE_KEY: self._show_crosshair}.get(
+            key, self._layer_enabled.get(key, self._layer_trace_enabled.get(key, False)))
+
+    # ---- readout chips (painted on the image, bottom-left) -------------------------
+    def zoom_factor(self) -> float:
+        """How far in from this map's default framing for this mode (x1 = default)."""
+        m = self.session.map
+        key = (m.name, m.to_formula(), self.pane.render_mode,
+               None if self.pane.render_mode in PARAMETER_PLANE_MODES else self.session.param)
+        if key != self._reference_scale_key:
+            self._reference_scale_key = key
+            try:
+                self._reference_scale_value = default_view_for_mode(
+                    m, self.session.param, self.pane.render_mode)[1]
+            except Exception:   # a degenerate map: fall back to "no zoom shown"
+                self._reference_scale_value = None
+        ref = self._reference_scale_value
+        scale = self.pane.viewport.scale
+        return ref / scale if ref and scale > 0 else 1.0
+
+    def readout_chips(self) -> list[tuple[str, str]]:
+        """(accent label, value) pairs for the chips painted at the image's
+        bottom-left: `a` and the zoom on the parameter plane; z0, the step
+        count and the orbit's fate on the dynamical plane (once seeded)."""
+        if self.pane.render_mode in PARAMETER_PLANE_MODES:
+            zoom = self.zoom_factor()
+            zoom_text = f"×{zoom:.2f}" if zoom < 100 else f"×{zoom:.3g}"
+            return [("a", format_readout_complex(self.session.param)), ("", zoom_text)]
+        state = self.orbit_tracker.state
+        if state is None:
+            return []
+        rs = self.session.render_settings
+        c = self.orbit_tracker.classify(self.session.map, self.session.param, rs.max_iter, rs.tol)
+        fate = {"converged_fixed": "fixed point",
+                "converged_cycle": f"{c.period}-cycle" if c.period else "cycle",
+                "undetermined": "undetermined", "running": "running"}.get(c.kind, "")
+        return [("z₀", format_readout_complex(state.z0)),
+                ("", f"n {state.n}" + (f" · {fate}" if fate else ""))]
+
+    def _paint_readout_chips(self, painter: QPainter) -> None:
+        chips = self.readout_chips()
+        if not chips:
+            return
+        rect = QRectF(self._display_rect())
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(theme.mono_font(theme.FONT_SIZE_MONO))
+        metrics = painter.fontMetrics()
+        accent = theme.color("amber" if self.pane.render_mode in PARAMETER_PLANE_MODES else "teal")
+        pad, gap, h = 8.0, 6.0, 24.0
+        x, y = rect.left() + 10.0, rect.bottom() - 10.0 - h
+        for label, value in chips:
+            label_w = metrics.horizontalAdvance(label + " ") if label else 0
+            w = pad * 2 + label_w + metrics.horizontalAdvance(value)
+            if x + w > rect.right() - 10.0 and x > rect.left() + 10.0:
+                break   # no room for this chip on a small image
+            box = QRectF(x, y, w, h)
+            painter.setPen(QPen(theme.color("border_strong"), 1))
+            painter.setBrush(theme.color("overlay"))
+            painter.drawRoundedRect(box, 6, 6)
+            text_box = box.adjusted(pad, 0, -pad, 0)
+            align = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            if label:
+                painter.setPen(accent)
+                painter.drawText(text_box, align, label)
+                text_box = text_box.adjusted(label_w, 0, 0, 0)
+                painter.setPen(theme.color("text"))
+            else:
+                painter.setPen(theme.color("text_soft"))
+            painter.drawText(text_box, align, value)
+            x += w + gap
+        painter.restore()
+
+    # ---- off-screen parameter marker: an edge arrow that re-centers on it -------------
+    OFFSCREEN_ARROW_INSET = 18.0
+    OFFSCREEN_ARROW_SIZE = 11.0
+
+    def offscreen_marker_arrow(self) -> tuple[QPointF, float] | None:
+        """(tip position, angle in radians) of the edge arrow pointing toward
+        the parameter marker when it lies outside the visible image, else None."""
+        if self.pane.render_mode not in PARAMETER_PLANE_MODES or not self._show_param_marker:
+            return None
+        a = self.session.param
+        if not (math.isfinite(a.real) and math.isfinite(a.imag)):
+            return None
+        rect = QRectF(self._display_rect())
+        pixel = self._complex_to_display_pixel(a)
+        if rect.contains(pixel):
+            return None
+        c = rect.center()
+        dx, dy = pixel.x() - c.x(), pixel.y() - c.y()
+        half_w = rect.width() / 2 - self.OFFSCREEN_ARROW_INSET
+        half_h = rect.height() / 2 - self.OFFSCREEN_ARROW_INSET
+        if half_w <= 0 or half_h <= 0:
+            return None
+        t = min(half_w / abs(dx) if dx else math.inf, half_h / abs(dy) if dy else math.inf)
+        if not math.isfinite(t):
+            return None
+        return QPointF(c.x() + dx * t, c.y() + dy * t), math.atan2(dy, dx)
+
+    def _offscreen_arrow_hit(self, pos: QPointF) -> bool:
+        arrow = self.offscreen_marker_arrow()
+        if arrow is None:
+            return False
+        tip, _angle = arrow
+        r = self.OFFSCREEN_ARROW_SIZE + 8
+        return QRectF(tip.x() - r, tip.y() - r, 2 * r, 2 * r).contains(pos)
+
+    def recenter_on_param(self) -> None:
+        vp = self.pane.viewport
+        self.pane.viewport = cdx.Viewport(self.session.param, vp.scale, vp.resolution)
+        self.update()
+        self.viewport_changed.emit()
+
+    def _paint_offscreen_arrow(self, painter: QPainter) -> None:
+        arrow = self.offscreen_marker_arrow()
+        if arrow is None:
+            return
+        tip, angle = arrow
+        s = self.OFFSCREEN_ARROW_SIZE
+        back = QPointF(tip.x() - s * 1.6 * math.cos(angle), tip.y() - s * 1.6 * math.sin(angle))
+        side = QPointF(-math.sin(angle) * s, math.cos(angle) * s)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(theme.color("bg"), 2))
+        painter.setBrush(theme.color("mark_param"))
+        painter.drawPolygon(QPolygonF([tip, back + side, back - side]))
+        painter.restore()
+
     # ---- orbit tracking: click-to-seed, Step/Run N/Clear -------------------------
     def refresh_orbit_staleness(self) -> None:
         """Called at the same map/param-change points refresh_layers is
@@ -1658,6 +2039,8 @@ class ImageView(QWidget):
         # to match `payload` at this exact point.
         self._buffer_payload = payload
         self._buffer_mode = self.pane.render_mode
+        self._buffer_labelled = (self._buffer_mode == "julia" and
+                                 not cdx.polynomial_escape_certified(self.session.map))
         self.update()
 
     def no_effect_parameter_message(self) -> str | None:
@@ -1684,8 +2067,8 @@ class ImageView(QWidget):
         painter = QPainter(self)
         message = self.no_effect_parameter_message()
         if message is not None:
-            painter.fillRect(self.rect(), QColor(40, 40, 40))
-            painter.setPen(QColor(220, 220, 220))
+            painter.fillRect(self.rect(), theme.color("bg"))
+            painter.setPen(theme.color("muted"))
             painter.drawText(self.rect(),
                              int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap),
                              message)
@@ -1694,7 +2077,7 @@ class ImageView(QWidget):
         if source_rect is not None:
             painter.drawPixmap(QRectF(self._display_rect()), self._pixmap, source_rect)
         if self._rubber_band_rect is not None:
-            pen = QPen(QColor(255, 255, 255))
+            pen = QPen(theme.color("text"))
             pen.setStyle(Qt.PenStyle.DashLine)
             pen.setWidth(1)
             painter.setPen(pen)
@@ -1715,10 +2098,11 @@ class ImageView(QWidget):
                        critical_points=self._critical_points,
                        show_traced_orbits=self._trace_orbits,
                        orbit_traces=self._orbit_traces,
-                       show_orbit=True,
+                       show_orbit=self._show_orbit,
                        orbit_connect_lines=self._orbit_connect_lines,
                        orbit_state=self.orbit_tracker.state,
-                       show_param_marker=True,
+                       show_param_marker=self._show_param_marker,
+                       show_crosshair=self._show_crosshair,
                        param=self.session.param,
                        show_legend=self._show_legend,
                        layer_enabled=self._layer_enabled,
@@ -1733,6 +2117,72 @@ class ImageView(QWidget):
                               layer_trace_enabled=self._layer_trace_enabled,
                               layer_points=self._layer_points,
                               layer_traces=self._layer_traces)
+        self._paint_label_cuts(painter)
+        self._paint_offscreen_arrow(painter)
+        self._paint_readout_chips(painter)
+
+    # ---- Per-critical labelling cuts --------------------------------------------
+    def label_cuts_active(self) -> bool:
+        settings = self.session.settings
+        return (self.pane.render_mode == "parameter"
+                and settings.parameter_strategy == "per_critical")
+
+    def label_cuts(self):
+        """The current map's labelling cuts (app.label_cuts) when the
+        Per-critical strategy is active on this pane, else None."""
+        if not self.label_cuts_active():
+            return None
+        return label_cuts_module.label_cuts(self.session.map)
+
+    def label_cut_segments(self) -> list[tuple[complex, complex, complex]]:
+        """(collision, start, end) in complex coordinates for every cut ray
+        crossing this pane's viewport -- what _paint_label_cuts draws."""
+        cuts = self.label_cuts()
+        if cuts is None:
+            return []
+        vp = self.pane.viewport
+        return label_cuts_module.visible_segments(cuts, vp.center, vp.scale)
+
+    def label_cut_at(self, pos: QPointF, radius_px: float = 4.0) -> bool:
+        """Whether screen position `pos` is within radius_px of a drawn cut."""
+        segments = self.label_cut_segments()
+        if not segments:
+            return False
+        rect = self._display_rect()
+        if rect.width() <= 0:
+            return False
+        per_px = 2.0 * self.pane.viewport.scale / rect.width()
+        w = self._pixel_to_complex(pos)
+        return any(label_cuts_module.distance_to_segment(w, s0, s1) <= radius_px * per_px
+                   for _c, s0, s1 in segments)
+
+    def _paint_label_cuts(self, painter: QPainter) -> None:
+        segments = self.label_cut_segments()
+        if not segments:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(self._display_rect())
+        # The marks' own white-on-black-outline pair, translucent: thin and
+        # quiet, since this marks a convention rather than a dynamical object.
+        line, outline = theme.color("mark_point"), theme.color("mark_outline")
+        outline.setAlpha(110)
+        halo = QPen(outline, 2.5)
+        halo.setCapStyle(Qt.PenCapStyle.FlatCap)
+        line.setAlpha(210)
+        pen = QPen(line, 1.0)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        for c, s0, s1 in segments:
+            p0, p1 = self._complex_to_display_pixel(s0), self._complex_to_display_pixel(s1)
+            painter.setPen(halo)
+            painter.drawLine(p0, p1)
+            painter.setPen(pen)
+            painter.drawLine(p0, p1)
+            painter.setPen(QPen(line, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(self._complex_to_display_pixel(c), 2.5, 2.5)
+        painter.restore()
 
     def _should_draw_critical_points(self) -> bool:
         # Critical points are objects of the DYNAMICAL plane -- a pixel on
@@ -1909,6 +2359,9 @@ class ImageView(QWidget):
         button = event.button()
         if button not in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             return
+        if button == Qt.MouseButton.LeftButton and self._offscreen_arrow_hit(QPointF(event.position())):
+            self.recenter_on_param()   # the edge arrow: jump back to the marker
+            return
         self._gesture_button = button
         self._press_pos = QPointF(event.position())
         vp = self.pane.viewport
@@ -1942,7 +2395,15 @@ class ImageView(QWidget):
             self._rubber_band_rect = QRect(self._press_pos.toPoint(), pos).normalized()
             self.update()
         elif self._gesture is None:
-            self._update_cursor(event.modifiers())
+            if self._offscreen_arrow_hit(pos_f):
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.setToolTip("Re-center on the parameter marker")
+            elif self.label_cut_at(pos_f):
+                self.setToolTip(label_cuts_module.TOOLTIP)
+                self._update_cursor(event.modifiers())
+            else:
+                self.setToolTip("")
+                self._update_cursor(event.modifiers())
 
         # Live, on every move regardless of panning/dragging -- the cursor
         # coordinate (and, mid-pan, what's still on screen at that point)
@@ -2219,26 +2680,77 @@ EXPORT_PREVIEW_RESOLUTION = 240
 THUMBNAIL_RESOLUTION = 64
 
 
-def render_thumbnail(rational_map: cdx.RationalMap, param: complex, color_settings: Settings,
-                     render_settings: cdx.RenderSettings,
-                     resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
-    """A small CLEAN dynamical-plane render (Julia set, no overlays) of
-    (rational_map, param) -- the same render_map + array_to_qimage pipeline
-    every other render goes through, so a thumbnail always matches what the
-    map actually looks like, never a stale/approximated stand-in.
+def render_experiment_thumbnail(rational_map: cdx.RationalMap, param: complex,
+                                color_settings: Settings, render_settings: cdx.RenderSettings,
+                                resolution: int = THUMBNAIL_RESOLUTION) -> QImage:
+    """The thumbnail of an EXPERIMENT (.cdsx snapshot): a small clean
+    DYNAMICAL-plane render (Julia set, no overlays) of (rational_map, param)
+    -- an experiment is one specific a, so its Julia set is the right
+    picture. The same render_map + array_to_qimage pipeline every other
+    render goes through, so it always matches what the map looks like.
 
-    Always the DYNAMICAL plane (never parameter): a family's own critical/
-    fixed-point structure lives there regardless of whether `a` affects
-    anything at all, whereas a parameter-plane render can be entirely
-    degenerate for a map like newton_cubic() where `a` has no effect (see
-    ImageView.no_effect_parameter_message) -- there is no single parameter-
-    plane framing that is meaningful for every possible family, but
-    default_dynamical_view's fixed center-0 framing (Stage A) is.
+    A FAMILY's thumbnail (the Library) is a different picture -- its
+    parameter plane, which is what tells families apart: at a = 0 every
+    z^d + a is the unit disk. See render_family_thumbnail.
     """
     center, scale = default_dynamical_view(rational_map, param)
     viewport = cdx.Viewport(center, scale, resolution)
     array = render_map(rational_map, param, viewport, render_settings, "julia")
     return array_to_qimage(array, "julia", color_settings, render_settings.max_iter)
+
+
+def render_family_thumbnail(name: str, rational_map: cdx.RationalMap, color_settings: Settings,
+                            render_settings: cdx.RenderSettings,
+                            view: tuple[complex, float] | None = None,
+                            resolution: int = THUMBNAIL_RESOLUTION) -> tuple[QImage, str]:
+    """The Library thumbnail of a FAMILY: its PARAMETER plane (mode
+    "parameter", the user's current strategy/critical_index and palette)
+    at the family's stored framing (app.family_views), through the same
+    render_map + array_to_qimage pipeline as every other render. Returns
+    (image, source), source "parameter" or "dynamical".
+
+    Honest fallbacks, to the dynamical-plane BASIN render at the family's
+    representative parameter (a = 0) -- never a flat square:
+      * `a` has no effect on the map (describe_parameter_role says "unused
+        by this map", e.g. newton3): there is no parameter plane to show;
+      * the parameter render comes back uniform (every value and the
+        escaped mask constant) -- logged once per family.
+    `resolution` is in device pixels (callers pass 64 x the device pixel
+    ratio). Safe to call off the GUI thread: it builds a QImage, never a
+    QPixmap.
+    """
+    if describe_parameter_role(rational_map) != "unused by this map":
+        center, scale = view if view is not None else parameter_view_for(name)
+        viewport = cdx.Viewport(center, scale, resolution)
+        array = render_map(rational_map, 0j, viewport, render_settings, "parameter",
+                           strategy=color_settings.parameter_strategy,
+                           critical_index=color_settings.parameter_critical_index)
+        if np.ptp(array[0]) > 0 or np.ptp(array[1]) > 0:
+            return (array_to_qimage(array, "parameter", color_settings, render_settings.max_iter),
+                    "parameter")
+        if name not in _UNIFORM_THUMBNAIL_LOGGED:
+            _UNIFORM_THUMBNAIL_LOGGED.add(name)
+            print(f"[thumbnails] {name}: the parameter plane at {center} +- {scale} is uniform; "
+                  "showing the dynamical-plane basin instead", file=sys.stderr)
+    center, scale = default_dynamical_view(rational_map, 0j)
+    viewport = cdx.Viewport(center, scale, resolution)
+    array = render_map(rational_map, 0j, viewport, render_settings, "basin")
+    return array_to_qimage(array, "basin", color_settings, render_settings.max_iter), "dynamical"
+
+
+def family_thumbnail_key(name: str, rational_map: cdx.RationalMap, color_settings: Settings,
+                         render_settings: cdx.RenderSettings, resolution: int) -> str:
+    """Everything a family thumbnail depends on: the map, its framing, the
+    pixel size, and the computing/colouring settings (palette, scaling,
+    period, strategy, critical index, iteration settings). A change to any
+    of them is a different key -- that is the invalidation."""
+    center, scale = parameter_view_for(name)
+    parts = (rational_map.serialize(), center.real, center.imag, scale, resolution,
+             color_settings.color_palette, color_settings.color_scaling,
+             color_settings.color_period, color_settings.parameter_strategy,
+             color_settings.parameter_critical_index, render_settings.max_iter,
+             render_settings.escape_radius, render_settings.tol)
+    return hashlib.sha1(repr(parts).encode("utf-8")).hexdigest()[:20]
 
 
 def qimage_to_base64_png(image: QImage) -> str:
@@ -2255,38 +2767,144 @@ def qimage_to_base64_png(image: QImage) -> str:
     return base64.b64encode(buffer.data().data()).decode("ascii")
 
 
-def _regenerate_library_previews(library: cdx.FamilyLibrary, color_settings: Settings,
-                                 render_settings: cdx.RenderSettings) -> None:
-    """(Re)writes a sidecar thumbnail (see app.settings.preview_path_for) for
-    every non-preset entry currently in `library`, and removes any leftover
-    sidecar for a name no longer present -- so previews/ never drifts out of
-    sync with what save_user_library just wrote to library.txt. Called after
-    EVERY persisted library change (SandboxWindow._on_library_changed): a
-    rename or delete is handled for free by recomputing from the library's
-    current contents rather than special-casing each action, since a rename
-    changes an entry's hashed filename and a delete just drops it from the
-    "keep" set below.
-
-    Rendered at a=0 -- RationalMap itself carries no stored parameter (see
-    Session.param, which belongs to the session, not to any one library
-    entry, and may currently be showing a completely different family), so
-    there is no "the" parameter a saved entry was last viewed at to reuse;
-    0 is a plain, always-valid evaluation point, not a per-entry guess.
+def _remove_stale_family_sidecars(library: cdx.FamilyLibrary) -> None:
+    """Deletes every sidecar (thumbnail PNG, framing JSON) whose family is
+    no longer in `library` -- called after every persisted library change
+    (SandboxWindow._on_library_changed). Rendering the thumbnails that are
+    missing or out of date is FamilyThumbnailer's job, off the GUI thread.
     """
-    keep_paths = set()
+    keep = set()
     for name in library.names():
         if name in PRESET_FAMILY_NAMES:
             continue
-        entry = library.find(name)
-        if entry is None:
-            continue
-        path = preview_path_for(name)
-        keep_paths.add(path)
-        image = render_thumbnail(entry, 0j, color_settings, render_settings)
-        image.save(str(path), "PNG")
-    for existing in previews_dir().glob("*.png"):
-        if existing not in keep_paths:
+        keep.add(preview_path_for(name))
+        keep.add(family_meta_path_for(name))
+    for existing in list(previews_dir().glob("*.png")) + list(previews_dir().glob("*.json")):
+        if existing not in keep:
             existing.unlink()
+
+
+class _ThumbnailSignals(QObject):
+    """Created on the GUI thread and connected to a bound method of the
+    GUI-thread FamilyThumbnailer, so delivery is queued -- see
+    RenderSignals for why a context-less receiver crashed."""
+    done = Signal(str, str, object, str)   # name, key, QImage, source
+
+
+class _ThumbnailTask(QRunnable):
+    def __init__(self, name: str, key: str, rational_map: cdx.RationalMap,
+                 color_settings: Settings, render_settings: cdx.RenderSettings,
+                 view: tuple[complex, float], resolution: int):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.name, self.key = name, key
+        self.rational_map = rational_map
+        self.color_settings, self.render_settings = color_settings, render_settings
+        self.view, self.resolution = view, resolution
+        self.signals = _ThumbnailSignals()
+        self.cancelled = False
+
+    def run(self) -> None:
+        if self.cancelled:
+            return
+        try:
+            image, source = render_family_thumbnail(self.name, self.rational_map,
+                                                    self.color_settings, self.render_settings,
+                                                    self.view, self.resolution)
+        except Exception as exc:   # never crash the pool; leave the placeholder up
+            print(f"[thumbnails] {self.name}: {exc}", file=sys.stderr)
+            return
+        if not self.cancelled:
+            self.signals.done.emit(self.name, self.key, image, source)
+
+
+class FamilyThumbnailer(QObject):
+    """Library thumbnails, rendered OFF the GUI thread.
+
+    icon(name, map) answers immediately: the cached thumbnail if its key
+    (family_thumbnail_key) is current, else the placeholder -- and in that
+    case starts a background render (one at a time per family). When a
+    render lands, `ready(name)` fires on the GUI thread and the caller
+    re-asks. Presets are cached in memory; saved families also in their
+    sidecar PNG, with the key in the family's JSON sidecar, so they are not
+    re-rendered on the next launch. A palette, scaling, period, strategy or
+    critical-index change is a new key: icon() then re-renders.
+
+    Pixel size: THUMBNAIL_RESOLUTION logical px x the device pixel ratio
+    (128 on Retina), with the ratio set on the image so it draws crisply.
+    """
+    ready = Signal(str)
+
+    def __init__(self, settings_getter: Callable[[], Settings],
+                 render_settings_getter: Callable[[], cdx.RenderSettings],
+                 dpr_getter: Callable[[], float], parent: QObject | None = None):
+        super().__init__(parent)
+        self._settings = settings_getter
+        self._render_settings = render_settings_getter
+        self._dpr = dpr_getter
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)    # leaves the main render pool its threads
+        self._pending: dict[str, _ThumbnailTask] = {}   # GUI-side owners (see RenderSignals)
+        self.sources: dict[str, str] = {}               # name -> "parameter" / "dynamical"
+
+    def _resolution(self) -> tuple[int, float]:
+        dpr = max(1.0, float(self._dpr() or 1.0))
+        return int(round(THUMBNAIL_RESOLUTION * dpr)), dpr
+
+    def icon(self, name: str, rational_map: cdx.RationalMap | None) -> QIcon:
+        if rational_map is None:
+            return _placeholder_icon()
+        st = self._settings()
+        rs = self._render_settings()
+        res, dpr = self._resolution()
+        key = family_thumbnail_key(name, rational_map, st, rs, res)
+        cached = _FAMILY_THUMBNAIL_CACHE.get((name, key))
+        if cached is not None:
+            return cached
+        if name not in PRESET_FAMILY_NAMES and thumbnail_key(name) == key:
+            path = preview_path_for(name)
+            image = QImage(str(path))
+            if not image.isNull():
+                image.setDevicePixelRatio(dpr)
+                icon = QIcon(QPixmap.fromImage(image))
+                _FAMILY_THUMBNAIL_CACHE[(name, key)] = icon
+                return icon
+        self._schedule(name, key, rational_map, st, rs, res)
+        return _placeholder_icon()
+
+    def _schedule(self, name, key, rational_map, st, rs, res) -> None:
+        current = self._pending.get(name)
+        if current is not None:
+            if current.key == key:
+                return
+            current.cancelled = True     # superseded: its result is dropped below anyway
+        single = cdx.RenderSettings(rs.max_iter, rs.escape_radius, rs.tol, 1)
+        task = _ThumbnailTask(name, key, rational_map, st, single, parameter_view_for(name), res)
+        task.signals.done.connect(self._on_done)
+        self._pending[name] = task
+        self._pool.start(task)
+
+    def _on_done(self, name: str, key: str, image: QImage, source: str) -> None:
+        task = self._pending.get(name)
+        if task is None or task.key != key:
+            return   # superseded by a newer request for this family
+        del self._pending[name]
+        _, dpr = self._resolution()
+        if name not in PRESET_FAMILY_NAMES:
+            image.save(str(preview_path_for(name)), "PNG")
+            set_thumbnail_key(name, key)
+        image.setDevicePixelRatio(dpr)
+        _FAMILY_THUMBNAIL_CACHE[(name, key)] = QIcon(QPixmap.fromImage(image))
+        self.sources[name] = source
+        self.ready.emit(name)
+
+    def pending(self) -> int:
+        return len(self._pending)
+
+    def shutdown(self) -> None:
+        for task in self._pending.values():
+            task.cancelled = True
+        self._pending.clear()
 
 
 class ExportImageDialog(QDialog):
@@ -2378,6 +2996,13 @@ class ExportImageDialog(QDialog):
             self._param_marker_checkbox.toggled.connect(self._update_preview)
             layout.addWidget(self._param_marker_checkbox)
 
+        # The painted legend is off on screen by default (the overlay chips
+        # carry the swatches now), but an exported image has no chips: offer it.
+        self._legend_checkbox = QCheckBox("Legend", self)
+        self._legend_checkbox.setChecked(self._pane.image_view._show_legend)
+        self._legend_checkbox.toggled.connect(self._update_preview)
+        layout.addWidget(self._legend_checkbox)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel, self)
         buttons.accepted.connect(self.accept)
@@ -2430,6 +3055,12 @@ class ExportImageDialog(QDialog):
             flags["orbit_state"] = view.orbit_tracker.state
         if self._param_marker_checkbox is not None:
             flags["show_param_marker"] = self._param_marker_checkbox.isChecked()
+            flags["show_crosshair"] = view.overlay_on(CROSSHAIR_TOGGLE_KEY)
+        if self._legend_checkbox.isChecked():
+            flags["show_legend"] = True
+            # Only what the export itself draws gets a legend line.
+            flags["layer_enabled"] = {CRITICAL_POINTS_LAYER_KEY: flags.get("show_critical_points", False)}
+            flags["layer_trace_enabled"] = {CRITICAL_TRACE_KEY: flags.get("show_traced_orbits", False)}
         return flags
 
     def resolution(self) -> int:
@@ -2444,10 +3075,21 @@ class ExportImageDialog(QDialog):
 
 
 class SandboxWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, layout_settings: QSettings | None = None):
+        """`layout_settings`: where window geometry and dock state are restored
+        from and saved to on close (main() passes default_layout_settings();
+        None -- tests, tools -- means start from the default layout and save
+        nothing)."""
         super().__init__()
         self.setWindowTitle(PRODUCT_NAME)   # the product name, not an internal milestone tag
-        self.resize(800, 860)
+        self.setMinimumSize(MIN_WINDOW_SIZE)
+        self.resize(DEFAULT_WINDOW_SIZE)
+        self._layout_settings = layout_settings
+        self._param_undo: list[complex] = []
+        self._param_redo: list[complex] = []
+        self._last_nudge_time: float | None = None
+        self._sidebar_auto_collapsed = False
+        self._was_narrow = False
         self._status_base_message = ""
         self._status_cursor_text = ""
 
@@ -2556,9 +3198,15 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane] = timer
 
         self._build_ui()
+        self._apply_default_layout()
+        self._default_layout_state = self.saveState(LAYOUT_STATE_VERSION)
+        if layout_settings is not None:
+            self.restore_layout(layout_settings)
         for pane in self.panes:
             pane.image_view.refresh_layers()
         self._update_status_bar()
+        self._refresh_map_chip()
+        self._refresh_render_status()
         for pane in self.panes:
             self._start_render(pane)
 
@@ -2615,30 +3263,25 @@ class SandboxWindow(QMainWindow):
         self.orbit_panel = OrbitPanel(self.session, self.image_view, self)
         self.metadata_header = MetadataHeader(self.session, self.pane, self)
 
-        # PER-PANE mode combo -- replaces the old single window-level
-        # self.mode_combo. self.mode_combo is now specifically pane A's
-        # (kept under that name for the many single-pane call sites/tests
-        # that still mean "the" pane); self.mode_combo2 is pane B's, wired
-        # identically. Neither one is more "correct" than the other --
-        # Stage 3's coupling keys off render_mode, never off which combo
-        # this is.
-        self.mode_combo = QComboBox(self)
-        self.mode_combo.addItems(RENDER_MODES)
-        self.mode_combo.setCurrentText(self.pane.render_mode)
-        self.mode_combo.currentTextChanged.connect(lambda m: self._on_mode_changed(self.pane, m))
-
-        self.mode_combo2 = QComboBox(self)
-        self.mode_combo2.addItems(RENDER_MODES)
-        self.mode_combo2.setCurrentText(self.pane2.render_mode)
-        self.mode_combo2.currentTextChanged.connect(
-            lambda m: self._on_mode_changed(self.pane2, m))
-
-        self.pane_column = self._build_pane_column(self.mode_combo, self.image_view)
-        self.pane_column2 = self._build_pane_column(self.mode_combo2, self.image_view2)
-        self._pane_columns: dict[Pane, QWidget] = {
-            self.pane: self.pane_column, self.pane2: self.pane_column2}
-        self._mode_combos: dict[Pane, QComboBox] = {
+        # Each pane is a PlaneFrame: caps title + segmented mode control,
+        # the framed image, and a row of overlay chips (added in
+        # _build_overlay_chips, once the View-menu actions they mirror exist).
+        # mode_combo/mode_combo2 are compatibility shims over the segmented
+        # controls (setCurrentText(mode) still switches that pane's mode).
+        self.plane_frame = PlaneFrame(self.image_view, self)
+        self.plane_frame2 = PlaneFrame(self.image_view2, self)
+        self._plane_frames: dict[Pane, PlaneFrame] = {
+            self.pane: self.plane_frame, self.pane2: self.plane_frame2}
+        for pane, frame in self._plane_frames.items():
+            frame.mode_control.selected.connect(
+                lambda mode, p=pane: self._on_mode_changed(p, mode))
+            frame.resized.connect(self._equalize_chip_rows)
+        self.mode_combo = ModeSelector(self, self.pane)
+        self.mode_combo2 = ModeSelector(self, self.pane2)
+        self._mode_combos: dict[Pane, ModeSelector] = {
             self.pane: self.mode_combo, self.pane2: self.mode_combo2}
+        self.pane_column, self.pane_column2 = self.plane_frame, self.plane_frame2   # old names
+        self._pane_columns: dict[Pane, QWidget] = dict(self._plane_frames)
 
         # Side by side in a splitter, not two fixed halves -- the user can
         # drag the divider to give one pane more room. Coupled (both
@@ -2649,74 +3292,147 @@ class SandboxWindow(QMainWindow):
         self.view_splitter.addWidget(self.pane_column)
         self.view_splitter.addWidget(self.pane_column2)
 
-        # The View tab holds a small container -- the metadata header
-        # above the splitter, the orbit-tracking strip below it -- not the
-        # bare ImageView(s). The header sits directly above what it
-        # describes so a screenshot of just this tab is self-explanatory
-        # (P5c's own reason for building it at all); the orbit panel is
-        # meaningless without the image it overlays and needs to stay
-        # visible while the user clicks an image to seed a new orbit --
-        # see _sync_orbit_panel for which pane it currently overlays.
-        self.view_container = QWidget(self)
-        view_layout = QVBoxLayout(self.view_container)
-        view_layout.setContentsMargins(0, 0, 0, 0)
-        view_layout.addWidget(self.metadata_header)
-        view_layout.addWidget(self.view_splitter, 1)
-        view_layout.addWidget(self.orbit_panel)
+        # ---- Explore workspace: the two planes, side by side ----------------------
+        # The metadata header's job moved to the top bar's map chip (and, per
+        # pane, the readout chips): it is kept as an object for its text
+        # (format_metadata_text) but never shown.
+        self.metadata_header.hide()
+        self.explore_workspace = QWidget(self)
+        explore_layout = QVBoxLayout(self.explore_workspace)
+        explore_layout.setContentsMargins(theme.GUTTER, theme.GUTTER, theme.GUTTER, theme.GUTTER)
+        explore_layout.setSpacing(0)
+        self.view_splitter.setHandleWidth(theme.GUTTER)
+        self.view_splitter.setChildrenCollapsible(False)
+        explore_layout.addWidget(self.view_splitter, 1)
+        self.view_container = self.explore_workspace   # compatibility name
 
-        # A QTabWidget as the central widget, not the bare view container --
-        # this is what makes room for Terms/Facts/Library (and whatever tab
-        # comes after them) without redesigning the window. Settings is NOT
-        # one of these tabs (Stage 5) -- see _build_settings_dialog's own
-        # docstring for why it lives in a menu-opened dialog instead. The
-        # toolbar stays a QMainWindow-level toolbar, not per-tab: Reset View
-        # only means anything on the View tab, but QMainWindow toolbars are
-        # independent of which central-widget tab is showing either way.
-        self.tabs = QTabWidget(self)
-        self.tabs.addTab(self.view_container, "View")
-        self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
-        self.tabs.addTab(self.equation_panel, "Equation")
-        self.facts_panel = FactsPanel(self.session, self._on_center_view,
-                                      self._on_seed_orbit_from_facts, self)
-        self.tabs.addTab(self.facts_panel, "Facts")
-        self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
-                                          self._on_library_changed, self)
-        self.tabs.addTab(self.library_panel, "Library")
-        # Info is always the LAST tab: add_panel inserts module tabs before it.
-        self.info_panel = InfoPanel(self)
-        self.tabs.addTab(self.info_panel, "Info")
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.setCentralWidget(self.tabs)
+        # Central widget: one page per workspace. Explore is always first;
+        # add_panel(placement="workspace") adds more and shows the switch.
+        self.workspaces = QStackedWidget(self)
+        self.workspaces.addWidget(self.explore_workspace)
+        self._workspace_keys: dict[str, QWidget] = {"explore": self.explore_workspace}
+        self._workspace_titles: dict[str, str] = {"explore": "Explore"}
+        self.setCentralWidget(self.workspaces)
         self._extra_panels: list[QWidget] = []   # see add_panel
 
-        self._build_settings_dialog()
-
-        toolbar = QToolBar("Controls", self)
-        toolbar.setMovable(False)
-
-        # Two always-visible complex-number fields -- NOT buried in the
-        # Terms tab -- the typed half of P6's "symmetry of input": a and
-        # z0 are each settable by typing here OR by clicking a plane (see
-        # ImageView.mouseReleaseEvent/param_changed and _on_orbit_changed),
-        # and the two methods stay in sync through _apply_param_change and
-        # _on_z0_field_committed respectively, never diverging.
-        self.param_field = ComplexField("a =", self.session.param, self)
+        # ---- the two complex fields that left the toolbar ---------------------------
+        # `a` sits on the Equation tab (it is the active parameter's value) and
+        # z0 on the Orbit tab; each stays in sync with clicks in the planes
+        # (see _apply_param_change and _on_orbit_changed).
+        self.param_field = ComplexField("", self.session.param, self)
+        self.param_field.setAccessibleName("Value of the active parameter")
         self.param_field.committed.connect(self._on_param_field_committed)
-        toolbar.addWidget(self.param_field)
-        # 0+0j is just a neutral starting DISPLAY -- it does NOT mean an
-        # orbit is seeded there; nothing is seeded until the user commits
-        # this field or clicks the dynamical plane (see _on_orbit_changed,
-        # which is what actually keeps this field truthful once a real
-        # orbit exists).
-        self.z0_field = ComplexField("z0 =", complex(0, 0), self)
+        self.z0_field = ComplexField("", complex(0, 0), self)
+        self.z0_field.setAccessibleName("Orbit seed z0")
         self.z0_field.committed.connect(self._on_z0_field_committed)
-        toolbar.addWidget(self.z0_field)
 
-        reset_button = QPushButton("Reset View", self)
-        reset_button.clicked.connect(self._reset_view)
-        toolbar.addWidget(reset_button)
+        # ---- sidebar (right dock): Info | Library | Facts ----------------------------
+        self.sidebar = TabbedDock("Sidebar", "SidebarDock", "right", self)
+        self.info_panel = InfoPanel(self)
+        # Library thumbnails: parameter planes, rendered off the GUI thread
+        # (FamilyThumbnailer), each row showing a placeholder until its own
+        # render lands.
+        self.thumbnailer = FamilyThumbnailer(lambda: self.session.settings,
+                                             lambda: self.session.render_settings,
+                                             self.devicePixelRatioF, self)
+        self.thumbnailer.ready.connect(self._on_family_thumbnail_ready)
+        self.library_panel = LibraryPanel(self.session, self._on_family_loaded,
+                                          self._on_library_changed, self,
+                                          thumbnail_provider=self.thumbnailer.icon,
+                                          on_saved_as=self._on_family_saved_as,
+                                          on_renamed=self._on_family_renamed)
+        self.facts_panel = FactsPanel(self.session, self._on_center_view,
+                                      self._on_seed_orbit_from_facts, self)
+        # Info scrolls itself (a QTextBrowser); the others get a scroll area.
+        self.sidebar.add_tab(self.info_panel, "Info", "Controls and this map", scroll=False)
+        self.sidebar.add_tab(self.library_panel, "Library", "Families: presets and yours")
+        self.sidebar.add_tab(self.facts_panel, "Facts", "Critical points, fixed points, cycles, poles")
+        self.sidebar.set_current_widget(self.library_panel)
+        self.sidebar.currentChanged.connect(self._on_sidebar_tab_changed)
+        self.sidebar.collapsedChanged.connect(lambda _c: self._refresh_this_map())
+        # Expanding the sidebar by hand makes it the user's choice again.
+        self.sidebar.collapsedChanged.connect(
+            lambda collapsed: None if collapsed else setattr(self, "_sidebar_auto_collapsed", False))
+        self.sidebar.setMinimumWidth(SIDEBAR_MIN_WIDTH)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar)
 
-        self.addToolBar(toolbar)
+        # ---- bottom dock: Equations & Settings ----------------------------------------
+        self.settings_dock = TabbedDock("Equations & Settings", "SettingsDock", "bottom", self,
+                                        heading="Equations & Settings")
+        self.equation_panel = EquationPanel(self.session, self._on_term_edited, self)
+        self.equation_panel.set_save_family_handler(self.library_panel.save_as)
+        # The active parameter's value field IS the old toolbar `a =` field.
+        self.equation_panel.set_active_field(self.param_field)
+        self.equation_tab = QWidget(self)
+        eq_layout = QVBoxLayout(self.equation_tab)
+        eq_layout.setContentsMargins(18, 12, 18, 12)
+        eq_layout.addWidget(self.equation_panel, 1)
+        # Rendering and Coloring apply live (debounced); there is no dialog.
+        # One shared pause-then-apply for both tabs, and one coalesced
+        # re-render for whatever they applied together.
+        self._settings_apply_timer = QTimer(self)
+        self._settings_apply_timer.setSingleShot(True)
+        self._settings_apply_timer.setInterval(SETTINGS_APPLY_DEBOUNCE_MS)
+        self._settings_render_timer = QTimer(self)
+        self._settings_render_timer.setSingleShot(True)
+        self._settings_render_timer.setInterval(0)
+        self._settings_render_timer.timeout.connect(self._render_after_settings)
+        self.rendering_panel = SettingsPanel(self.session, self._on_settings_applied, self,
+                                             groups=RENDERING_GROUPS,
+                                             schedule_apply=self._settings_apply_timer.start)
+        self.coloring_panel = SettingsPanel(self.session, self._on_settings_applied, self,
+                                            groups=COLORING_GROUPS,
+                                            schedule_apply=self._settings_apply_timer.start)
+        self._settings_apply_timer.timeout.connect(self.rendering_panel.apply_pending)
+        self._settings_apply_timer.timeout.connect(self.coloring_panel.apply_pending)
+        self.settings_panel = self.rendering_panel   # old name
+        self.rendering_tab, self.coloring_tab = self.rendering_panel, self.coloring_panel
+        self.orbit_tab = QWidget(self)
+        orbit_layout = QVBoxLayout(self.orbit_tab)
+        orbit_layout.setContentsMargins(18, 12, 18, 12)
+        orbit_layout.setSpacing(8)
+        z0_row = QHBoxLayout()
+        z0_label = QLabel("z₀ =")
+        z0_label.setProperty("mono", True)
+        z0_row.addWidget(z0_label)
+        z0_row.addWidget(self.z0_field, 1)
+        z0_row.addStretch(2)
+        orbit_layout.addLayout(z0_row)
+        orbit_layout.addWidget(self.orbit_panel)
+        self.connect_lines_checkbox = QCheckBox("Connect orbit points", self)
+        self.connect_lines_checkbox.setChecked(True)
+        orbit_layout.addWidget(self.connect_lines_checkbox)
+        orbit_layout.addStretch(1)
+        self.settings_dock.add_tab(self.equation_tab, "Equation", "The map f(z) and its parameters")
+        self.settings_dock.add_tab(self.rendering_tab, "Rendering", "Resolution, iterations, threads, cache")
+        self.settings_dock.add_tab(self.coloring_tab, "Coloring", "Palette, scaling, Green's function")
+        self.settings_dock.add_tab(self.orbit_tab, "Orbit", "Seed, step and run an orbit")
+        # Never shorter (while expanded) than the f(z) row plus a one-line
+        # preview: the preview then fits whatever room it gets, never cut off.
+        m = eq_layout.contentsMargins()
+        self.settings_dock.set_expanded_minimum_height(
+            self.settings_dock.header.sizeHint().height() + m.top() + m.bottom()
+            + self.equation_panel.minimum_height_with_preview() + 4)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.settings_dock)
+        # Bottom dock spans the full width under the planes AND the sidebar.
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.BottomDockWidgetArea)
+
+        # ---- top bar (replaces the old toolbar) ---------------------------------------
+        self.top_bar = TopBar(self)
+        self.top_bar_toolbar = QToolBar("Top bar", self)
+        self.top_bar_toolbar.setObjectName("TopBarToolbar")
+        self.top_bar_toolbar.setMovable(False)
+        self.top_bar_toolbar.setFloatable(False)
+        self.top_bar_toolbar.toggleViewAction().setVisible(False)
+        self.top_bar_toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        self.top_bar_toolbar.addWidget(self.top_bar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_bar_toolbar)
+        self.top_bar.map_chip.clicked.connect(lambda: self.sidebar.reveal(self.library_panel))
+        self.top_bar.reset_button.clicked.connect(self._reset_view)
+        self.top_bar.export_button.clicked.connect(self._on_export_image)
+        self.top_bar.workspace_switch.selected.connect(self.show_workspace)
+        self._render_stage: dict[Pane, str | None] = {pane: None for pane in self.panes}
 
         # Coupled view / Critical Points / Trace Orbits / Connect Orbit
         # Points used to be toolbar checkboxes here too (Stage 1-3 kept them
@@ -2759,9 +3475,8 @@ class SandboxWindow(QMainWindow):
         self.export_facts_action.triggered.connect(self._on_export_facts)
         self.file_menu.addSeparator()
 
-        # Settings (Stage 5): opens self.settings_dialog (built by
-        # _build_settings_dialog, called just above) rather than a tab --
-        # see that method's own docstring. PreferencesRole is what makes
+        # Settings: shows the dock's Rendering tab (_on_open_settings).
+        # PreferencesRole is what makes
         # Qt relocate this out of File and into the app menu on macOS
         # (Cmd+,) regardless of where it's added in code; File is just
         # where it lives on platforms that don't do that relocation.
@@ -2820,6 +3535,11 @@ class SandboxWindow(QMainWindow):
         self.coupled_view_action.setCheckable(True)
         self.coupled_view_action.setChecked(True)
         self.coupled_view_action.toggled.connect(lambda _checked: self._relayout_panes())
+        # The top bar's Coupled | Single control and this menu item are one
+        # setting: each drives the other.
+        self.coupled_view_action.toggled.connect(self.top_bar.view_switch.set_current)
+        self.top_bar.view_switch.selected.connect(
+            lambda coupled: self.coupled_view_action.setChecked(bool(coupled)))
         self.view_menu.addSeparator()
 
         # ---- overlay-layer actions: built FROM the registry (Stage 1), not
@@ -2838,6 +3558,9 @@ class SandboxWindow(QMainWindow):
         self.orbit_connect_lines_action.setChecked(True)
         self.orbit_connect_lines_action.toggled.connect(self.image_view.set_orbit_connect_lines)
         self.orbit_connect_lines_action.toggled.connect(self.image_view2.set_orbit_connect_lines)
+        # The Orbit tab's checkbox and this menu item are one setting.
+        self.orbit_connect_lines_action.toggled.connect(self.connect_lines_checkbox.setChecked)
+        self.connect_lines_checkbox.toggled.connect(self.orbit_connect_lines_action.setChecked)
         self.view_menu.addSeparator()
 
         # Legend (Stage 3) -- menu-only, like Fixed Points/Attracting Cycles/
@@ -2854,6 +3577,18 @@ class SandboxWindow(QMainWindow):
 
         # Ctrl+1..Ctrl+9 jump to the tabs in order -- rebuilt whenever a tab
         # is added (add_panel), so module tabs get numbers too.
+        # Docks: toggleViewAction() reopens a closed dock; Reset Layout puts
+        # every dock back where a fresh install has it.
+        self.sidebar_action = self.sidebar.toggleViewAction()
+        self.sidebar_action.setText("Sidebar")
+        self.view_menu.addAction(self.sidebar_action)
+        self.settings_dock_action = self.settings_dock.toggleViewAction()
+        self.settings_dock_action.setText("Equations && Settings")
+        self.view_menu.addAction(self.settings_dock_action)
+        self.reset_layout_action = self.view_menu.addAction("Reset Layout")
+        self.reset_layout_action.triggered.connect(self.reset_layout)
+        self.view_menu.addSeparator()
+
         self.go_to_tab_menu = self.view_menu.addMenu("Go to Tab")
         self.tab_actions: list[QAction] = []
         self._rebuild_tab_actions()
@@ -2878,7 +3613,7 @@ class SandboxWindow(QMainWindow):
         # everywhere -- see the registry's app.info entry.
         self.info_action = self.help_menu.addAction("Controls && Shortcuts")
         self.info_action.setShortcuts(controls.key_sequences("app.info"))
-        self.info_action.triggered.connect(lambda: self.tabs.setCurrentWidget(self.info_panel))
+        self.info_action.triggered.connect(lambda: self.sidebar.reveal(self.info_panel))
 
         self.statusBar().showMessage("")
         # Transient controls hint for the pane under the cursor: its OWN
@@ -2891,95 +3626,103 @@ class SandboxWindow(QMainWindow):
         self._pane_hint_timer.setSingleShot(True)
         self._pane_hint_timer.setInterval(PANE_HINT_MS)
         self._pane_hint_timer.timeout.connect(self.pane_hint_label.clear)
+        self._status_flash = ""
+        self._status_flash_timer = QTimer(self)
+        self._status_flash_timer.setSingleShot(True)
+        self._status_flash_timer.timeout.connect(self._clear_status_flash)
 
+        self._build_overlay_chips()
         self._update_pane_focus_styling()
+        self._sync_mode_controls()
         self._sync_orbit_panel()
 
-    def _build_settings_dialog(self) -> None:
-        """Settings (Stage 5) lives in a NON-MODAL dialog opened from a
-        menu action, not a tab -- unlike View/Terms/Facts/Library,
-        adjusting render/cache settings is an occasional, deliberate
-        action, not something worth a permanently-visible tab slot; a
-        dialog you can leave open WHILE looking at the re-rendered image
-        (Apply -> see the result -> adjust, without closing anything) is
-        also a more natural fit for that workflow than switching tabs back
-        and forth would be. Built ONCE here (not per-open) and stored on
-        self.settings_dialog -- the same GC-safety reason help_menu/
-        about_action are stored on self (see that comment): a local-only
-        QDialog would be eligible for Python to collect the moment
-        _build_ui returns, and re-showing it via .show() after that garbage
-        collection would just no-op invisibly instead of raising an
-        obvious error. _on_open_settings re-shows this SAME instance on
-        every trigger, never constructing a second one -- multiple Settings
-        windows stacking up would be its own bug, not a feature.
-
-        SettingsPanel itself is UNCHANGED (Apply -> Session.apply_settings/
-        per-pane resolution/save_settings/immediate re-render, all still
-        exactly _on_settings_applied's own job) -- it doesn't know or care
-        whether its parent is a QTabWidget page or a QDialog.
-        """
-        self.settings_dialog = QDialog(self)
-        self.settings_dialog.setWindowTitle("Settings")
-        dialog_layout = QVBoxLayout(self.settings_dialog)
-        self.settings_panel = SettingsPanel(self.session, self._on_settings_applied,
-                                            self.settings_dialog)
-        dialog_layout.addWidget(self.settings_panel)
-
     def _on_open_settings(self) -> None:
-        self.settings_dialog.show()
-        self.settings_dialog.raise_()
-        self.settings_dialog.activateWindow()
+        """File > Settings... / Cmd+, / Ctrl+,: the Rendering tab of the dock
+        (there is no Settings dialog any more)."""
+        self.settings_dock.reveal(self.rendering_tab)
 
     def _build_view_menu_layer_actions(self) -> None:
-        """One checkable QAction per OVERLAY_LAYERS entry (plus, for a layer
-        with a trace, one more gated sub-action) -- called once from
-        _build_ui. Adding a layer to the registry is enough to give it a
-        View-menu toggle; nothing here needs touching.
+        """One checkable QAction per overlay switch (overlay_toggles(): every
+        OVERLAY_LAYERS entry and its gated trace, plus the seeded orbit, the
+        parameter marker and its crosshair) -- called once from _build_ui.
+        The overlay chips under each plane are built from the SAME list
+        (_build_overlay_chips) and mirror these actions, so the menu and the
+        chips can never disagree.
 
-        Each action is wired DIRECTLY to both ImageViews'
-        set_layer_enabled/set_trace_enabled (GLOBAL, not per-pane -- same
-        "one visual preference, not several checkboxes" reasoning the old
-        toolbar's own comment gave before Stage 4 removed it) -- the View
-        menu is the SOLE control for every layer, with no toolbar mirror to
-        keep in sync any more.
+        Each action drives BOTH ImageViews (one visual preference, not one
+        per pane). A trace's action is enabled only while its layer is on.
         """
-        for layer in OVERLAY_LAYERS:
-            action = self.view_menu.addAction(layer.label)
+        self.overlay_actions: dict[str, QAction] = {}
+        previous_gate = None
+        for toggle in overlay_toggles():
+            if toggle.parent is None and self.overlay_actions and toggle.gate != previous_gate:
+                self.view_menu.addSeparator()
+            previous_gate = toggle.gate
+            action = self.view_menu.addAction(toggle.menu_label)
             action.setCheckable(True)
-            action.toggled.connect(
-                lambda checked, key=layer.key: self.image_view.set_layer_enabled(key, checked))
-            action.toggled.connect(
-                lambda checked, key=layer.key: self.image_view2.set_layer_enabled(key, checked))
-            setattr(self, f"{layer.key}_action", action)
+            action.setChecked(toggle.default)
+            action.setToolTip(toggle.tooltip)
+            for view in (self.image_view, self.image_view2):
+                view.set_overlay(toggle.key, toggle.default)
+                action.toggled.connect(lambda checked, v=view, k=toggle.key: v.set_overlay(k, checked))
+            if toggle.parent is not None:
+                parent_action = self.overlay_actions[toggle.parent]
+                action.setEnabled(parent_action.isChecked())
+                parent_action.toggled.connect(action.setEnabled)
+            self.overlay_actions[toggle.key] = action
+            setattr(self, f"{toggle.key}_action", action)
+        self.view_menu.addSeparator()
 
-            if layer.trace is not None:
-                trace = layer.trace
-                trace_action = self.view_menu.addAction(trace.label)
-                trace_action.setCheckable(True)
-                trace_action.setEnabled(action.isChecked())
-                action.toggled.connect(trace_action.setEnabled)
-                trace_action.toggled.connect(
-                    lambda checked, key=trace.key: self.image_view.set_trace_enabled(key, checked))
-                trace_action.toggled.connect(
-                    lambda checked, key=trace.key: self.image_view2.set_trace_enabled(key, checked))
-                setattr(self, f"{trace.key}_action", trace_action)
+    def _build_overlay_chips(self) -> None:
+        """The chip row under each plane, one chip per overlay switch whose
+        gate matches the plane; traces are small secondary chips."""
+        for frame in self._plane_frames.values():
+            for toggle in overlay_toggles():
+                frame.add_chip(toggle.key, self.overlay_actions[toggle.key], toggle.chip_label,
+                               toggle.gate, toggle.swatch, toggle.tooltip,
+                               secondary=toggle.parent is not None)
 
-            self.view_menu.addSeparator()
+    def _equalize_chip_rows(self) -> None:
+        """Side by side, both planes' chip rows take the taller one's height,
+        so the two images stay the same size and line up."""
+        frames = [f for f in self._plane_frames.values() if f.isVisible()]
+        height = max((f.chip_rows_height() for f in frames), default=0)
+        for f in self._plane_frames.values():
+            if f.chip_row.minimumHeight() != height:
+                f.chip_row.setMinimumHeight(height)
 
-    def _build_pane_column(self, mode_combo: QComboBox, image_view: "ImageView") -> QWidget:
-        """One pane's own little control strip (mode combo) stacked above
-        its ImageView -- what actually goes side by side in the splitter.
-        """
-        column = QWidget(self)
-        layout = QVBoxLayout(column)
-        layout.setContentsMargins(0, 0, 0, 0)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Mode:", self))
-        row.addWidget(mode_combo)
-        row.addStretch(1)
-        layout.addLayout(row)
-        layout.addWidget(image_view, 1)
-        return column
+    def _sync_mode_controls(self) -> None:
+        """Each plane's header: title/accent from its current mode's plane,
+        and the modes its segmented control offers -- in Coupled view only
+        that plane's own family (parameter or dynamical); in Single view every
+        mode, grouped "Parameter ▸ ... | Dynamical ▸ ...". Ids stay data; the
+        buttons show MODE_LABELS."""
+        if not hasattr(self, "coupled_view_action"):
+            return
+        coupled = self.coupled_view_action.isChecked()
+        explore = not hasattr(self, "workspaces") or self.current_workspace() == "explore"
+        for pane, frame in self._plane_frames.items():
+            plane = "parameter" if pane.render_mode in PARAMETER_PLANE_MODES else "dynamical"
+            frame.set_plane(plane)
+            frame.set_chips_visible(explore)
+            if coupled:
+                family = PARAMETER_MODE_ORDER if plane == "parameter" else DYNAMICAL_MODE_ORDER
+                groups, titles = [[_mode_segment(m) for m in family]], None
+            else:
+                groups = [[_mode_segment(m) for m in PARAMETER_MODE_ORDER],
+                          [_mode_segment(m) for m in DYNAMICAL_MODE_ORDER]]
+                titles = ["Parameter ▸", "Dynamical ▸"]
+            key = (coupled, plane)
+            if getattr(frame, "_mode_key", None) != key:
+                frame._mode_key = key
+                frame.mode_control.set_segments(groups, titles)
+            frame.mode_control.set_current(pane.render_mode)
+            frame.set_focused(pane is self._focused_pane)
+            settings = self.session.settings
+            frame.set_strategy_text(*strategy_header_text(
+                pane.render_mode, settings.parameter_strategy,
+                settings.parameter_critical_index))
+        self._equalize_chip_rows()
 
     def _show_about_dialog(self) -> None:
         AboutDialog(self).exec()
@@ -2991,7 +3734,7 @@ class SandboxWindow(QMainWindow):
             return
         self._focused_pane = pane
         self.metadata_header.pane = pane
-        self.metadata_header.refresh()
+        self._refresh_header()
         self._update_status_bar()
         self._update_pane_focus_styling()
         if not self.coupled_view_action.isChecked():
@@ -3001,9 +3744,8 @@ class SandboxWindow(QMainWindow):
         # Purely visual -- which column has a highlighted border -- so the
         # user can actually SEE which pane Reset View/typed-field actions
         # (still self.pane-directed until Stage 3) are about to act on.
-        for pane, column in self._pane_columns.items():
-            column.setStyleSheet(
-                "border: 2px solid palette(highlight);" if pane is self._focused_pane else "")
+        for pane, frame in self._plane_frames.items():
+            frame.set_focused(pane is self._focused_pane)
 
     def _relayout_panes(self) -> None:
         # Coupled: both panes visible, side by side. Single: only the
@@ -3013,6 +3755,8 @@ class SandboxWindow(QMainWindow):
         coupled = self.coupled_view_action.isChecked()
         for pane, column in self._pane_columns.items():
             column.setVisible(coupled or pane is self._focused_pane)
+        self._sync_mode_controls()
+        self._refresh_render_status()
 
     # ---- orbit strip: follows whichever pane is currently dynamical -------------
     def _current_dynamical_pane(self) -> Pane | None:
@@ -3068,11 +3812,12 @@ class SandboxWindow(QMainWindow):
             state = orbit_pane.image_view.orbit_tracker.state
             if state is not None:
                 orbit = (self.panes.index(orbit_pane), state.z0, state.n)
-        # Clean thumbnail (Stage C), same as a library entry's own -- see
-        # render_thumbnail's own docstring for why it's always the
-        # dynamical plane, never parameter.
-        preview_image = render_thumbnail(self.session.map, self.session.param,
-                                         self.session.settings, self.session.render_settings)
+        # Clean thumbnail (Stage C): an experiment is one specific a, so its
+        # thumbnail stays the DYNAMICAL plane -- see
+        # render_experiment_thumbnail (a family's is its parameter plane).
+        preview_image = render_experiment_thumbnail(self.session.map, self.session.param,
+                                                    self.session.settings,
+                                                    self.session.render_settings)
         preview = qimage_to_base64_png(preview_image)
         try:
             self.session.save_snapshot(path, panes, focused_index, coupled, orbit, preview)
@@ -3095,7 +3840,7 @@ class SandboxWindow(QMainWindow):
         # explicitly for THIS window to apply to its own panes/layout/
         # tracker. `preview` (Stage C) is intentionally unused here -- this
         # app has no experiment BROWSER yet for it to appear in (see
-        # render_thumbnail's own module-level note); it round-trips through
+        # render_experiment_thumbnail); it round-trips through
         # save/load correctly (see app/test_sandbox.py) and is available
         # for a future browser to display without another format change.
         try:
@@ -3117,7 +3862,7 @@ class SandboxWindow(QMainWindow):
             pane.viewport = viewport
             pane.set_render_mode(mode)   # already validated by load_snapshot; re-validated here
                                          # for free, not re-checked for its own sake
-            self._mode_combos[pane].setCurrentText(pane.render_mode)
+        self._sync_mode_controls()
 
         self.coupled_view_action.setChecked(coupled)
         self._set_focused_pane(self.panes[min(focused_index, len(self.panes) - 1)])
@@ -3145,7 +3890,7 @@ class SandboxWindow(QMainWindow):
         # same treatment, not a partial refresh.
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.metadata_header.refresh()
+        self._refresh_header()
         for pane in self.panes:
             pane.image_view.refresh_layers()
             if pane is self._focused_pane:
@@ -3243,9 +3988,45 @@ class SandboxWindow(QMainWindow):
         # parameter-plane pane's own plane/viewport alone, exactly the
         # field-commit behavior Stage 1/2 already had, just no longer
         # limited to the single (then-only) pane.
+        self._record_param_history()
         self._apply_param_change(a)
 
+    # ---- undo history of a: Cmd/Ctrl+Z in a plane --------------------------------
+    def _record_param_history(self, coalesce: bool = False) -> None:
+        """Remembers the CURRENT a before a user change. `coalesce`: a nudge
+        within NUDGE_HISTORY_COALESCE_S of the last one joins its step."""
+        now = time.monotonic()
+        if coalesce and self._last_nudge_time is not None and \
+                now - self._last_nudge_time < NUDGE_HISTORY_COALESCE_S:
+            self._last_nudge_time = now
+            return
+        self._param_undo.append(self.session.param)
+        del self._param_undo[:-PARAM_HISTORY_LIMIT]
+        self._param_redo.clear()
+        self._last_nudge_time = now if coalesce else None
+
+    def undo_param(self) -> bool:
+        """Back to the previous a; False if there is none."""
+        if not self._param_undo:
+            return False
+        self._param_redo.append(self.session.param)
+        self._last_nudge_time = None
+        self._apply_param_change(self._param_undo.pop())
+        return True
+
+    def redo_param(self) -> bool:
+        if not self._param_redo:
+            return False
+        self._param_undo.append(self.session.param)
+        self._last_nudge_time = None
+        self._apply_param_change(self._param_redo.pop())
+        return True
+
     def _on_param_changed_by_click(self, a: complex) -> None:
+        self._record_param_history()
+        self._on_param_changed_by_click_inner(a)
+
+    def _on_param_changed_by_click_inner(self, a: complex) -> None:
         # mousePressEvent already emitted pane_activated before this can
         # ever fire (see _build_ui's own comment), so self._focused_pane
         # is the CLICKED pane.
@@ -3259,7 +4040,7 @@ class SandboxWindow(QMainWindow):
             self.session.param = a
             self.param_field.set_value(a)
             self.facts_panel.refresh()
-            self.metadata_header.refresh()
+            self._refresh_header()
             if clicked_pane.render_mode in PARAMETER_PLANE_MODES:
                 # Triggers _on_mode_changed, which itself renders -- so
                 # this does NOT also call _start_render below; doing both
@@ -3321,7 +4102,7 @@ class SandboxWindow(QMainWindow):
         self.session.param = a
         self.param_field.set_value(a)
         self.facts_panel.refresh()
-        self.metadata_header.refresh()
+        self._refresh_header()
         for pane in self.panes:
             if pane.render_mode in PARAMETER_PLANE_MODES:
                 pane.image_view.update()   # move its marker; nothing else about it changed
@@ -3348,6 +4129,7 @@ class SandboxWindow(QMainWindow):
         any pane's plane/mode either, coupled or single-view: nudging the
         marker is not a request to stop looking at the parameter plane.
         """
+        self._record_param_history(coalesce=True)
         self._apply_param_change(a, reset_dynamical_viewport=False)
 
     # ---- orbit seed z0: field commit mirrors a dynamical-plane click exactly ----
@@ -3381,8 +4163,9 @@ class SandboxWindow(QMainWindow):
     # ---- mode: immediate re-render, same deliberate-action treatment as Apply ---
     def _on_mode_changed(self, pane: Pane, mode: str) -> None:
         pane.set_render_mode(mode)
+        self._sync_mode_controls()
         if pane is self._focused_pane:
-            self.metadata_header.refresh()   # domain/mode text depends on the mode itself
+            self._refresh_header()   # domain/mode text depends on the mode itself
             self._update_status_bar()
         self._sync_orbit_panel()   # this pane may have just become (or stopped being) dynamical
         self._debounce_timers[pane].stop()
@@ -3410,6 +4193,17 @@ class SandboxWindow(QMainWindow):
             pane.viewport = cdx.Viewport(vp.center, vp.scale, new_settings.resolution)
         save_settings(new_settings)
         self._update_status_bar()
+        self._sync_mode_controls()   # the header shows a non-default strategy
+        for pane in self.panes:
+            pane.image_view.update()   # labelling cuts on/off
+        # A new palette or strategy is a new thumbnail key: out-of-date
+        # thumbnails re-render in the background.
+        self.library_panel.refresh_previews()
+        # Coalesced: Rendering and Coloring applying in the same pause
+        # produce ONE re-render per pane, not one each.
+        self._settings_render_timer.start()
+
+    def _render_after_settings(self) -> None:
         for pane in self.panes:
             self._debounce_timers[pane].stop()
             self._start_render(pane)
@@ -3432,7 +4226,7 @@ class SandboxWindow(QMainWindow):
         # _apply_param_change's own cache-asymmetry docstring) -- so this
         # debounces BOTH panes, not just the focused one.
         self._update_status_bar()
-        self.metadata_header.refresh()   # name/formula depend directly on the edited map
+        self._refresh_header()   # name/formula depend directly on the edited map
         # Cheap: refresh() only recomputes when (map, param) actually
         # changed since its last call, so this stays fresh for whenever the
         # user next looks at the Facts tab without paying for a recompute
@@ -3447,40 +4241,124 @@ class SandboxWindow(QMainWindow):
             # docstring.
             pane.image_view.refresh_orbit_staleness()
 
-    # ---- facts tab: recompute lazily, and re-check on becoming visible ----------
-    def _on_tab_changed(self, index: int) -> None:
-        if self.tabs.widget(index) is self.facts_panel:
+    # ---- facts: recompute lazily, and re-check on becoming visible -----------------
+    def _on_sidebar_tab_changed(self, index: int) -> None:
+        if self.sidebar.widget(index) is self.facts_panel:
             self.facts_panel.refresh()
+        self._refresh_this_map()
+
+    def _placeholder_tab(self, text: str) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        label = QLabel(text, page)
+        label.setProperty("role", "empty")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        return page
+
+    # ---- workspaces -------------------------------------------------------------------
+    def show_workspace(self, key: str) -> None:
+        widget = self._workspace_keys.get(key)
+        if widget is None:
+            return
+        self.workspaces.setCurrentWidget(widget)
+        self.top_bar.workspace_switch.set_current(key)
+        self._on_workspace_changed(key)
+
+    def workspace_widget(self, key: str) -> QWidget | None:
+        """The widget a workspace shows (a module's own panel, not its scroll area)."""
+        page = self._workspace_keys.get(key)
+        return page.widget() if isinstance(page, QScrollArea) else page
+
+    def current_workspace(self) -> str:
+        current = self.workspaces.currentWidget()
+        return next(k for k, w in self._workspace_keys.items() if w is current)
+
+    def _on_workspace_changed(self, key: str) -> None:
+        """Explore-only controls hide while another workspace shows: Coupled |
+        Single, the overlay chips, and the plane-specific dock tabs (the
+        Equation tab stays: a module may use the map)."""
+        explore = key == "explore"
+        self.top_bar.view_switch.setVisible(explore)
+        plane_tabs = (self.rendering_tab, self.coloring_tab, self.orbit_tab)
+        if not explore and self.settings_dock.current_widget() in plane_tabs:
+            self.settings_dock.set_current_widget(self.equation_tab)
+        for widget in plane_tabs:
+            self.settings_dock.set_tab_visible(self.settings_dock.index_of(widget), explore)
+        self._sync_mode_controls()
 
     # ---- extra panels (research modules) ----------------------------------------
-    def add_panel(self, widget: QWidget, title: str) -> int:
-        """Adds `widget` as a tab after the built-in ones (before Info, which
-        stays last) and returns its index.
+    def add_panel(self, widget: QWidget, title: str, placement: str | None = None) -> int:
+        """Adds a research module's panel and returns its index within the
+        place it went:
 
-        This is how a research module's UI (modules/<name>/panel.py) appears in
-        the window WITHOUT app/ importing anything from modules/: the
-        composition root (phoenix.py) builds the panel and hands it over here.
-        A plain method, deliberately not a registry (see modules/README.md).
-        If the widget has a shutdown() method it is called from closeEvent, so a
-        panel with background work of its own can cancel and drain it.
+          "workspace"  a page of the central stack, next to Explore; the
+                       top bar's Explore | ... switch appears
+          "sidebar"    a sidebar tab, after the built-in ones (the default)
+          "dock"       a tab of the Equations & Settings dock
+
+        `placement` defaults to the widget's own `placement` attribute, then
+        "sidebar". This is how a module's UI (modules/<name>/panel.py)
+        appears WITHOUT app/ importing anything from modules/: the
+        composition root (phoenix.py) builds the panel and hands it over.
+        If the widget has a shutdown() method it is called from closeEvent,
+        so a panel with background work of its own can cancel and drain it.
         """
+        placement = placement or getattr(widget, "placement", None) or "sidebar"
+        if placement not in ("workspace", "sidebar", "dock"):
+            raise ValueError(f"unknown placement {placement!r}")
         self._extra_panels.append(widget)
-        index = self.tabs.insertTab(self.tabs.indexOf(self.info_panel), widget, title)
+        if placement == "workspace":
+            key = title.lower()
+            # In a scroll area: a module's own minimum size must not squeeze
+            # the docks (a QStackedWidget is as tall as its tallest page).
+            page = QScrollArea(self)
+            page.setWidgetResizable(True)
+            page.setFrameShape(QFrame.Shape.NoFrame)
+            page.setWidget(widget)
+            self._workspace_keys[key] = page
+            self._workspace_titles[key] = title
+            index = self.workspaces.addWidget(page)
+            switch = self.top_bar.workspace_switch
+            switch.set_segments([[Segment(k, self._workspace_titles[k])
+                                  for k in self._workspace_keys]])
+            switch.set_current(self.current_workspace())
+            switch.show()
+        elif placement == "sidebar":
+            index = self.sidebar.add_tab(widget, title)
+        else:
+            index = self.settings_dock.add_tab(widget, title)
         # A panel documents its own controls by carrying a `controls`
         # sequence of app.controls.ControlEntry (see modules/approximation).
         self.info_panel.add_entries(getattr(widget, "controls", ()))
         self._rebuild_tab_actions()
         return index
 
+    def go_to_destinations(self) -> list[tuple[str, Callable[[], None]]]:
+        """What Ctrl+1..9 jump to, in order: the sidebar's tabs, then the
+        dock's tabs, then (when a module registered one) the next workspace."""
+        out: list[tuple[str, Callable[[], None]]] = []
+        for dock in (self.sidebar, self.settings_dock):
+            for i in range(dock.count()):
+                widget = dock.widget(i)
+                out.append((dock.tab_text(i), lambda d=dock, w=widget: d.reveal(w)))
+        if len(self._workspace_keys) > 1:
+            out.append(("Switch Workspace", self.cycle_workspace))
+        return out
+
+    def cycle_workspace(self) -> None:
+        keys = list(self._workspace_keys)
+        self.show_workspace(keys[(keys.index(self.current_workspace()) + 1) % len(keys)])
+
     def _rebuild_tab_actions(self) -> None:
         self.go_to_tab_menu.clear()
         self.tab_actions = []
         first, last = controls.entry("app.go_to_tab").binding.sequences   # "Ctrl+1", "Ctrl+9"
         prefix, start, stop = first[:-1], int(first[-1]), int(last[-1])
-        for index in range(min(self.tabs.count(), stop - start + 1)):
-            action = self.go_to_tab_menu.addAction(self.tabs.tabText(index))
+        for index, (title, go) in enumerate(self.go_to_destinations()[:stop - start + 1]):
+            action = self.go_to_tab_menu.addAction(title)
             action.setShortcut(QKeySequence(f"{prefix}{start + index}"))
-            action.triggered.connect(lambda _checked=False, i=index: self.tabs.setCurrentIndex(i))
+            action.triggered.connect(lambda _checked=False, g=go: g())
             self.tab_actions.append(action)
 
     # ---- Edit > Undo/Redo ---------------------------------------------------------
@@ -3492,6 +4370,8 @@ class SandboxWindow(QMainWindow):
         target = text_undo_target(widget)
         if target is not None:
             target.redo() if redo else target.undo()
+        elif isinstance(widget, ImageView) and (self.redo_param() if redo else self.undo_param()):
+            pass   # in a plane: the last change to a (when there is one)
         elif redo:
             self.equation_panel.redo()
         else:
@@ -3502,7 +4382,7 @@ class SandboxWindow(QMainWindow):
         pane = self._focused_pane
         vp = pane.viewport
         pane.viewport = cdx.Viewport(point, vp.scale, vp.resolution)
-        self.tabs.setCurrentWidget(self.view_container)
+        self.show_workspace("explore")
         self._update_status_bar()
         self._debounce_timers[pane].stop()
         self._start_render(pane)
@@ -3524,7 +4404,7 @@ class SandboxWindow(QMainWindow):
         if dynamical_pane is None:
             return   # no pane is dynamical (both parameter-plane) -- orbit seeding is a no-op
         dynamical_pane.image_view.seed_orbit(point)
-        self.tabs.setCurrentWidget(self.view_container)
+        self.show_workspace("explore")
 
     # ---- library tab: loading a family replaces session.map wholesale -----------
     def _on_family_loaded(self) -> None:
@@ -3544,9 +4424,14 @@ class SandboxWindow(QMainWindow):
         # UNCONDITIONALLY affects every pane regardless of mode (see
         # _apply_param_change's own cache-asymmetry docstring for the
         # contrast with a plain param change).
+        self._apply_family_strategy(self.session.map.name)
         self.equation_panel.refresh_from_session()
         self.facts_panel.refresh()
-        self.metadata_header.refresh()   # name/formula/param all just changed wholesale
+        self._refresh_header()   # name/formula/param all just changed wholesale
+        self.flash_status(f"Loaded {self.session.map.name}")
+        # Back to the planes: loading is done from the sidebar, exploring isn't.
+        self.show_workspace("explore")
+        self._focused_pane.image_view.setFocus(Qt.FocusReason.OtherFocusReason)
         for pane in self.panes:
             center, scale = default_view_for_mode(self.session.map, self.session.param,
                                                   pane.render_mode)
@@ -3558,12 +4443,61 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             self._start_render(pane)
 
+    def _apply_family_strategy(self, name: str) -> None:
+        """A family loads with the parameter strategy it was SAVED with, else
+        the default -- a non-default strategy chosen for one family does not
+        silently carry over to the next."""
+        strategy, index = stored_parameter_strategy(name) or (DEFAULT_PARAMETER_STRATEGY, 0)
+        current = self.session.settings
+        if (current.parameter_strategy, current.parameter_critical_index) == (strategy, index):
+            return
+        new_settings = dataclasses.replace(current, parameter_strategy=strategy,
+                                           parameter_critical_index=index)
+        self.session.apply_settings(new_settings)
+        save_settings(new_settings)
+        for panel in (self.rendering_panel, self.coloring_panel):
+            panel.refresh_from_session()
+        self._sync_mode_controls()
+
     # ---- library tab: any successful save/rename/delete/notes edit persists -----
     def _on_library_changed(self) -> None:
         self.session.save_user_library(library_path())
-        _regenerate_library_previews(self.session.library, self.session.settings,
-                                     self.session.render_settings)
+        _remove_stale_family_sidecars(self.session.library)
+        # Re-asks every row: anything missing or out of date (a family saved
+        # over with a new formula, a new framing) renders in the background.
         self.library_panel.refresh_previews()
+        # A save renames the current map into a family: the chip's
+        # "custom" becomes that name.
+        self._refresh_map_chip()
+
+    def current_parameter_view(self) -> tuple[complex, float] | None:
+        """The parameter plane's framing as the user sees it now: the focused
+        pane if it shows a parameter plane, else the first pane that does
+        (None when neither does)."""
+        candidates = [self._focused_pane] + [p for p in self.panes if p is not self._focused_pane]
+        for pane in candidates:
+            if pane.render_mode in PARAMETER_PLANE_MODES:
+                return pane.viewport.center, pane.viewport.scale
+        return None
+
+    def _on_family_saved_as(self, name: str) -> None:
+        # "Save current as..." stores the parameter pane's viewport with the
+        # family, so loading it later frames the same region.
+        view = self.current_parameter_view()
+        if view is not None:
+            save_parameter_view(name, *view)
+        # The strategy is saved with the family only when it isn't the
+        # default; loading the family then restores it (_apply_family_strategy).
+        settings = self.session.settings
+        save_parameter_strategy(name, settings.parameter_strategy,
+                                settings.parameter_critical_index)
+
+    def _on_family_renamed(self, old_name: str, new_name: str) -> None:
+        rename_family_meta(old_name, new_name)
+
+    def _on_family_thumbnail_ready(self, name: str) -> None:
+        if shiboken6.isValid(self.library_panel):
+            self.library_panel.refresh_preview(name)
 
     # ---- viewport change -> debounced render ------------------------------------
     def _on_viewport_changed(self, pane: Pane) -> None:
@@ -3591,9 +4525,9 @@ class SandboxWindow(QMainWindow):
         #
         # Resets to this map's own MODE-appropriate default framing
         # (default_view_for_mode) -- the FOCUSED pane's own render_mode
-        # decides which table applies: default_view_for's a-space table
-        # (DEFAULT_PARAMETER_VIEW_CENTER/SCALE is exactly
-        # default_view_for("mandelbrot")) for a parameter-plane pane,
+        # decides which applies: the family's stored a-space framing
+        # (default_view_for -> app.family_views, falling back to
+        # DEFAULT_PARAMETER_VIEW_CENTER/SCALE) for a parameter-plane pane,
         # default_dynamical_view's critical-/fixed-point-derived z-space
         # framing for a dynamical one (_apply_param_change routes through
         # the identical dispatcher for exactly that purpose). Earlier this
@@ -3685,6 +4619,7 @@ class SandboxWindow(QMainWindow):
         task.signals.failed.connect(self._on_render_failed)
         pane.pending_tasks[request_id] = task
         self._thread_pool.start(_Runnable(task))
+        self._set_render_stage(pane, "preview")
 
     def _on_partial_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
         pane = self._pane_for_render_id(request_id)
@@ -3695,6 +4630,7 @@ class SandboxWindow(QMainWindow):
         if not shiboken6.isValid(pane.image_view):
             return   # this pane's widget is already torn down (e.g. window closing)
         pane.image_view.set_image(payload, buffer_viewport)
+        self._set_render_stage(pane, "full")
         self._update_status_bar()
 
     def _on_full_ready(self, request_id: int, payload, buffer_viewport: cdx.Viewport) -> None:
@@ -3714,6 +4650,7 @@ class SandboxWindow(QMainWindow):
         if not shiboken6.isValid(pane.image_view):
             return
         pane.image_view.set_image(payload, buffer_viewport)
+        self._set_render_stage(pane, None)
         self._update_status_bar()
 
     def _on_render_failed(self, request_id: int, message: str) -> None:
@@ -3727,7 +4664,176 @@ class SandboxWindow(QMainWindow):
             return
         if not shiboken6.isValid(self):
             return   # the window itself is already torn down
+        self._set_render_stage(pane, None)
         self.statusBar().showMessage(f"render failed: {message}")
+
+    # ---- top bar: map chip and render status ----------------------------------------
+    def _refresh_header(self) -> None:
+        self.metadata_header.refresh()
+        self._refresh_map_chip()
+        self._this_map_dirty = True
+        self._refresh_this_map()
+
+    def _refresh_this_map(self) -> None:
+        """Info's "This map" section -- computed only while Info is showing
+        (it needs the dynamical facts), otherwise on the next reveal."""
+        if not getattr(self, "_this_map_dirty", True) or not hasattr(self, "sidebar"):
+            return
+        if self.sidebar.current_widget() is not self.info_panel or self.sidebar.is_collapsed():
+            return
+        self._this_map_dirty = False
+        self.info_panel.set_map_formula(self.session.map.to_formula())
+        self.info_panel.set_this_map(self.this_map_rows())
+
+    def this_map_rows(self) -> list[tuple[str, str]]:
+        m, a = self.session.map, self.session.param
+        facts = self.session.dynamical_facts()
+        rows = [("Map", f"{self.map_display_name()}: {m.to_formula() or '(empty map)'}"),
+                ("Degree", str(facts.degree)),
+                ("Critical points", ", ".join(format_short(c, 4) for c in m.distinct_critical_points(a))
+                 or "none")]
+        rs = self.session.render_settings
+        for c, fate in critical_orbit_fates(m, a, facts, rs.max_iter, max(rs.tol, 1e-6)):
+            rows.append((f"Orbit of {format_short(c, 4)}", fate))
+        rows.append(("a", format_readout_complex(a)))
+        return rows
+
+    def flash_status(self, text: str, ms: int = STATUS_FLASH_MS) -> None:
+        """A transient status-bar message ("Loaded newton3") shown ahead of
+        the scale/cursor readout, which it never replaces."""
+        self._status_flash = text
+        self._status_flash_timer.start(ms)
+        self._render_status_bar()
+
+    def _clear_status_flash(self) -> None:
+        self._status_flash = ""
+        self._render_status_bar()
+
+    def map_display_name(self) -> str:
+        """The family name while the map is still exactly a library entry,
+        "custom" once its formula has been edited away from it."""
+        m = self.session.map
+        entry = self.session.library.find(m.name) if m.name else None
+        if entry is not None and entry.to_formula() == m.to_formula():
+            return m.name
+        return "custom"
+
+    def _refresh_map_chip(self) -> None:
+        if not hasattr(self, "top_bar"):
+            return
+        chip = self.top_bar.map_chip
+        display = self.map_display_name()
+        chip.set_map(display, self.session.map.to_formula())
+        loaded = None if display == "custom" else display
+        if loaded != self.library_panel.loaded_name():
+            self.library_panel.set_loaded(loaded)   # the dot (and selection) follow the map
+        chip.setToolTip(f"{self.session.map.name}: {self.session.map.to_formula()}\n"
+                        f"a: {describe_parameter_role(self.session.map)}\n"
+                        "Click to open the Library")
+
+    def _set_render_stage(self, pane: Pane, stage: str | None) -> None:
+        if not hasattr(self, "_render_stage"):
+            return
+        self._render_stage[pane] = stage
+        self._refresh_render_status()
+
+    def render_status(self) -> tuple[str, bool]:
+        """(text, busy) for the top bar: which plane(s) are rendering and at
+        which stage (preview -> full). There are no percentages to show: cdx's
+        render calls report no fractional progress."""
+        busy = [(p, st) for p, st in self._render_stage.items()
+                if st is not None and (self.coupled_view_action.isChecked() or p is self._focused_pane)]
+        if not busy:
+            return "Ready", False
+        names = {("parameter plane" if p.render_mode in PARAMETER_PLANE_MODES else "dynamical plane")
+                 for p, _ in busy}
+        what = names.pop() if len(names) == 1 else "both planes"
+        stage = "preview" if any(st == "preview" for _, st in busy) else "full"
+        return f"Rendering {what} · {stage}", True
+
+    def _refresh_render_status(self) -> None:
+        if hasattr(self, "top_bar"):
+            self.top_bar.set_render_status(*self.render_status())
+
+    # ---- window layout: docks, collapse, save/restore ---------------------------------
+    def _apply_default_layout(self) -> None:
+        self.sidebar.show()
+        self.settings_dock.show()
+        self.sidebar.set_collapsed(False)
+        self.settings_dock.set_collapsed(False)
+        self._apply_default_dock_sizes()
+        # Dock sizes only stick once the window has been laid out; a window
+        # not shown yet gets them again from its first showEvent.
+        self._default_sizes_pending = not self.isVisible()
+
+    def _apply_default_dock_sizes(self) -> None:
+        self.resizeDocks([self.sidebar], [SIDEBAR_DEFAULT_WIDTH], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.settings_dock], [SETTINGS_DOCK_DEFAULT_HEIGHT], Qt.Orientation.Vertical)
+        half = max(1, self.view_splitter.width() // 2)
+        self.view_splitter.setSizes([half, half])
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if getattr(self, "_default_sizes_pending", False):
+            self._default_sizes_pending = False
+            self._apply_default_dock_sizes()
+
+    def reset_layout(self) -> None:
+        """View > Reset Layout: docks back in place, open, expanded, default sizes."""
+        self.restoreState(self._default_layout_state, LAYOUT_STATE_VERSION)
+        self._sidebar_auto_collapsed = False
+        self._was_narrow = False
+        self._apply_default_layout()
+        self._auto_collapse_sidebar()
+
+    def save_layout(self, settings: QSettings) -> None:
+        settings.setValue("window/geometry", self.saveGeometry())
+        settings.setValue("window/state", self.saveState(LAYOUT_STATE_VERSION))
+        settings.setValue("sidebar/collapsed", self.sidebar.is_collapsed()
+                          and not self._sidebar_auto_collapsed)
+        settings.setValue("sidebar/tab", self.sidebar.tab_text(self.sidebar.current_index()))
+        settings.setValue("dock/collapsed", self.settings_dock.is_collapsed())
+        settings.setValue("dock/tab", self.settings_dock.tab_text(self.settings_dock.current_index()))
+        settings.setValue("splitter", self.view_splitter.saveState())
+        settings.sync()
+
+    def restore_layout(self, settings: QSettings) -> None:
+        geometry = settings.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = settings.value("window/state")
+        if state is not None and self.restoreState(state, LAYOUT_STATE_VERSION):
+            self._default_sizes_pending = False   # the saved sizes win
+        splitter = settings.value("splitter")
+        if splitter is not None:
+            self.view_splitter.restoreState(splitter)
+        for dock, key in ((self.sidebar, "sidebar"), (self.settings_dock, "dock")):
+            tab = settings.value(f"{key}/tab")
+            for i in range(dock.count()):
+                if dock.tab_text(i) == tab:
+                    dock.set_current_index(i)
+            dock.set_collapsed(str(settings.value(f"{key}/collapsed", "false")).lower() == "true")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._auto_collapse_sidebar()
+
+    def _auto_collapse_sidebar(self) -> None:
+        """Narrow window: the sidebar becomes its tab strip so both planes
+        keep their room; widening again restores it (only if it was this,
+        not the user, that collapsed it)."""
+        if not hasattr(self, "sidebar"):
+            return
+        narrow = self.width() < SIDEBAR_AUTO_COLLAPSE_WIDTH
+        if narrow == self._was_narrow:
+            return   # only crossing the threshold acts; a hand-made choice in between stands
+        self._was_narrow = narrow
+        if narrow and not self.sidebar.is_collapsed():
+            self.sidebar.set_collapsed(True)
+            self._sidebar_auto_collapsed = True
+        elif not narrow and self._sidebar_auto_collapsed:
+            self._sidebar_auto_collapsed = False
+            self.sidebar.set_collapsed(False)
 
     # ---- status bar: scale + precision-floor warning ----------------------------
     def _update_status_bar(self) -> None:
@@ -3772,7 +4878,8 @@ class SandboxWindow(QMainWindow):
     def _render_status_bar(self) -> None:
         text = f"{self._status_base_message}   {self._status_cursor_text}" \
             if self._status_cursor_text else self._status_base_message
-        self.statusBar().showMessage(text)
+        flash = getattr(self, "_status_flash", "")
+        self.statusBar().showMessage(f"{flash}   ·   {text}" if flash else text)
 
     # ---- shutdown ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
@@ -3789,10 +4896,13 @@ class SandboxWindow(QMainWindow):
             self._debounce_timers[pane].stop()
             for task in pane.pending_tasks.values():
                 task.cancel.cancel()
+        self.thumbnailer.shutdown()
         for panel in self._extra_panels:
             shutdown = getattr(panel, "shutdown", None)
             if callable(shutdown):
                 shutdown()
+        if self._layout_settings is not None:
+            self.save_layout(self._layout_settings)
         super().closeEvent(event)
 
 
@@ -3801,10 +4911,11 @@ def main(extra_panels=()) -> None:
     the window and returning (widget, tab title) -- how the composition root
     (phoenix.py) attaches research-module panels; app/ itself imports none."""
     app = QApplication(sys.argv)
-    window = SandboxWindow()
+    theme.apply(app)
+    window = SandboxWindow(layout_settings=default_layout_settings())
     for factory in extra_panels:
         widget, title = factory(window)
-        window.add_panel(widget, title)
+        window.add_panel(widget, title)   # placement: the widget's own `placement`, else sidebar
     window.show()
     if os.environ.get("CDX_VERIFY_LAUNCH_SELFTEST"):
         # A packaged build "launching" only means something if a real

@@ -31,15 +31,16 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont, QImage, QPainter
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
                                QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from . import construction, scoring
+from app import theme
 from app.controls import PANELS, ControlEntry, MouseBinding
 
-_TAB = "Approximation tab"
+_TAB = "Approximation workspace"
 
 # This tab's controls, for the Info tab (SandboxWindow.add_panel reads the
 # panel's `controls` attribute). app/ never imports this module.
@@ -72,6 +73,11 @@ def rgb_image(labels, palette, zero_rgb=UNRESOLVED_RGB):
 
 # ---------------------------------------------------------------------------
 # A canvas that draws one QImage, fitted, with the plane extent it covers.
+
+EMPTY_TARGET = "Open an image to begin"
+EMPTY_BASINS = "Build a map to see its basins"
+EMPTY_CERTIFIED = "Build a map to see its certified region"
+
 
 class ImageCanvas(QWidget):
     """Draws a QImage scaled to fit (aspect kept) and maps widget points to the plane.
@@ -121,13 +127,15 @@ class ImageCanvas(QWidget):
 
     def paintEvent(self, event):   # noqa: N802 (Qt naming)
         p = QPainter(self)
-        p.fillRect(self.rect(), Qt.GlobalColor.white)
+        p.fillRect(self.rect(), theme.color("bg"))
         rect = self._target_rect()
         if rect is not None:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             p.drawImage(rect, self._image)
         if self._message:
-            p.setPen(Qt.GlobalColor.darkGray)
+            # Empty states and progress notes: one centered line, muted.
+            p.setPen(theme.color("muted"))
+            p.setFont(theme.ui_font())
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
         p.end()
 
@@ -183,6 +191,8 @@ class ApproximationPanel(QWidget):
     """The Approximation tab."""
 
     controls = APPROXIMATION_CONTROLS
+    # A full-width workspace next to Explore (see SandboxWindow.add_panel).
+    placement = "workspace"
 
     BASIN_RESOLUTION = 512
     # Coarse-first: every basin render shows a pass at 1/4 the resolution per
@@ -295,9 +305,8 @@ class ApproximationPanel(QWidget):
         self.certified_canvas = ImageCanvas(self)
         self.report_text = QPlainTextEdit(self)
         self.report_text.setReadOnly(True)
-        mono = QFont("Menlo")
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-        self.report_text.setFont(mono)
+        self.report_text.setFont(theme.mono_font())
+        self.report_text.setPlaceholderText("Score a built map to see its report")
         self.report_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.views.addTab(self.target_canvas, "Target")
         self.views.addTab(self.basin_canvas, "Basins")
@@ -306,7 +315,11 @@ class ApproximationPanel(QWidget):
         self.basin_canvas.zoom_requested.connect(self._on_zoom)
         self.basin_canvas.reset_requested.connect(self._on_reset_view)
         self.basin_canvas.hovered.connect(self._on_hover)
-        self.basin_canvas.set_message("Build a map to see its basins.\nWheel: zoom.  Double-click: reset.")
+        # Empty states: one centered line each (the Info tab lists the
+        # canvas gestures -- see APPROXIMATION_CONTROLS).
+        self.target_canvas.set_message(EMPTY_TARGET)
+        self.basin_canvas.set_message(EMPTY_BASINS)
+        self.certified_canvas.set_message(EMPTY_CERTIFIED)
         self.readout = QLabel("", self)
 
         right = QWidget(self)

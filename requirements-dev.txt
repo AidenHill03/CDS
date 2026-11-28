@@ -1,0 +1,3 @@
+# Test-only dependencies (never bundled into the app).
+# sympy: independent oracle for cdx/test/test_special_polys.py.
+sympy
